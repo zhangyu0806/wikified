@@ -1,0 +1,274 @@
+#!/usr/bin/env node
+'use strict';
+
+// llm-wiki-mcp — LLM Wiki 记忆库的 MCP server（T11）。
+// 薄封装现有 llm-wiki-* CLI，把记忆读写暴露给任意 MCP 客户端
+// (OpenCode/Claude Code/Cursor)，逻辑全在 CLI 里，本文件只做 JSON-RPC 转接。
+// 纯 Node + 手写 JSON-RPC over stdio，零外部依赖（对齐本机 scraper-fallback-mcp 风格）。
+
+const { execFile } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+
+const HOME = os.homedir();
+// BIN 必须和 install.sh 的 BIN_TARGET 保持一致，否则 MCP 会静默找不到 CLI。
+// install.sh 允许用 LLM_WIKI_BIN_TARGET 改安装位置，这里认同一个变量。
+const BIN = process.env.LLM_WIKI_BIN_TARGET || path.join(HOME, '.local', 'bin');
+const ROOT = process.env.LLM_WIKI_ROOT || path.join(HOME, 'llm-wiki');
+// 优先用与本文件同目录的兄弟 CLI：MCP server 自身通常就在 BIN 里，
+// 这样即使 env 没设、安装位置又非默认，也能自洽解析。
+const SELF_DIR = __dirname;
+const resolveCli = (name) => {
+  for (const dir of [SELF_DIR, BIN]) {
+    const p = path.join(dir, name);
+    try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }
+  }
+  return name;  // 交给 PATH 兜底
+};
+const ENRICH = resolveCli('llm-wiki-enrich');
+const EVENT = resolveCli('llm-wiki-event');
+const HEALTH = resolveCli('llm-wiki-health');
+const GRAPHIFY = resolveCli('graphify');
+const GRAPH_JSON = path.join(ROOT, 'graphify-out', 'graph.json');
+
+const run = (file, args, timeoutMs = 8000) =>
+  new Promise((resolve) => {
+    execFile(file, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err && !stdout) resolve({ ok: false, text: (stderr || err.message || 'command failed').trim() });
+      else resolve({ ok: true, text: (stdout || '').trim() });
+    });
+  });
+
+const tools = [
+  {
+    name: 'search_pages',
+    description: 'Search LLM Wiki memory by natural-language query. Returns top relevant wiki pages and memory events, ranked by llm-wiki-enrich.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Natural-language query or task description.' },
+        limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Max candidates (default 5).' },
+        maxChars: { type: 'integer', minimum: 200, maximum: 8000, description: 'Max output chars (default 2000).' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'read_page',
+    description: 'Read a single wiki page or context file by path relative to the LLM Wiki root (e.g. wiki/context/CRITICAL_FACTS.md). Path-traversal is rejected.',
+    inputSchema: {
+      type: 'object',
+      properties: { path: { type: 'string', description: 'Path relative to LLM Wiki root.' } },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'find_related',
+    description: 'Find related concepts/pages for a topic via the Graphify knowledge graph (BFS traversal). Falls back to search_pages if the graph is absent.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        topic: { type: 'string', description: 'Topic or question to traverse from.' },
+        budget: { type: 'integer', minimum: 200, maximum: 4000, description: 'Token budget cap (default 1500).' },
+      },
+      required: ['topic'],
+    },
+  },
+  {
+    name: 'list_recent_raw',
+    description: 'List recent raw source materials (sessions, notes, inbox) awaiting compilation into the wiki.',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Max entries (default 15).' } },
+    },
+  },
+  {
+    name: 'record_event',
+    description: 'Record a typed memory event (fact/decision/bug/preference/etc.) into memory/events. Secrets are auto-redacted by the underlying CLI.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['fact', 'decision', 'bug', 'workflow', 'preference', 'architecture', 'lesson', 'session'], description: 'Event type.' },
+        summary: { type: 'string', description: 'Short event summary.' },
+        details: { type: 'string', description: 'Optional longer details.' },
+        project: { type: 'string', description: 'Optional project id.' },
+      },
+      required: ['type', 'summary'],
+    },
+  },
+  {
+    name: 'lint',
+    description: 'Run llm-wiki-health to report wiki structural issues (stale pages, orphans, broken links) as JSON.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+];
+
+async function dispatch(name, args) {
+  if (name === 'search_pages') {
+    const a = ['--query', String(args.query || ''), '--limit', String(args.limit || 5), '--max-chars', String(args.maxChars || 2000)];
+    return (await run(ENRICH, a)).text;
+  }
+  if (name === 'read_page') {
+    // 防目录穿越 + 防 symlink 逃逸：用 realpathSync 解析真实路径后必须仍在 ROOT 内，
+    // 否则 wiki 内的符号链接可指向 ~/secure-notes 等外部敏感文件造成泄漏。
+    const rel = String(args.path || '');
+    const abs = path.resolve(ROOT, rel);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) throw new Error(`not a file: ${rel}`);
+    const realRoot = fs.realpathSync(ROOT);
+    const realAbs = fs.realpathSync(abs);
+    if (realAbs !== realRoot && !realAbs.startsWith(realRoot + path.sep)) {
+      throw new Error('path escapes wiki root');
+    }
+    return fs.readFileSync(realAbs, 'utf8');
+  }
+  if (name === 'find_related') {
+    if (fs.existsSync(GRAPH_JSON)) {
+      const r = await run(GRAPHIFY, ['query', String(args.topic || ''), '--graph', GRAPH_JSON, '--budget', String(args.budget || 1500)]);
+      if (r.ok && r.text) return r.text;
+    }
+    return (await run(ENRICH, ['--query', String(args.topic || ''), '--limit', '5', '--max-chars', '2000'])).text;
+  }
+  if (name === 'list_recent_raw') {
+    const limit = Number(args.limit || 15);
+    const dirs = ['raw/sessions', 'raw/notes', 'raw/inbox'];
+    const rows = [];
+    for (const d of dirs) {
+      const abs = path.join(ROOT, d);
+      if (!fs.existsSync(abs)) continue;
+      for (const name of fs.readdirSync(abs)) {
+        const f = path.join(abs, name);
+        try {
+          const st = fs.statSync(f);
+          if (st.isFile()) rows.push({ path: `${d}/${name}`, mtime: st.mtimeMs });
+        } catch { /* skip unreadable */ }
+      }
+    }
+    rows.sort((x, y) => y.mtime - x.mtime);
+    return rows.slice(0, limit).map((r) => r.path).join('\n') || '(no raw materials)';
+  }
+  if (name === 'record_event') {
+    // 前置校验 type 白名单（与 llm-wiki-event 的 EVENT_TYPES 对齐），
+    // 给出友好错误而非依赖 CLI argparse 的栈式报错。
+    const TYPES = ['fact', 'decision', 'bug', 'workflow', 'preference', 'architecture', 'lesson', 'session'];
+    const t = String(args.type || '');
+    if (!TYPES.includes(t)) throw new Error(`invalid type: ${t} (allowed: ${TYPES.join(', ')})`);
+    const summary = String(args.summary || '').trim();
+    if (!summary) throw new Error('summary is required');
+    const a = ['--type', t, '--source', 'mcp'];
+    if (args.details) a.push('--details', String(args.details));
+    if (args.project) a.push('--project', String(args.project));
+    a.push(summary);
+    return (await run(EVENT, a)).text;
+  }
+  if (name === 'lint') {
+    return (await run(HEALTH, ['--json'])).text;
+  }
+  throw new Error(`Unknown tool: ${name}`);
+}
+
+// 传输框架：MCP stdio 规范（2025-06-18）用换行分隔 JSON（NDJSON），
+// 且 Codex CLI 只按 '\n' 定界；而部分客户端沿用 LSP 风格 Content-Length 帧。
+// 两者都要支持，否则任一侧会静默挂起（不匹配时既无报错也无提示）。
+// 策略：按首个非空字节判定入向框架（'{' => NDJSON，否则按 header 解析），
+// 出向镜像入向，未判定前默认 NDJSON（规范默认，也是 Codex 唯一支持的）。
+const FRAMING = { NDJSON: 'ndjson', HEADER: 'header' };
+let framing = null;
+const MAX_LINE_BYTES = 8 * 1024 * 1024;
+
+let buffer = Buffer.alloc(0);
+process.stdin.on('data', (chunk) => { buffer = Buffer.concat([buffer, chunk]); readMessages(); });
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
+
+function detectFraming() {
+  for (let i = 0; i < buffer.length; i += 1) {
+    const b = buffer[i];
+    if (b === 0x20 || b === 0x09 || b === 0x0a || b === 0x0d) continue;
+    return b === 0x7b ? FRAMING.NDJSON : FRAMING.HEADER;
+  }
+  return null;
+}
+
+function readMessages() {
+  while (true) {
+    if (framing === null) {
+      framing = detectFraming();
+      if (framing === null) return;
+    }
+    const consumed = framing === FRAMING.NDJSON ? readOneNdjson() : readOneHeaderFramed();
+    if (!consumed) return;
+
+  }
+}
+
+function readOneNdjson() {
+  const nl = buffer.indexOf(0x0a);
+  if (nl === -1) {
+    if (buffer.length > MAX_LINE_BYTES) {
+      sendError(null, -32700, 'Message exceeds maximum line length');
+      buffer = Buffer.alloc(0);
+    }
+    return false;
+  }
+  const line = buffer.subarray(0, nl).toString('utf8').trim();
+  buffer = buffer.subarray(nl + 1);
+  if (line) decodeAndHandle(line);
+  return true;
+}
+
+function readOneHeaderFramed() {
+  const headerEnd = buffer.indexOf('\r\n\r\n');
+  if (headerEnd === -1) return false;
+  const header = buffer.subarray(0, headerEnd).toString('utf8');
+  const m = header.match(/Content-Length:\s*(\d+)/i);
+  if (!m) { buffer = buffer.subarray(headerEnd + 4); return true; }
+  const bodyStart = headerEnd + 4;
+  const bodyEnd = bodyStart + Number(m[1]);
+  if (buffer.length < bodyEnd) return false;
+  const body = buffer.subarray(bodyStart, bodyEnd).toString('utf8');
+  buffer = buffer.subarray(bodyEnd);
+  decodeAndHandle(body);
+  return true;
+}
+
+function decodeAndHandle(raw) {
+  try { handleMessage(JSON.parse(raw)); }
+  catch (e) { sendError(null, -32700, e instanceof Error ? e.message : 'Parse error'); }
+}
+
+function send(message) {
+  const body = JSON.stringify(message);
+  if (framing === FRAMING.HEADER) {
+    process.stdout.write(`Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`);
+  } else {
+    process.stdout.write(`${body}\n`);
+  }
+}
+const sendResult = (id, result) => send({ jsonrpc: '2.0', id, result });
+const sendError = (id, code, message) => send({ jsonrpc: '2.0', id, error: { code, message } });
+
+function handleMessage(message) {
+  if (message.jsonrpc !== '2.0') {
+    if (message.id !== undefined) sendError(message.id, -32600, 'Invalid JSON-RPC version');
+    return;
+  }
+  if (message.method === 'initialize') {
+    sendResult(message.id, {
+      protocolVersion: '2024-11-05',
+      capabilities: { tools: {} },
+      serverInfo: { name: 'llm-wiki', version: '0.1.0' },
+    });
+    return;
+  }
+  if (message.method === 'notifications/initialized') return;
+  if (message.method === 'tools/list') { sendResult(message.id, { tools }); return; }
+  if (message.method === 'tools/call') {
+    const { name, arguments: args = {} } = message.params || {};
+    dispatch(name, args)
+      .then((text) => sendResult(message.id, { content: [{ type: 'text', text: String(text) }] }))
+      .catch((e) => sendError(message.id, -32000, e instanceof Error ? e.message : String(e)));
+    return;
+  }
+  if (message.id !== undefined) sendError(message.id, -32601, `Unsupported method: ${message.method}`);
+}

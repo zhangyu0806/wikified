@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""按 event id 去重 llm-wiki 的 append-only jsonl，并做确定性排序。
+
+背景
+----
+`memory/events/*.jsonl` 与 `raw/inbox/corrections.jsonl` 在 .gitattributes 里
+声明为 `merge=union`：跨机 pull 时 git 保留双方所有行，不产生冲突标记，
+但会留下重复行。本脚本是该策略的必要配套。
+
+确定性要求（重要）
+------------------
+home 和 office 各自独立运行本脚本，必须产出**字节完全一致**的文件，
+否则每次同步都会重新出现 diff，形成永久冲突。因此：
+  - 排序键固定为 (timestamp, id)，不依赖行在文件中的原始顺序
+  - 同 id 冲突时按 (timestamp, sha256) 确定性选胜者，不用「最后出现的赢」
+  - 输出统一 LF、无尾随空行差异、json 键序保持原样（不重新序列化）
+
+用法
+----
+  llm-wiki-dedupe-events                 # 处理默认路径（~/llm-wiki）
+  llm-wiki-dedupe-events --root DIR
+  llm-wiki-dedupe-events --check         # 只报告，不写盘（exit 1 = 需要清理）
+  llm-wiki-dedupe-events --json
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+CONFLICT_MARKERS = ("<<<<<<< ", "=======", ">>>>>>> ")
+
+
+def default_root() -> Path:
+    env = os.environ.get("LLM_WIKI_ROOT")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / "llm-wiki"
+
+
+def target_files(root: Path) -> list[Path]:
+    files: list[Path] = sorted((root / "memory" / "events").glob("*.jsonl"))
+    corrections = root / "raw" / "inbox" / "corrections.jsonl"
+    if corrections.exists():
+        files.append(corrections)
+    return [f for f in files if f.exists()]
+
+
+def sha256_hex(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class DedupeError(RuntimeError):
+    pass
+
+
+def process_file(path: Path, *, check_only: bool) -> dict:
+    raw = path.read_text(encoding="utf-8")
+
+    # 冲突标记 = union 策略失效或人工误操作，绝不能静默跳过
+    for marker in CONFLICT_MARKERS:
+        for lineno, line in enumerate(raw.splitlines(), 1):
+            if line.startswith(marker):
+                raise DedupeError(
+                    f"{path}: 第 {lineno} 行存在 git 冲突标记 {marker.strip()!r}；"
+                    "请先手工解决冲突再运行本脚本"
+                )
+
+    records: dict[str, dict] = {}
+    malformed: list[int] = []
+    no_id: list[int] = []
+    total = 0
+
+    for lineno, line in enumerate(raw.splitlines(), 1):
+        if not line.strip():
+            continue
+        total += 1
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            malformed.append(lineno)
+            continue
+        if not isinstance(obj, dict):
+            malformed.append(lineno)
+            continue
+        ev_id = obj.get("id")
+        if not isinstance(ev_id, str) or not ev_id:
+            no_id.append(lineno)
+            continue
+
+        digest = sha256_hex(line)
+        cand = {
+            "line": line,
+            "timestamp": str(obj.get("timestamp") or ""),
+            "digest": digest,
+        }
+        prev = records.get(ev_id)
+        if prev is None:
+            records[ev_id] = cand
+            continue
+        if prev["digest"] == digest:
+            # 纯重复行，丢弃即可
+            continue
+        # 同 id 不同内容：确定性选择 (timestamp, digest) 最大者
+        prev_key = (prev["timestamp"], prev["digest"])
+        cand_key = (cand["timestamp"], cand["digest"])
+        if cand_key > prev_key:
+            records[ev_id] = cand
+        cand.setdefault("conflict", True)
+        prev.setdefault("conflict", True)
+
+    if malformed or no_id:
+        raise DedupeError(
+            f"{path}: 发现 {len(malformed)} 行非法 JSON、{len(no_id)} 行缺少 id "
+            f"(行号 malformed={malformed[:10]} no_id={no_id[:10]})；"
+            "拒绝改写以免丢数据"
+        )
+
+    ordered = sorted(records.values(), key=lambda r: (r["timestamp"], r["line"]))
+    out = "".join(r["line"] + "\n" for r in ordered)
+    changed = out != raw
+    conflicts = sum(1 for r in records.values() if r.get("conflict"))
+
+    if changed and not check_only:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(out, encoding="utf-8", newline="\n")
+        os.replace(tmp, path)
+
+    return {
+        "file": str(path),
+        "lines_in": total,
+        "lines_out": len(ordered),
+        "removed": total - len(ordered),
+        "id_conflicts": conflicts,
+        "changed": changed,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="按 event id 去重 llm-wiki jsonl")
+    ap.add_argument("--root", type=Path, default=None)
+    ap.add_argument("--check", action="store_true", help="只报告，不写盘")
+    ap.add_argument("--json", dest="as_json", action="store_true")
+    args = ap.parse_args()
+
+    root = (args.root or default_root()).expanduser()
+    if not root.is_dir():
+        print(f"error: root 不存在: {root}", file=sys.stderr)
+        return 2
+
+    files = target_files(root)
+    results = []
+    try:
+        for f in files:
+            results.append(process_file(f, check_only=args.check))
+    except DedupeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    removed = sum(r["removed"] for r in results)
+    conflicts = sum(r["id_conflicts"] for r in results)
+    changed_any = any(r["changed"] for r in results)
+
+    if args.as_json:
+        print(json.dumps(
+            {
+                "root": str(root),
+                "files": results,
+                "removed_total": removed,
+                "id_conflicts_total": conflicts,
+                "changed": changed_any,
+                "mode": "check" if args.check else "write",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+    else:
+        for r in results:
+            flag = "CHANGED" if r["changed"] else "clean"
+            print(
+                f"{flag:8s} {r['file']}  in={r['lines_in']} out={r['lines_out']} "
+                f"removed={r['removed']} id_conflicts={r['id_conflicts']}"
+            )
+        print(f"--- 合计: 去重 {removed} 行，同 id 内容冲突 {conflicts} 处 ---")
+
+    if args.check and changed_any:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Scriptable health check for ~/llm-wiki.
+
+The generated dashboard is still owned by llm-wiki-refresh. This command is for
+automation: it prints the same classes of problems and can exit non-zero in
+strict mode. Sensitive matches are reported by file and keyword class only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import re
+import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+
+DEFAULT_ROOT = Path.home() / "llm-wiki"
+NEXT_ACTION_RE = re.compile(r"(后续|下一步|待办|TODO|Next)", re.IGNORECASE)
+SENSITIVE_TERMS = {
+    "authorization": re.compile(r"\bAuthorization\b", re.IGNORECASE),
+    "bearer": re.compile(r"\bBearer\b", re.IGNORECASE),
+    "api-key": re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
+    "token": re.compile(r"\btoken\b", re.IGNORECASE),
+    "password": re.compile(r"\bpassword\b", re.IGNORECASE),
+    "secret": re.compile(r"\bsecret\b", re.IGNORECASE),
+}
+NON_COMPILABLE_QUALITY_GATES = {"partial_excerpt_only", "failed_no_transcript_or_full_article"}
+NON_COMPILABLE_STATUSES = {"needs_full_text", "deferred"}
+
+
+@dataclass(frozen=True)
+class Page:
+    path: Path
+    rel: str
+    title: str
+    updated: str
+    status: str
+    quality_gate: str
+    sources: list[str]
+    body: str
+
+
+@dataclass(frozen=True)
+class HealthReport:
+    stale_pages: list[str]
+    active_projects_without_next: list[str]
+    raw_needing_full_text: list[str]
+    uncompiled_raw: list[str]
+    broken_links: list[str]
+    sensitive_tool_hints: list[str]
+
+    @property
+    def issue_count(self) -> int:
+        return sum(len(items) for items in asdict(self).values())
+
+
+def fail(message: str) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def markdown_files(path: Path) -> list[Path]:
+    if not path.exists():
+        return []
+    return sorted(item for item in path.rglob("*.md") if item.is_file())
+
+
+def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    if not text.startswith("---\n"):
+        return {}, text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return {}, text
+    raw = text[4:end].strip()
+    body = text[end + 5 :]
+    data: dict[str, str] = {}
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        data[key.strip()] = value.strip().strip('"')
+    return data, body
+
+
+def parse_list(value: str) -> list[str]:
+    value = value.strip()
+    if not value.startswith("[") or not value.endswith("]"):
+        return []
+    inner = value[1:-1].strip()
+    if not inner:
+        return []
+    return [item.strip().strip('"\'') for item in inner.split(",") if item.strip()]
+
+
+def first_heading(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return ""
+
+
+def parse_page(root: Path, path: Path) -> Page:
+    text = read_text(path)
+    fm, body = split_frontmatter(text)
+    return Page(
+        path=path,
+        rel=path.relative_to(root).as_posix(),
+        title=fm.get("title") or first_heading(body) or path.stem,
+        updated=fm.get("updated") or fm.get("date") or fm.get("created") or "",
+        status=fm.get("status", ""),
+        quality_gate=fm.get("quality_gate", ""),
+        sources=parse_list(fm.get("sources", "")),
+        body=body,
+    )
+
+
+def has_next_action(page: Page) -> bool:
+    if NEXT_ACTION_RE.search(page.body):
+        return True
+    return any(marker in page.body for marker in ("- [ ]", "TODO", "todo"))
+
+
+def can_compile_raw(page: Page) -> bool:
+    if page.quality_gate in NON_COMPILABLE_QUALITY_GATES:
+        return False
+    if page.status in NON_COMPILABLE_STATUSES:
+        return False
+    return True
+
+
+def needs_full_text(page: Page) -> bool:
+    if page.status in {"needs_full_text", "deferred"}:
+        return True
+    if page.status == "compiled":
+        return False
+    return page.quality_gate in NON_COMPILABLE_QUALITY_GATES
+
+
+def strip_code(text: str) -> str:
+    """Remove fenced code blocks and inline code so wiki-link extraction
+    doesn't pick up `[[` sequences that are actually code examples
+    (e.g. SGR escape sequences like ``^[[<0;96;99m``)."""
+    # Remove fenced code blocks ```...``` (multiline)
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    # Remove indented (4-space) code blocks line by line
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("    ") or line.startswith("\t"):
+            continue
+        out_lines.append(line)
+    text = "\n".join(out_lines)
+    # Remove inline code `...`
+    text = re.sub(r"`[^`]*`", "", text)
+    return text
+
+
+def link_targets(text: str) -> list[str]:
+    return re.findall(r"\[\[([^\]]+)\]\]", strip_code(text))
+
+
+def target_exists(root: Path, target: str, slugs: set[str]) -> bool:
+    clean = target.split("|", 1)[0].split("#", 1)[0].strip()
+    if not clean:
+        return True
+    if clean in slugs or Path(clean).stem in slugs:
+        return True
+    return (root / f"{clean}.md").exists()
+
+
+def referenced_raws(root: Path, pages: list[Page]) -> set[str]:
+    log_path = root / "wiki" / "log.md"
+    log_text = read_text(log_path) if log_path.exists() else ""
+    combined = log_text + "\n" + "\n".join("\n".join(page.sources) for page in pages)
+    return set(re.findall(r"raw/(?:sessions|notes|articles)/[^`\]\s,]+\.md", combined))
+
+
+def check(root: Path, stale_days: int) -> HealthReport:
+    today = dt.datetime.now().astimezone().date()
+    pages = [parse_page(root, path) for path in markdown_files(root / "wiki")]
+    raw_files = markdown_files(root / "raw")
+
+    stale_pages: list[str] = []
+    for page in pages:
+        if not page.updated:
+            continue
+        try:
+            updated = dt.date.fromisoformat(page.updated[:10])
+        except ValueError:
+            continue
+        age = (today - updated).days
+        if age > stale_days:
+            stale_pages.append(f"{page.rel} ({age} days)")
+
+    active_projects_without_next = [
+        page.rel
+        for page in pages
+        if page.rel.startswith("wiki/projects/") and page.status == "active" and not has_next_action(page)
+    ]
+
+    refs = referenced_raws(root, pages)
+    raw_pages = [parse_page(root, path) for path in raw_files]
+    raw_needing_full_text = [
+        page.rel
+        for page in raw_pages
+        if needs_full_text(page)
+    ]
+
+    uncompiled_raw = []
+    for page in raw_pages:
+        if not can_compile_raw(page):
+            continue
+        if page.rel not in refs:
+            uncompiled_raw.append(page.rel)
+
+    slugs = {Path(page.rel).stem for page in pages} | {"SCHEMA", "Today", "LLM Wiki Mirror", "projects", "health"}
+    broken_links: list[str] = []
+    for page in pages:
+        if page.rel == "wiki/dashboards/health.md":
+            continue
+        for target in link_targets(page.body):
+            if not target_exists(root, target, slugs):
+                broken_links.append(f"{page.rel} -> [[{target}]]")
+
+    sensitive_tool_hints: list[str] = []
+    for path in markdown_files(root / "wiki" / "tools"):
+        text = read_text(path)
+        found = sorted(name for name, pattern in SENSITIVE_TERMS.items() if pattern.search(text))
+        if found:
+            sensitive_tool_hints.append(f"{path.relative_to(root).as_posix()}: {', '.join(found)}")
+
+    return HealthReport(
+        stale_pages=stale_pages,
+        active_projects_without_next=active_projects_without_next,
+        raw_needing_full_text=raw_needing_full_text,
+        uncompiled_raw=uncompiled_raw,
+        broken_links=broken_links,
+        sensitive_tool_hints=sensitive_tool_hints,
+    )
+
+
+def print_markdown(report: HealthReport) -> None:
+    print("# LLM Wiki Health")
+    print()
+    sections = (
+        ("超过阈值未更新页面", report.stale_pages),
+        ("Active 项目缺少下一步", report.active_projects_without_next),
+        ("待完整抓取 raw", report.raw_needing_full_text),
+        ("可能未编译 raw", report.uncompiled_raw),
+        ("Obsidian/Wiki 断链", report.broken_links),
+        ("工具页敏感信息关键词提示", report.sensitive_tool_hints),
+    )
+    for title, items in sections:
+        print(f"## {title}")
+        print()
+        if items:
+            for item in items:
+                print(f"- `{item}`")
+        else:
+            print("- 暂无")
+        print()
+    print(f"issue_count={report.issue_count}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run scriptable checks for an LLM Wiki root.")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="LLM Wiki root directory")
+    parser.add_argument("--stale-days", type=int, default=30, help="Stale page threshold")
+    parser.add_argument("--json", action="store_true", help="Print JSON")
+    parser.add_argument("--strict", action="store_true", help="Exit 1 when any issue is found")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    root = args.root.expanduser().resolve()
+    if not (root / "SCHEMA.md").exists():
+        fail(f"not an LLM Wiki root, missing SCHEMA.md: {root}")
+    report = check(root, args.stale_days)
+    if args.json:
+        print(json.dumps(asdict(report) | {"issue_count": report.issue_count}, ensure_ascii=False, indent=2))
+    else:
+        print_markdown(report)
+    if args.strict and report.issue_count:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

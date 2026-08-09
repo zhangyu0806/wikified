@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# llm-wiki-govern — 节流 + 文件锁 的 LLM Wiki 周期治理器
+# 仿 omo-refresh：会话启动时调用，7 天内已跑过则秒退，绝不阻塞会话。
+# WSL2 cron 未必常驻，故用「会话启动节流」而非 crontab。
+#
+# 用法：
+#   llm-wiki-govern           节流命中则静默秒退；过期则跑 health + promote-notes
+#   llm-wiki-govern --force    忽略节流强制跑
+#   llm-wiki-govern --status   只看距上次治理多久
+#
+# 退出码恒为 0：治理失败不影响会话，下个窗口会重试。
+
+set -uo pipefail
+
+THROTTLE_SECONDS=${LLM_WIKI_GOVERN_THROTTLE:-604800}   # 7 天
+ROOT="${LLM_WIKI_ROOT:-$HOME/llm-wiki}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-wiki-govern"
+STAMP="$CACHE_DIR/last-run"
+LOCK="$CACHE_DIR/lock"
+HEALTH_OUT="$ROOT/wiki/dashboards/health-weekly.json"
+PROMOTE_OUT="$ROOT/raw/inbox/promote-suggestions.json"
+
+command -v llm-wiki-health >/dev/null 2>&1 || exit 0
+[ -d "$ROOT" ] || exit 0
+mkdir -p "$CACHE_DIR" "$ROOT/wiki/dashboards" "$ROOT/raw/inbox"
+
+now=$(date +%s)
+
+stamp_age() {
+  [ -f "$STAMP" ] || { echo "-1"; return; }
+  local last; last=$(cat "$STAMP" 2>/dev/null || echo 0)
+  echo $(( now - last ))
+}
+
+if [ "${1:-}" = "--status" ]; then
+  age=$(stamp_age)
+  if [ "$age" -lt 0 ]; then echo "上次治理：从未"
+  elif [ "$age" -lt 86400 ]; then echo "上次治理：$((age/3600)) 小时前"
+  else echo "上次治理：$((age/86400)) 天前"; fi
+  echo "节流窗口：$((THROTTLE_SECONDS/86400)) 天"
+  exit 0
+fi
+
+FORCE=0
+[ "${1:-}" = "--force" ] && FORCE=1
+
+# 闸门1：时间节流（多窗口里绝大多数走这条秒退）
+if [ "$FORCE" -eq 0 ]; then
+  age=$(stamp_age)
+  [ "$age" -ge 0 ] && [ "$age" -lt "$THROTTLE_SECONDS" ] && exit 0
+fi
+
+# 闸门2：flock 非阻塞。拿不到锁=别的窗口正在治理，直接退
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+
+# 拿锁后 double-check 时间戳，防紧接着重复跑
+if [ "$FORCE" -eq 0 ]; then
+  age=$(stamp_age)
+  [ "$age" -ge 0 ] && [ "$age" -lt "$THROTTLE_SECONDS" ] && exit 0
+fi
+
+rc=0
+timeout 120 llm-wiki-health --json >"$HEALTH_OUT" 2>/dev/null || rc=$?
+timeout 120 llm-wiki-promote-notes --json >"$PROMOTE_OUT" 2>/dev/null || rc=$?
+
+# 只有成功才写时间戳；失败不写，下个窗口重试
+[ "$rc" -eq 0 ] && echo "$now" >"$STAMP"
+
+exit 0

@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Capture a quick note into ~/llm-wiki/raw/notes, then refresh derived wiki pages."""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+
+WIKI_ROOT = Path.home() / "llm-wiki"
+NOTES_DIR = WIKI_ROOT / "raw" / "notes"
+REFRESH_COMMAND = Path.home() / ".local" / "bin" / "llm-wiki-refresh"
+
+
+def slugify(text: str, fallback: str) -> str:
+    ascii_text = text.encode("ascii", "ignore").decode("ascii").lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")
+    return slug[:48].strip("-") or fallback
+
+
+def yaml_quote(value: str) -> str:
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def infer_note_type(text: str) -> str:
+    lowered = text.lower()
+    if any(keyword in text for keyword in ("坑", "报错", "失败", "bug", "问题")) or "error" in lowered:
+        return "pitfall"
+    if any(keyword in text for keyword in ("偏好", "以后", "默认", "喜欢")):
+        return "preference"
+    if any(keyword in text for keyword in ("待办", "todo", "要做", "记得")) or "todo" in lowered:
+        return "todo"
+    if any(keyword in text for keyword in ("命令", "运行", "执行")) or lowered.startswith(("git ", "bun ", "npm ", "python ", "ssh ")):
+        return "command"
+    return "fact"
+
+
+def build_note(title: str, text: str, now: datetime) -> str:
+    note_type = infer_note_type(text)
+    timestamp = now.strftime("%Y-%m-%d %H:%M")
+    return f"""---
+title: {yaml_quote(title)}
+date: {yaml_quote(timestamp)}
+source_type: quick_note
+status: captured
+tags: [quick-note, {note_type}]
+---
+
+# {title}
+
+## 原始记录
+
+{text}
+
+## 初步归类
+
+- 类型：{note_type}
+- 相关页面：待定
+
+## 编译建议
+
+- 是否需要进入 wiki：later
+- 建议目标：待定
+"""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Capture quick notes into ~/llm-wiki/raw/notes.")
+    parser.add_argument("text", nargs="*", help="Quick note content. If omitted, stdin is used.")
+    parser.add_argument("--title", help="Optional note title.")
+    parser.add_argument("--no-sync", action="store_true", help="Do not run llm-wiki-refresh after capture.")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    text = " ".join(args.text).strip() if args.text else sys.stdin.read().strip()
+    if not text:
+        print("error: note content is required", file=sys.stderr)
+        return 2
+
+    now = datetime.now()
+    title = args.title.strip() if args.title else text.splitlines()[0].strip()[:60]
+    title = title or "Quick note"
+    filename = f"{now.strftime('%Y-%m-%d-%H%M')}-{slugify(title, 'quick-note')}.md"
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    path = NOTES_DIR / filename
+    if path.exists():
+        filename = f"{now.strftime('%Y-%m-%d-%H%M%S')}-{slugify(title, 'quick-note')}.md"
+        path = NOTES_DIR / filename
+    path.write_text(build_note(title, text, now), encoding="utf-8")
+    print(f"note={path}")
+
+    if not args.no_sync and REFRESH_COMMAND.exists():
+        subprocess.run([str(REFRESH_COMMAND)], check=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

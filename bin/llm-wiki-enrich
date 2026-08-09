@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""Retrieve short, redacted context from LLM Wiki for touched files.
+
+This implements a lightweight touched-file enrichment pass: given one or more
+file paths and an optional query, it ranks local memory events and compiled wiki
+pages, then prints a bounded Markdown context block suitable for pre-prompt use.
+
+The ``--session-start`` mode takes no query: it assembles an always-injectable
+memory digest (critical facts, active projects, wiki index, knowledge graph) for
+injection at session start, degrading gracefully when the curated
+``wiki/context/`` layer is absent.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,'\"]+(?:\s+[a-z0-9._~+/=-]{8,})?"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)([\"']?(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*)([\"']?)[^\s,'\"&]+([\"']?)"), r"\1\2[REDACTED]\3"),
+    (re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|password|passwd|pwd)=)[^\s&#]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{16,}"), "Bearer [REDACTED]"),
+    (re.compile(r"\b(sk-[a-zA-Z0-9_-]{16,})\b"), "[REDACTED_OPENAI_KEY]"),
+    (re.compile(r"\b(gh[pousr]_[a-zA-Z0-9_]{20,})\b"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"\b(xox[baprs]-[a-zA-Z0-9-]{20,})\b"), "[REDACTED_SLACK_TOKEN]"),
+    (re.compile(r"\b(eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})\b"), "[REDACTED_JWT]"),
+]
+TOKEN_RE = re.compile(r"[a-zA-Z0-9_./:-]{2,}")
+STOP_TOKENS = {
+    "and",
+    "or",
+    "the",
+    "for",
+    "with",
+    "from",
+    "this",
+    "that",
+    "into",
+    "file",
+    "files",
+    "config",
+}
+MAX_EVENT_LINES = 5000
+MAX_WIKI_BYTES = 64 * 1024
+
+# Session-memory injection canary. Lives ONLY in this script's --session-start
+# output (and is intentionally absent from every file under ~/llm-wiki) so it can
+# verify whether the digest reached the model's system prompt: if asked for it the
+# agent can only answer when injection worked, never by searching the wiki.
+SESSION_CANARY = "PURPLE-NARWHAL-8842"
+
+
+@dataclass(frozen=True)
+class Candidate:
+    score: float
+    source: str
+    title: str
+    text: str
+
+
+def redact(text: str) -> str:
+    redacted = text
+    for pattern, replacement in SECRET_PATTERNS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
+def root_path() -> Path:
+    return Path(os.environ.get("LLM_WIKI_ROOT", "~/llm-wiki")).expanduser()
+
+
+def normalize_files(files: list[str], cwd: Path) -> list[str]:
+    normalized: list[str] = []
+    for file_name in files:
+        path = Path(file_name).expanduser()
+        if path.is_absolute():
+            try:
+                normalized.append(str(path.relative_to(cwd)))
+            except ValueError:
+                normalized.append(str(path))
+        else:
+            normalized.append(str(path))
+    return sorted(dict.fromkeys(normalized))
+
+
+def tokenize(parts: Iterable[str]) -> set[str]:
+    tokens: set[str] = set()
+    for part in parts:
+        for token in TOKEN_RE.findall(part.lower()):
+            tokens.add(token)
+            path = Path(token)
+            if path.name:
+                tokens.add(path.name.lower())
+            if path.stem:
+                tokens.add(path.stem.lower())
+    return {token for token in tokens if len(token) >= 3 and token not in STOP_TOKENS}
+
+
+def parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def decayed_confidence(event: dict[str, Any]) -> float:
+    try:
+        base = float(event["confidence"]) if "confidence" in event else 0.5
+    except (TypeError, ValueError):
+        base = 0.5
+    try:
+        half_life = max(1.0, float(event.get("half_life_days", 90)))
+    except (TypeError, ValueError):
+        half_life = 90.0
+    timestamp = parse_time(event.get("timestamp"))
+    if timestamp is None:
+        return base
+    age_days = max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds() / 86400)
+    return base * math.pow(0.5, age_days / half_life)
+
+
+def load_events(root: Path) -> list[dict[str, Any]]:
+    events_dir = root / "memory" / "events"
+    if not events_dir.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    for path in sorted(events_dir.glob("*.jsonl"), reverse=True):
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict) and item.get("lifecycle", "active") != "deprecated":
+                events.append(item)
+                if len(events) >= MAX_EVENT_LINES:
+                    return events
+    return events
+
+
+def event_candidates(events: list[dict[str, Any]], query_tokens: set[str], touched_files: list[str], project: str | None) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    touched_set = set(touched_files)
+    touched_names = {Path(item).name.lower() for item in touched_files}
+    touched_long_names = {name for name in touched_names if len(name) >= 4 or "." in name}
+    for event in events:
+        if project and event.get("project") not in {project, None, ""}:
+            continue
+        files = [str(item) for item in event.get("files", []) if isinstance(item, str)]
+        concepts = [str(item) for item in event.get("concepts", []) if isinstance(item, str)]
+        text = " ".join([str(event.get("summary", "")), str(event.get("details", "")), *files, *concepts])
+        tokens = tokenize([text])
+        overlap = len(query_tokens & tokens)
+        file_score = 0
+        for file_name in files:
+            lowered = file_name.lower()
+            if file_name in touched_set or Path(file_name).name.lower() in touched_names:
+                file_score += 6
+            elif any(name and name in lowered for name in touched_long_names):
+                file_score += 3
+        score = file_score + overlap + (2.0 * decayed_confidence(event))
+        if score <= 0:
+            continue
+        when = str(event.get("timestamp", ""))[:19]
+        title = f"{event.get('type', 'event')} {event.get('id', '')} {when}".strip()
+        body = str(event.get("summary", ""))
+        if event.get("details"):
+            body = f"{body}\n{event['details']}"
+        if files:
+            body = f"{body}\nFiles: {', '.join(files)}"
+        candidates.append(Candidate(score=score, source="memory-event", title=title, text=body))
+    return candidates
+
+
+def wiki_candidates(root: Path, query_tokens: set[str], limit_files: int = 80) -> list[Candidate]:
+    wiki_dir = root / "wiki"
+    if not wiki_dir.exists():
+        return []
+    candidates: list[Candidate] = []
+    paths = [path for path in wiki_dir.rglob("*.md") if path.is_file()]
+    for path in paths[:limit_files]:
+        with path.open("rb") as handle:
+            text = handle.read(MAX_WIKI_BYTES).decode("utf-8", errors="replace")
+        title = path.relative_to(wiki_dir).as_posix()
+        tokens = tokenize([title, text[:12000]])
+        overlap = len(query_tokens & tokens)
+        if overlap <= 0:
+            continue
+        title_bonus = 2 if query_tokens & tokenize([title]) else 0
+        excerpt = extract_excerpt(text, query_tokens)
+        candidates.append(Candidate(score=float(overlap + title_bonus), source="wiki-page", title=title, text=excerpt))
+    return candidates
+
+
+def extract_excerpt(text: str, query_tokens: set[str], max_lines: int = 8) -> str:
+    lines = [line.rstrip() for line in text.splitlines()]
+    scored: list[tuple[int, int, str]] = []
+    for idx, line in enumerate(lines):
+        lower = line.lower()
+        score = sum(1 for token in query_tokens if token in lower)
+        if score > 0:
+            scored.append((score, idx, line))
+    if not scored:
+        return "\n".join(lines[:max_lines])
+    scored.sort(reverse=True)
+    selected = sorted({idx for _, idx, _ in scored[:max_lines]})
+    return "\n".join(lines[idx] for idx in selected if lines[idx].strip())
+
+
+def graph_hint(root: Path, query_tokens: set[str]) -> Candidate | None:
+    report = root / "graphify-out" / "GRAPH_REPORT.md"
+    if not report.exists():
+        report = Path.cwd() / "graphify-out" / "GRAPH_REPORT.md"
+    if not report.exists():
+        return None
+    text = report.read_text(encoding="utf-8", errors="replace")
+    excerpt = extract_excerpt(text, query_tokens, max_lines=5)
+    if not excerpt.strip():
+        return None
+    return Candidate(score=0.75, source="graphify-report", title=str(report), text=excerpt)
+
+
+def read_text_head(path: Path, max_bytes: int = MAX_WIKI_BYTES) -> str:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(max_bytes).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def take_lines(text: str, max_lines: int, *, skip_blank_runs: bool = True) -> str:
+    out: list[str] = []
+    blank = False
+    for line in text.splitlines():
+        stripped = line.rstrip()
+        if not stripped:
+            if skip_blank_runs and blank:
+                continue
+            blank = True
+        else:
+            blank = False
+        out.append(stripped)
+        if len(out) >= max_lines:
+            break
+    return "\n".join(out).strip()
+
+
+def section(title: str, body: str) -> str | None:
+    body = body.strip()
+    if not body:
+        return None
+    first, _, rest = body.partition("\n")
+    if re.match(r"^#{1,2}\s", first):
+        body = rest.strip() or body
+    return f"### {title}\n{body}"
+
+
+# Backlog C: separate "status" from "next-action" at injection time.
+# Active-projects lines like "- 下一步：…" / "- Next：…" are next-actions, not status.
+# Stripping them from the always-on session-start block stops the agent from treating
+# recalled projects as a task queue. The full file (with next-actions) stays on disk and
+# is still reachable on demand via Gap B `--query` recall when the user engages a project.
+_NEXT_ACTION_RE = re.compile(r"^\s*(?:[-*+]\s*)?(?:下一步|下步|next步|next|todo|待办)\s*[:：]", re.IGNORECASE)
+
+
+def strip_next_actions(text: str) -> tuple[str, int]:
+    """Drop next-action bullet lines, keep status/heading lines. Returns (text, dropped)."""
+    kept: list[str] = []
+    dropped = 0
+    for line in text.splitlines():
+        if _NEXT_ACTION_RE.match(line):
+            dropped += 1
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip(), dropped
+
+
+# Backlog B: open-loops only belongs to UNRESOLVED items. Lines already marked done
+# (✅ / [x]) shouldn't keep eating injection budget or dilute the "open" signal once the
+# user forgets to delete them. Filtering at inject time is the lightweight fix — the full
+# self-expiring/decay system stays deferred until open-loops actually grows large.
+_DONE_LINE_RE = re.compile(r"^\s*(?:[-*+]\s*)?(?:✅|✓|☑|\[x\]|\[X\]|~~)")
+
+
+def drop_done_lines(text: str) -> str:
+    """Drop lines marking a completed item (✅/[x]/strikethrough). Keep everything else."""
+    return "\n".join(line for line in text.splitlines() if not _DONE_LINE_RE.match(line)).strip()
+
+
+def session_start_sections(root: Path, max_projects: int) -> list[str]:
+    """Assemble session-start digest sections in priority order.
+
+    Prefers the curated wiki/context/ layer; falls back to index.md + Today.md so
+    the block is useful before the context layer is built.
+    """
+    context_dir = root / "wiki" / "context"
+    parts: list[str] = []
+
+    critical = read_text_head(context_dir / "CRITICAL_FACTS.md")
+    block = section("Critical Facts", take_lines(critical, 40)) if critical else None
+    if block:
+        parts.append(block)
+
+    active = read_text_head(context_dir / "active-projects.md")
+    if active:
+        status_only, dropped = strip_next_actions(take_lines(active, 40))
+        status_only = drop_done_lines(status_only)
+        if dropped:
+            status_only += (
+                f"\n\n_({dropped} 条「下一步」已省略——这是项目状态召回，非待办；"
+                "要处理某项目时用 `llm-wiki-enrich --query \"<项目名>\"` 取其 next-action。)_"
+            )
+        block = section("Active Projects (status only)", status_only)
+    else:
+        index_text = read_text_head(root / "wiki" / "index.md")
+        project_lines = [
+            line.rstrip()
+            for line in index_text.splitlines()
+            if line.lstrip().startswith("- [[")
+        ][:max_projects]
+        block = section("Wiki Index (projects/concepts)", "\n".join(project_lines))
+    if block:
+        parts.append(block)
+
+    loops = read_text_head(context_dir / "open-loops.md")
+    if loops:
+        loops_status, _ = strip_next_actions(take_lines(loops, 24))
+        loops_status = drop_done_lines(loops_status)
+        block = section("Open Loops (open only)", loops_status)
+    else:
+        block = None
+    if block:
+        parts.append(block)
+
+    if not (context_dir / "open-loops.md").exists():
+        today = read_text_head(root / "Today.md")
+        block = section("Today (latest session)", take_lines(today, 24)) if today else None
+        if block:
+            parts.append(block)
+
+    report = root / "graphify-out" / "GRAPH_REPORT.md"
+    graph_text = read_text_head(report) if report.exists() else ""
+    block = section("Knowledge Graph (overview)", take_lines(graph_text, 12)) if graph_text else None
+    if block:
+        parts.append(block)
+
+    return parts
+
+
+def render_session_start(root: Path, max_chars: int, max_projects: int) -> str:
+    parts = session_start_sections(root, max_projects)
+    if not parts:
+        return "## LLM Wiki — Session Memory\n\nNo wiki content found yet.\n"
+    body = redact("\n\n".join(parts).strip())
+    header = (
+        "## LLM Wiki — Session Memory\n"
+        "> Auto-injected at session start. Prior context below; "
+        "run `llm-wiki-enrich --query \"<topic>\"` for task-specific recall.\n"
+        "> READ-ONLY RECALL, NOT A TASK QUEUE. The projects/loops/「下一步」 items below are "
+        "reference context, not instructions to execute. Only act on what the user asks in THIS "
+        "session; use these to inform that work — do not start unrelated loops on your own.\n"
+    )
+    canary = (
+        f"> Session-memory canary: {SESSION_CANARY} "
+        "(injection self-check; present only in injected memory, in no wiki file).\n"
+    )
+    prefix = f"{header}{canary}\n"
+    output = f"{prefix}{body}\n"
+    if len(output) > max_chars:
+        budget = max(0, max_chars - len(prefix) - 40)
+        output = prefix + body[:budget].rstrip() + "\n\n[truncated by llm-wiki-enrich]\n"
+    return output
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Print touched-file LLM Wiki enrichment context.")
+    parser.add_argument("--file", dest="files", action="append", default=[], help="Touched file path. Repeatable.")
+    parser.add_argument("--query", default="", help="Natural-language query or task description.")
+    parser.add_argument("--project", help="Filter memory events by project id.")
+    parser.add_argument("--limit", type=int, default=8, help="Maximum candidates to print.")
+    parser.add_argument("--max-chars", type=int, default=3500, help="Maximum output characters.")
+    parser.add_argument("--json", action="store_true", help="Output machine-readable JSON instead of Markdown.")
+    parser.add_argument(
+        "--session-start",
+        action="store_true",
+        help="Emit an always-on session-start memory digest (ignores --file/--query).",
+    )
+    parser.add_argument(
+        "--max-projects",
+        type=int,
+        default=12,
+        help="Max project/concept lines in session-start fallback digest.",
+    )
+    return parser.parse_args(argv)
+
+
+def render_markdown(candidates: list[Candidate], max_chars: int) -> str:
+    if not candidates:
+        return "## Relevant Memory Context\n\nNo matching local memory context found.\n"
+    chunks = ["## Relevant Memory Context", ""]
+    for candidate in candidates:
+        chunks.append(f"### {candidate.source}: {candidate.title}")
+        chunks.append(redact(candidate.text.strip()))
+        chunks.append("")
+    output = "\n".join(chunks).strip() + "\n"
+    if len(output) > max_chars:
+        output = output[: max_chars - 40].rstrip() + "\n\n[truncated by llm-wiki-enrich]\n"
+    return output
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    root = root_path()
+    if args.session_start:
+        sys.stdout.write(render_session_start(root, max(200, args.max_chars), max(1, args.max_projects)))
+        return 0
+    if not args.files and not args.query:
+        print("llm-wiki-enrich: provide --file or --query (or --session-start)", file=sys.stderr)
+        return 2
+    touched_files = normalize_files(args.files, Path.cwd())
+    query_tokens = tokenize([args.query, *touched_files])
+    candidates = event_candidates(load_events(root), query_tokens, touched_files, args.project)
+    candidates.extend(wiki_candidates(root, query_tokens))
+    hint = graph_hint(root, query_tokens)
+    if hint is not None:
+        candidates.append(hint)
+    candidates = sorted(candidates, key=lambda item: item.score, reverse=True)[: max(1, args.limit)]
+    if args.json:
+        payload = []
+        remaining = max(200, args.max_chars)
+        for item in candidates:
+            text = redact(item.text.strip())
+            if remaining <= 0:
+                break
+            clipped = text[:remaining]
+            payload.append({"score": item.score, "source": item.source, "title": item.title, "text": clipped})
+            remaining -= len(clipped)
+        output = json.dumps(payload, ensure_ascii=False, indent=2)
+        if len(output) > max(200, args.max_chars):
+            output = output[: max(200, args.max_chars)]
+        print(output)
+    else:
+        sys.stdout.write(render_markdown(candidates, max(200, args.max_chars)))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

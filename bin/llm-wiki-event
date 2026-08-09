@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Record a redacted typed memory event into ~/llm-wiki/memory.
+
+This is a deliberately small local helper inspired by agentmemory's typed event
+schema. It does not modify raw/ or wiki/ pages; it only appends JSONL and keeps
+a touched-file reverse index for later enrichment.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import uuid
+import fcntl
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+SCHEMA_VERSION = "llm-wiki-memory-event/v1"
+DEFAULT_HALF_LIFE_DAYS = 90
+EVENT_TYPES = {
+    "fact",
+    "decision",
+    "bug",
+    "workflow",
+    "preference",
+    "architecture",
+    "touch",
+    "session",
+    "lesson",
+}
+
+SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,'\"]+(?:\s+[a-z0-9._~+/=-]{8,})?"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)([\"']?(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*)([\"']?)[^\s,'\"&]+([\"']?)"), r"\1\2[REDACTED]\3"),
+    (re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|password|passwd|pwd)=)[^\s&#]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{16,}"), "Bearer [REDACTED]"),
+    (re.compile(r"\b(sk-[a-zA-Z0-9_-]{16,})\b"), "[REDACTED_OPENAI_KEY]"),
+    (re.compile(r"\b(gh[pousr]_[a-zA-Z0-9_]{20,})\b"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"\b(xox[baprs]-[a-zA-Z0-9-]{20,})\b"), "[REDACTED_SLACK_TOKEN]"),
+    (re.compile(r"\b(eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})\b"), "[REDACTED_JWT]"),
+]
+SENSITIVE_KEY_RE = re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|authorization)")
+
+
+def redact(value: Any) -> Any:
+    if isinstance(value, str):
+        redacted = value
+        for pattern, replacement in SECRET_PATTERNS:
+            redacted = pattern.sub(replacement, redacted)
+        return redacted
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    if isinstance(value, dict):
+        redacted_dict: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            redacted_dict[key_text] = "[REDACTED]" if SENSITIVE_KEY_RE.search(key_text) else redact(item)
+        return redacted_dict
+    return value
+
+
+def stable_project(cwd: Path, explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    return cwd.name or "unknown-project"
+
+
+def normalize_files(files: list[str], cwd: Path) -> list[str]:
+    normalized: list[str] = []
+    for file_name in files:
+        path = Path(file_name).expanduser()
+        if path.is_absolute():
+            try:
+                normalized.append(str(path.relative_to(cwd)))
+            except ValueError:
+                normalized.append(str(path))
+        else:
+            normalized.append(str(path))
+    return sorted(dict.fromkeys(normalized))
+
+
+def memory_root() -> Path:
+    return Path(os.environ.get("LLM_WIKI_ROOT", "~/llm-wiki")).expanduser() / "memory"
+
+
+def month_path(root: Path, now: datetime) -> Path:
+    events_dir = root / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    return events_dir / f"{now:%Y-%m}.jsonl"
+
+
+def update_touched_index(root: Path, event: dict[str, Any]) -> None:
+    index_path = root / "touched-files.json"
+    if index_path.exists():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            backup = index_path.with_name(f"touched-files.{stamp}.{uuid.uuid4().hex[:8]}.broken.json")
+            index_path.rename(backup)
+            index = {}
+    else:
+        index = {}
+
+    files = event.get("files", [])
+    if not isinstance(files, list):
+        return
+
+    for file_name in files:
+        if not isinstance(file_name, str):
+            continue
+        entry = index.setdefault(file_name, {"events": [], "updated_at": event["timestamp"]})
+        events = entry.setdefault("events", [])
+        events.append(
+            {
+                "id": event["id"],
+                "type": event["type"],
+                "project": event["project"],
+                "timestamp": event["timestamp"],
+                "confidence": event["confidence"],
+                "summary": event["summary"],
+            }
+        )
+        entry["events"] = events[-25:]
+        entry["updated_at"] = event["timestamp"]
+
+    temp_path = index_path.with_name(f".{index_path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temp_path, index_path)
+
+
+def append_event(path: Path, event: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Record a typed LLM Wiki memory event.")
+    parser.add_argument("summary", nargs="?", help="Short event summary. If omitted, stdin is used.")
+    parser.add_argument("--type", default="fact", choices=sorted(EVENT_TYPES), help="Typed event category.")
+    parser.add_argument("--project", help="Stable project identifier. Defaults to current directory name.")
+    parser.add_argument("--file", dest="files", action="append", default=[], help="Touched file path. Repeatable.")
+    parser.add_argument("--concept", dest="concepts", action="append", default=[], help="Concept tag. Repeatable.")
+    parser.add_argument("--details", default="", help="Optional longer details.")
+    parser.add_argument("--confidence", type=float, default=0.7, help="Initial confidence, 0.0-1.0.")
+    parser.add_argument("--half-life-days", type=int, default=DEFAULT_HALF_LIFE_DAYS, help="Confidence decay half-life.")
+    parser.add_argument("--source", default="manual", help="Source label, e.g. manual/session/tool.")
+    parser.add_argument("--print", action="store_true", help="Print the redacted event JSON after writing.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    summary = args.summary or sys.stdin.read().strip()
+    if not summary:
+        print("llm-wiki-event: summary is required", file=sys.stderr)
+        return 2
+
+    confidence = max(0.0, min(1.0, float(args.confidence)))
+    cwd = Path.cwd()
+    now = datetime.now(timezone.utc)
+    files = normalize_files(args.files, cwd)
+    event_id_seed = f"{now.isoformat()}\0{args.type}\0{summary}\0{uuid.uuid4()}"
+    event_id = hashlib.sha256(event_id_seed.encode("utf-8")).hexdigest()[:16]
+
+    event: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "id": event_id,
+        "timestamp": now.isoformat(),
+        "type": args.type,
+        "project": stable_project(cwd, args.project),
+        "cwd": str(cwd),
+        "files": files,
+        "concepts": sorted(dict.fromkeys(args.concepts)),
+        "summary": summary,
+        "details": args.details,
+        "confidence": confidence,
+        "half_life_days": max(1, int(args.half_life_days)),
+        "lifecycle": "active",
+        "source": args.source,
+    }
+    event = redact(event)
+
+    root = memory_root()
+    root.mkdir(parents=True, exist_ok=True)
+    path = month_path(root, now)
+    lock_path = root / ".memory.lock"
+    with lock_path.open("a", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            append_event(path, event)
+            update_touched_index(root, event)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    if args.print:
+        print(json.dumps(event, ensure_ascii=False, indent=2))
+    else:
+        print(f"recorded {event['id']} -> {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

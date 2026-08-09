@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# llm-wiki-remote-sync — 节流式跨机同步 ~/llm-wiki（home / office / ...）
+#
+# 设计沿用 omo-refresh 的约定：
+#   - 非阻塞 flock：多 tmux 窗口同时冷启动只有一个真正干活，其余瞬退
+#   - 时间戳节流：窗口内秒退，零成本
+#   - phase 门禁：任一阶段失败即 fatal 中止，不写成功戳，下个窗口自动重试
+#   - 失败时保留现场供排查，绝不自动回滚、绝不丢弃未知改动
+#
+# 与 omo-refresh 的关键差异：本脚本操作 git 工作区，因此
+#   - 绝不 reset --hard / checkout -f / clean，未知改动一律保留
+#   - 冲突时停下等人处理，不猜测合并意图
+#   - pull 用 --rebase=false（union merge 依赖 merge commit 语义）
+#
+# 用法：
+#   llm-wiki-remote-sync              # 节流同步（会话启动用，通常秒退）
+#   llm-wiki-remote-sync --pull       # 只拉不推
+#   llm-wiki-remote-sync --push       # 只推不拉（SessionCapture 后用）
+#   llm-wiki-remote-sync --force      # 忽略节流
+#   llm-wiki-remote-sync --status     # 查看状态，不做任何写操作
+#   llm-wiki-remote-sync --dry-run    # 打印将要执行的动作
+
+set -Eeuo pipefail
+umask 077
+
+ROOT=${LLM_WIKI_ROOT:-"$HOME/llm-wiki"}
+THROTTLE_SECONDS=${LLM_WIKI_SYNC_THROTTLE:-10800}   # 3h
+CACHE_DIR=${LLM_WIKI_SYNC_CACHE_DIR:-"${XDG_CACHE_HOME:-$HOME/.cache}/llm-wiki-sync"}
+STAMP="$CACHE_DIR/last-sync"
+LOCK="$CACHE_DIR/lock"
+LOG="$CACHE_DIR/last-run.log"
+GIT_TIMEOUT=${LLM_WIKI_SYNC_GIT_TIMEOUT:-120}
+BRANCH=${LLM_WIKI_SYNC_BRANCH:-main}
+REMOTE=${LLM_WIKI_SYNC_REMOTE:-origin}
+NOW=$(date +%s)
+CURRENT_PHASE=initialization
+STAMP_TMP=
+
+MODE=sync
+FORCE=0
+DRY_RUN=0
+
+while (($#)); do
+  case $1 in
+    --pull)    MODE=pull ;;
+    --push)    MODE=push ;;
+    --force)   FORCE=1 ;;
+    --status)  MODE=status ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    *) printf 'llm-wiki-remote-sync: 未知参数 %s\n' "$1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+mkdir -p "$CACHE_DIR"
+chmod 700 "$CACHE_DIR"
+
+log_line() { printf '%s\n' "$*" >>"$LOG"; }
+phase_start()   { CURRENT_PHASE=$1; log_line "[$(date -Is)] PHASE START: $CURRENT_PHASE"; }
+phase_success() { log_line "[$(date -Is)] PHASE SUCCESS: $CURRENT_PHASE"; }
+
+fatal() {
+  log_line "[$(date -Is)] PHASE FAILURE: $CURRENT_PHASE: $1"
+  printf 'llm-wiki-remote-sync: %s（日志见 %s）\n' "$1" "$LOG" >&2
+  exit 1
+}
+
+on_error() {
+  log_line "[$(date -Is)] PHASE FAILURE: $CURRENT_PHASE: unexpected rc=$1 line=$2"
+  printf 'llm-wiki-remote-sync: 阶段 %s 意外失败（rc=%s，日志见 %s）\n' "$CURRENT_PHASE" "$1" "$LOG" >&2
+  exit 1
+}
+trap 'on_error $? $LINENO' ERR
+
+cleanup() { [[ -n "$STAMP_TMP" && -e "$STAMP_TMP" ]] && rm -f -- "$STAMP_TMP" || true; }
+trap cleanup EXIT
+
+run_git() { timeout "$GIT_TIMEOUT" git -C "$ROOT" "$@"; }
+
+stamp_age() {
+  [[ -f "$STAMP" ]] || { echo -1; return; }
+  local last
+  IFS= read -r last <"$STAMP" 2>/dev/null || { echo -1; return; }
+  [[ "$last" =~ ^[0-9]+$ ]] || { echo -1; return; }
+  echo $((NOW - last))
+}
+
+# ---------- profile：机器身份 ----------
+detect_profile() {
+  if [[ -n "${LLM_WIKI_PROFILE:-}" ]]; then
+    printf '%s' "$LLM_WIKI_PROFILE"; return
+  fi
+  if [[ -f "$CACHE_DIR/profile" ]]; then
+    local p; IFS= read -r p <"$CACHE_DIR/profile" 2>/dev/null || p=""
+    [[ -n "$p" ]] && { printf '%s' "$p"; return; }
+  fi
+  printf '%s' "$(hostname -s 2>/dev/null || echo unknown)"
+}
+PROFILE=$(detect_profile)
+
+# ---------- status：只读 ----------
+if [[ "$MODE" == status ]]; then
+  age=$(stamp_age)
+  printf 'root:      %s\n' "$ROOT"
+  printf 'profile:   %s\n' "$PROFILE"
+  printf 'throttle:  %s 小时\n' "$((THROTTLE_SECONDS / 3600))"
+  if ((age < 0)); then
+    printf 'last sync: 从未\n'
+  else
+    printf 'last sync: %s 秒前（%s）\n' "$age" "$(date -d "@$((NOW - age))" '+%F %T')"
+    ((age < THROTTLE_SECONDS)) && printf 'throttle:  命中（本窗口内不会同步）\n' \
+                               || printf 'throttle:  已过期\n'
+  fi
+  if [[ -d "$ROOT/.git" ]]; then
+    printf 'branch:    %s\n' "$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+    printf 'HEAD:      %s\n' "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    dirty=$(git -C "$ROOT" status --porcelain 2>/dev/null | wc -l)
+    printf 'dirty:     %s 个文件\n' "$dirty"
+    if git -C "$ROOT" rev-parse --verify "$REMOTE/$BRANCH" >/dev/null 2>&1; then
+      counts=$(git -C "$ROOT" rev-list --left-right --count "$REMOTE/$BRANCH...HEAD" 2>/dev/null || echo "? ?")
+      printf 'behind/ahead: %s\n' "$counts"
+    else
+      printf 'behind/ahead: 无 %s/%s 追踪信息\n' "$REMOTE" "$BRANCH"
+    fi
+  else
+    printf 'git:       未初始化\n'
+  fi
+  exit 0
+fi
+
+# ---------- 前置检查 ----------
+phase_start preflight
+[[ -d "$ROOT/.git" ]] || fatal "$ROOT 不是 git 仓库，请先完成初始化"
+command -v git >/dev/null 2>&1 || fatal "git 不可用"
+
+# 未完成的 merge/rebase/cherry-pick：必须 fatal 中止，绝不能当成普通脏工作区。
+# 若走脏工作区分支，脚本会 rc=0 并写成功戳，导致节流窗口内静默不同步，
+# 用户会以为一切正常（这是真实踩过的坑）。
+GIT_DIR_ABS=$(run_git rev-parse --absolute-git-dir 2>/dev/null || echo "$ROOT/.git")
+unresolved=$(run_git ls-files --unmerged 2>/dev/null | wc -l)
+if [[ -e "$GIT_DIR_ABS/MERGE_HEAD" ]] || ((unresolved > 0)); then
+  fatal "存在未完成的 merge（$unresolved 个未解决路径）。请先解决冲突并提交，或 git merge --abort，然后重跑。"
+fi
+if [[ -e "$GIT_DIR_ABS/CHERRY_PICK_HEAD" ]]; then
+  fatal "存在未完成的 cherry-pick。请先完成或 git cherry-pick --abort，然后重跑。"
+fi
+if [[ -d "$GIT_DIR_ABS/rebase-merge" || -d "$GIT_DIR_ABS/rebase-apply" ]]; then
+  fatal "存在未完成的 rebase。请先完成或 git rebase --abort，然后重跑。"
+fi
+phase_success
+
+# ---------- 节流（拿锁前先粗判，避免无谓抢锁）----------
+if ((FORCE == 0)); then
+  age=$(stamp_age)
+  if ((age >= 0 && age < THROTTLE_SECONDS)); then
+    exit 0
+  fi
+fi
+
+# ---------- 非阻塞锁 ----------
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  exit 0
+fi
+
+# 拿到锁后复查（防止等锁期间别的窗口已完成）
+if ((FORCE == 0)); then
+  NOW=$(date +%s)
+  age=$(stamp_age)
+  if ((age >= 0 && age < THROTTLE_SECONDS)); then
+    exit 0
+  fi
+fi
+
+log_line "[$(date -Is)] === run start: mode=$MODE profile=$PROFILE force=$FORCE dry=$DRY_RUN ==="
+
+if ((DRY_RUN)); then
+  printf '[dry-run] 将执行：mode=%s profile=%s\n' "$MODE" "$PROFILE"
+  printf '[dry-run] pull: git pull --no-rebase --no-edit %s %s\n' "$REMOTE" "$BRANCH"
+  printf '[dry-run] dedupe: llm-wiki-dedupe-events\n'
+  printf '[dry-run] push: git push %s %s\n' "$REMOTE" "$BRANCH"
+  exit 0
+fi
+
+DEDUPE="$ROOT/bin/llm-wiki-dedupe-events"
+
+# ---------- 阶段：拉取 ----------
+if [[ "$MODE" == sync || "$MODE" == pull ]]; then
+  phase_start fetch
+  run_git fetch "$REMOTE" "$BRANCH" --quiet || fatal "fetch 失败（网络或凭据问题）"
+  phase_success
+
+  # 有未提交改动时不 merge：避免 merge 把用户正在编辑的内容卷进去
+  phase_start pull
+  if [[ -n "$(run_git status --porcelain)" ]]; then
+    log_line "工作区有未提交改动，跳过 merge（保留现场，不做任何丢弃）"
+    printf 'llm-wiki-remote-sync: 工作区有未提交改动，已跳过 merge。请先提交或暂存后重跑。\n' >&2
+  else
+    behind=$(run_git rev-list --count "HEAD..$REMOTE/$BRANCH" 2>/dev/null || echo 0)
+    if [[ "$behind" != 0 ]]; then
+      if ! run_git merge --no-edit "$REMOTE/$BRANCH" >>"$LOG" 2>&1; then
+        # union merge 已尽力，仍冲突说明是非 jsonl 的真实冲突
+        conflicts=$(run_git diff --name-only --diff-filter=U | tr '\n' ' ')
+        log_line "merge 冲突，保留冲突状态等人处理: $conflicts"
+        fatal "merge 冲突需人工处理：$conflicts（已保留冲突现场，未做任何丢弃）"
+      fi
+      log_line "merged $behind 个上游 commit"
+    fi
+  fi
+  phase_success
+
+  # union merge 会产生重复行，必须去重
+  phase_start dedupe
+  if [[ -x "$DEDUPE" ]]; then
+    "$DEDUPE" --root "$ROOT" >>"$LOG" 2>&1 || fatal "dedupe 失败"
+    if [[ -n "$(run_git status --porcelain -- memory/events raw/inbox/corrections.jsonl 2>/dev/null)" ]]; then
+      run_git add -- memory/events raw/inbox/corrections.jsonl 2>/dev/null || true
+      run_git -c "user.name=$(git -C "$ROOT" config user.name)" \
+              -c "user.email=$(git -C "$ROOT" config user.email)" \
+              commit -m "chore(memory): dedupe jsonl after union merge [$PROFILE]" >>"$LOG" 2>&1 \
+        || fatal "dedupe 结果提交失败"
+      log_line "已提交 dedupe 结果"
+    fi
+  else
+    log_line "警告：$DEDUPE 不可执行，跳过去重"
+  fi
+  phase_success
+fi
+
+# ---------- 阶段：推送 ----------
+if [[ "$MODE" == sync || "$MODE" == push ]]; then
+  phase_start push
+  if [[ -n "$(run_git status --porcelain)" ]]; then
+    log_line "工作区有未提交改动，不自动提交（提交需显式意图），跳过 push"
+    printf 'llm-wiki-remote-sync: 有未提交改动，未自动提交。确认后手动 commit 再 push。\n' >&2
+  else
+    ahead=$(run_git rev-list --count "$REMOTE/$BRANCH..HEAD" 2>/dev/null || echo 0)
+    if [[ "$ahead" == 0 ]]; then
+      log_line "push: noop（无本地新提交）"
+    else
+      run_git push "$REMOTE" "$BRANCH" >>"$LOG" 2>&1 || fatal "push 失败（可能上游有新提交，下次同步会先 merge）"
+      log_line "pushed $ahead 个 commit"
+    fi
+  fi
+  phase_success
+fi
+
+# ---------- 写成功戳（仅全阶段成功）----------
+phase_start stamp
+STAMP_TMP=$(mktemp "$CACHE_DIR/.last-sync.XXXXXX")
+printf '%s\n' "$(date +%s)" >"$STAMP_TMP"
+chmod 600 "$STAMP_TMP"
+mv -f -- "$STAMP_TMP" "$STAMP"
+STAMP_TMP=
+phase_success
+
+log_line "[$(date -Is)] === run success ==="
+exit 0

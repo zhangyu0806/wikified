@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Suggest promotion targets for quick notes in ~/llm-wiki/raw/notes.
+
+This command is intentionally read-only by default. It scans quick notes and
+prints a review queue so an agent can later compile high-value fragments into
+long-lived wiki pages without pretending every small note is a full session.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+
+DEFAULT_ROOT = Path.home() / "llm-wiki"
+
+
+@dataclass(frozen=True)
+class PromotionSuggestion:
+    note: str
+    title: str
+    category: str
+    suggested_target: str
+    confidence: str
+    reason: str
+    source: str = "quick-note"
+
+
+RULES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
+    ("pitfall", ("坑", "踩坑", "失败", "报错", "bug", "error", "failed", "修复", "排查"), "wiki/concepts/", "排查/踩坑类记录适合沉淀成概念或工具经验"),
+    ("preference", ("偏好", "默认", "以后", "习惯", "prefer", "preference", "默认用"), "wiki/tools/", "用户偏好通常影响工具或工作流页面"),
+    ("todo", ("待办", "todo", "下一步", "之后", "要做", "需要补", "follow up"), "wiki/projects/", "待办通常属于某个 active 项目的下一步"),
+    ("command", ("命令", "运行", "脚本", "cli", "bash", "python", "npm", "bun", "cargo", "ssh", "curl"), "wiki/tools/", "命令和脚本应沉淀到工具页"),
+    ("decision", ("决定", "选择", "不再", "改成", "采用", "decision", "ADR"), "wiki/decisions/", "选择和权衡适合形成决策记录"),
+)
+
+
+def fail(message: str) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def strip_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    if not text.startswith("---\n"):
+        return {}, text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return {}, text
+    meta_text = text[4:end]
+    body = text[end + 5 :]
+    meta: dict[str, str] = {}
+    for line in meta_text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        meta[key.strip()] = value.strip().strip('"')
+    return meta, body
+
+
+def title_from_note(path: Path, meta: dict[str, str], body: str) -> str:
+    if meta.get("title"):
+        return meta["title"]
+    for line in body.splitlines():
+        stripped = line.strip().lstrip("#").strip()
+        if stripped:
+            return stripped[:80]
+    return path.stem
+
+
+def suggest_target(category: str, text: str) -> str:
+    lowered = text.lower()
+    if any(word in lowered for word in ("llm wiki", "llm-wiki", "obsidian", "quick note", "记一下")):
+        return "wiki/projects/llm-wiki.md"
+    if any(word in lowered for word in ("opencode", "omo", "oh-my-opencode")):
+        return "wiki/tools/opencode-omo.md"
+    if "graphify" in lowered:
+        return "wiki/tools/graphify.md"
+    for rule_category, _keywords, default_target, _reason in RULES:
+        if category == rule_category:
+            return default_target
+    return "wiki/overview.md"
+
+
+def classify(path: Path, meta: dict[str, str], body: str, source: str = "quick-note") -> PromotionSuggestion:
+    text = f"{meta.get('title', '')}\n{body}".strip()
+    lowered = text.lower()
+    scores: list[tuple[int, str, str]] = []
+    for category, keywords, _target, reason in RULES:
+        score = sum(1 for keyword in keywords if keyword.lower() in lowered)
+        if score:
+            scores.append((score, category, reason))
+    if scores:
+        score, category, reason = sorted(scores, key=lambda item: item[0], reverse=True)[0]
+        confidence = "high" if score >= 2 else "medium"
+    else:
+        category = "fact"
+        confidence = "low"
+        reason = "没有明显分类关键词，按普通事实进入人工复盘"
+    # auto-draft 是 compact 前机器落盘、未经人审，信噪比天然更低；降一档置信、提醒人审从严。
+    if source == "auto-draft":
+        confidence = {"high": "medium", "medium": "low", "low": "low"}[confidence]
+        reason = f"[compact 自动草稿，未经人审，从严甄别] {reason}"
+    return PromotionSuggestion(
+        note=str(path),
+        title=title_from_note(path, meta, body),
+        category=category,
+        suggested_target=suggest_target(category, text),
+        confidence=confidence,
+        reason=reason,
+        source=source,
+    )
+
+
+def iter_notes(notes_dir: Path) -> list[PromotionSuggestion]:
+    suggestions: list[PromotionSuggestion] = []
+    for path in sorted(notes_dir.glob("*.md")):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        meta, body = strip_frontmatter(text)
+        status = meta.get("status", "").lower()
+        if status in {"compiled", "promoted", "archived"}:
+            continue
+        suggestions.append(classify(path, meta, body))
+    return suggestions
+
+
+def iter_auto_drafts(drafts_dir: Path) -> list[PromotionSuggestion]:
+    """Scan compact-time auto-drafts. Each daily file = one promotion candidate.
+
+    Auto-drafts are machine-written before context compaction (never human-reviewed),
+    so they get classified like notes but flagged lower-confidence in classify().
+    A sibling `<file>.promoted` marker lets a human mark a draft file as handled.
+    """
+    suggestions: list[PromotionSuggestion] = []
+    if not drafts_dir.exists():
+        return suggestions
+    for path in sorted(drafts_dir.glob("*.md")):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        if path.with_suffix(path.suffix + ".promoted").exists():
+            continue
+        body = path.read_text(encoding="utf-8").strip()
+        if not body:
+            continue
+        suggestions.append(classify(path, {}, body, source="auto-draft"))
+    return suggestions
+
+
+def print_markdown(suggestions: list[PromotionSuggestion]) -> None:
+    print("# Quick Notes Promotion Queue")
+    print()
+    if not suggestions:
+        print("暂无待复盘 quick notes。")
+        return
+    for item in suggestions:
+        print(f"## {item.title}")
+        print()
+        print(f"- note: `{item.note}`")
+        print(f"- source: `{item.source}`")
+        print(f"- category: `{item.category}`")
+        print(f"- suggested_target: `{item.suggested_target}`")
+        print(f"- confidence: `{item.confidence}`")
+        print(f"- reason: {item.reason}")
+        print()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Review quick notes and suggest wiki promotion targets.")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="LLM Wiki root directory")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    root = args.root.expanduser().resolve()
+    notes_dir = root / "raw" / "notes"
+    if not (root / "SCHEMA.md").exists():
+        fail(f"not an LLM Wiki root, missing SCHEMA.md: {root}")
+    if not notes_dir.exists():
+        fail(f"notes directory does not exist: {notes_dir}")
+    suggestions = iter_notes(notes_dir)
+    suggestions += iter_auto_drafts(root / "raw" / "inbox" / "auto-drafts")
+    if args.json:
+        print(json.dumps([asdict(item) for item in suggestions], ensure_ascii=False, indent=2))
+    else:
+        print_markdown(suggestions)
+
+
+if __name__ == "__main__":
+    main()

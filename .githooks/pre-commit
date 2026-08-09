@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# LLM Wiki pre-commit 门禁
+#
+# 两道检查，任一失败即拒绝提交：
+#   1. secret scan —— 只扫 staged 内容（不是工作树），防凭据入库
+#   2. jsonl 规范序 —— staged 的 events/corrections 必须已去重排序，
+#      否则两地会因顺序差异产生无意义 diff
+#
+# 绕过（仅在确认误报且已加 allowlist 后）：git commit --no-verify
+# 但请优先把 fingerprint 加进 .secret-allowlist，不要养成 --no-verify 习惯。
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT" || exit 1
+
+FAIL=0
+
+# ---------- 1. secret scan（扫 staged 内容）----------
+# 用 --staged 让扫描器读 git index 的内容，而非工作树；
+# 避免「工作树已修好但提交的是脏版本」的漏网。
+if [[ -x bin/llm-wiki-secret-scan ]]; then
+  if ! python3 bin/llm-wiki-secret-scan --staged; then
+    echo ""
+    echo "✗ pre-commit 拒绝：staged 内容含疑似凭据。"
+    echo "  处理方式："
+    echo "    - 真凭据 → 脱敏为 '<见 secure-notes/xxx>' 后重新 add"
+    echo "    - 确认误报 → 把输出里的 fingerprint 加进 .secret-allowlist"
+    FAIL=1
+  fi
+else
+  echo "! 警告：bin/llm-wiki-secret-scan 不存在或不可执行，跳过 secret 门禁"
+fi
+
+# ---------- 2. jsonl 规范序 ----------
+# union merge 后如果忘了跑 dedupe 就提交，会把乱序/重复固化进历史。
+STAGED_JSONL="$(git diff --cached --name-only --diff-filter=ACM \
+  | grep -E '^(memory/events/.*\.jsonl|raw/inbox/corrections\.jsonl)$' || true)"
+
+if [[ -n "$STAGED_JSONL" ]]; then
+  if [[ -x bin/llm-wiki-dedupe-events ]]; then
+    if ! python3 bin/llm-wiki-dedupe-events --check >/dev/null 2>&1; then
+      echo ""
+      echo "✗ pre-commit 拒绝：jsonl 未处于规范序（去重+排序）。"
+      echo "  修复：python3 bin/llm-wiki-dedupe-events && git add -u"
+      python3 bin/llm-wiki-dedupe-events --check 2>&1 | sed 's/^/    /'
+      FAIL=1
+    fi
+  fi
+fi
+
+if [[ $FAIL -ne 0 ]]; then
+  exit 1
+fi
+
+echo "✓ pre-commit: secret scan + jsonl 规范序 通过"
+exit 0

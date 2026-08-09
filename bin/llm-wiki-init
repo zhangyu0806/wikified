@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# llm-wiki-init — 把一个空目录初始化为可用的 LLM Wiki 数据库。
+#
+# 为什么需要它：其余工具都假定库已存在。隔离 HOME 实测，缺 SCHEMA.md 时
+# llm-wiki-health / promote-notes / refresh 直接 rc=1，dedupe-events rc=2；
+# llm-wiki-remote-sync 缺 .git 直接 fatal。而 note/event/correct 只会各自
+# mkdir 自己那一个子目录，没有任何工具产出 SCHEMA.md 或 git 仓库。
+# 没有本命令，全新安装的用户跑任何主命令都会失败。
+#
+# 用法：
+#   llm-wiki-init                 # 建目录与模板（不建 git 仓库）
+#   llm-wiki-init --git           # 同时 git init 并接上凭据门禁
+#   llm-wiki-init --root DIR      # 指定库位置（默认 $LLM_WIKI_ROOT 或 ~/llm-wiki）
+#   llm-wiki-init --profile NAME  # 同时写同步 profile（home/office）
+#   llm-wiki-init --dry-run       # 只打印将要做的事
+set -Eeuo pipefail
+
+SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
+SELF_DIR=$(dirname -- "$SELF")
+
+ROOT=${LLM_WIKI_ROOT:-"$HOME/llm-wiki"}
+DO_GIT=0
+PROFILE=""
+DRY=0
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root)    [[ $# -ge 2 ]] || die "--root 需要一个路径"; ROOT=$2; shift 2 ;;
+    --git)     DO_GIT=1; shift ;;
+    --profile) [[ $# -ge 2 ]] || die "--profile 需要一个名字"; PROFILE=$2; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) sed -n '2,17p' "$SELF"; exit 0 ;;
+    *) die "未知参数 $1" ;;
+  esac
+done
+
+# 模板解析顺序与 llm-wiki-mcp 的 CLI 解析同构：先同目录（软链后 readlink -f
+# 已指向 repo 内真实位置），再显式 env，再安装目标的兄弟目录。
+# 全部落空时必须报错退出：静默写一个没有 SCHEMA.md 的残库，会让用户在
+# 之后某个不相关的命令上才发现问题，届时更难定位。
+resolve_templates() {
+  local candidates=(
+    "$SELF_DIR/../templates"
+    "${LLM_WIKI_TEMPLATES:-}"
+    "${LLM_WIKI_BIN_TARGET:-}/../templates"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    [[ -n "$c" ]] || continue
+    if [[ -f "$c/SCHEMA.md" ]]; then (cd -- "$c" && pwd); return 0; fi
+  done
+  return 1
+}
+
+if [[ -n "${LLM_WIKI_TEMPLATES:-}" && ! -f "${LLM_WIKI_TEMPLATES}/SCHEMA.md" ]]; then
+  die "LLM_WIKI_TEMPLATES 指向的目录里没有 SCHEMA.md: ${LLM_WIKI_TEMPLATES}"
+fi
+TEMPLATES=$(resolve_templates) || die "找不到 templates（缺 SCHEMA.md）。请设 LLM_WIKI_TEMPLATES 指向 toolkit 的 templates 目录。"
+
+CHANGES=0
+note_created() { CHANGES=$((CHANGES+1)); printf 'created: %s\n' "$1"; }
+note_exists()  { printf 'exists:  %s\n' "$1"; }
+
+ensure_dir() {
+  local d=$1
+  if [[ -d "$d" ]]; then note_exists "$d/"; return; fi
+  (( DRY )) && { printf 'would create: %s/\n' "$d"; return; }
+  mkdir -p -- "$d"
+  note_created "$d/"
+}
+
+# 只在缺失时写入。已存在即原样保留——用户的编辑优先于模板。
+ensure_file() {
+  local dst=$1 content=$2
+  if [[ -e "$dst" ]]; then note_exists "$dst"; return; fi
+  (( DRY )) && { printf 'would create: %s\n' "$dst"; return; }
+  mkdir -p -- "$(dirname -- "$dst")"
+  printf '%s' "$content" > "$dst"
+  note_created "$dst"
+}
+
+ensure_copy() {
+  local src=$1 dst=$2
+  if [[ -e "$dst" ]]; then note_exists "$dst"; return; fi
+  (( DRY )) && { printf 'would create: %s\n' "$dst"; return; }
+  mkdir -p -- "$(dirname -- "$dst")"
+  cp -- "$src" "$dst"
+  note_created "$dst"
+}
+
+printf 'llm-wiki-init\n  root:      %s\n  templates: %s\n\n' "$ROOT" "$TEMPLATES"
+
+ensure_dir "$ROOT"
+
+for d in \
+  wiki wiki/context wiki/dashboards wiki/projects wiki/concepts \
+  wiki/decisions wiki/tools wiki/queries \
+  raw raw/sessions raw/notes raw/articles raw/inbox raw/inbox/auto-drafts \
+  memory memory/events
+do
+  ensure_dir "$ROOT/$d"
+done
+
+ensure_copy "$TEMPLATES/SCHEMA.md" "$ROOT/SCHEMA.md"
+ensure_copy "$TEMPLATES/gitattributes.template" "$ROOT/.gitattributes"
+ensure_copy "$TEMPLATES/gitignore.template" "$ROOT/.gitignore"
+
+ensure_file "$ROOT/wiki/index.md" '# Wiki Index
+
+编译后的长期知识库目录。新页面创建后在此登记。
+'
+ensure_file "$ROOT/wiki/context/CRITICAL_FACTS.md" '# Critical Facts
+
+会话启动注入的关键事实卡。只放高频、稳定、跨会话必备的事实。
+凭据一律不写入本文件。
+'
+ensure_file "$ROOT/wiki/context/active-projects.md" '# Active Projects
+
+进行中项目的极简状态卡，每项一句话状态。
+'
+ensure_file "$ROOT/wiki/context/open-loops.md" '# Open Loops
+
+未闭环的待办与坑。闭环后删除或移入对应 wiki 页。
+'
+# 空文件即可让 .gitattributes 的 merge=union 从首个 commit 起生效；
+# 缺这个文件时首次跨机合并会退化成手工解冲突。
+ensure_file "$ROOT/raw/inbox/corrections.jsonl" ''
+ensure_file "$ROOT/.secret-allowlist" ''
+
+if [[ -d "$TEMPLATES/../.githooks" ]]; then
+  for h in "$TEMPLATES/../.githooks"/*; do
+    [[ -f "$h" ]] || continue
+    ensure_copy "$h" "$ROOT/.githooks/$(basename -- "$h")"
+    (( DRY )) || chmod 0755 "$ROOT/.githooks/$(basename -- "$h")"
+  done
+fi
+
+if (( DO_GIT )); then
+  if [[ -d "$ROOT/.git" ]]; then
+    note_exists "$ROOT/.git"
+  elif (( DRY )); then
+    printf 'would create: %s/.git\n' "$ROOT"
+  else
+    git -C "$ROOT" init -q
+    note_created "$ROOT/.git"
+  fi
+  # 已是 git 库时不重新 init，但仍强制校正 hooksPath——
+  # 这一项设错等于凭据门禁静默失效。
+  if [[ -d "$ROOT/.git" ]] && ! (( DRY )); then
+    if [[ "$(git -C "$ROOT" config --get core.hooksPath 2>/dev/null || true)" != ".githooks" ]]; then
+      git -C "$ROOT" config core.hooksPath .githooks
+      note_created "$ROOT (core.hooksPath=.githooks)"
+    fi
+
+    # 必须落一个首个 commit：0 commit 的库没有 HEAD，remote-sync 只能输出
+    # 降级状态（branch: HEAD）且无法 push；.gitattributes 的 merge=union
+    # 也只在合并「已跟踪」文件时才被调用，未提交等于跨机合并退化成手工解冲突。
+    if ! git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
+      git -C "$ROOT" add -A
+      if git -C "$ROOT" -c user.name="llm-wiki-init" \
+             -c user.email="llm-wiki-init@localhost" \
+             commit -q -m "chore: initialize LLM Wiki structure" 2>/dev/null; then
+        note_created "$ROOT (initial commit)"
+      else
+        printf 'warn: 首个 commit 失败（可能是 pre-commit 门禁拒绝）。请手工检查后再提交。\n' >&2
+      fi
+    fi
+  fi
+fi
+
+if [[ -n "$PROFILE" ]]; then
+  PROFILE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/llm-wiki-sync/profile"
+  if [[ -s "$PROFILE_FILE" ]]; then
+    note_exists "$PROFILE_FILE"
+  elif (( DRY )); then
+    printf 'would create: %s\n' "$PROFILE_FILE"
+  else
+    mkdir -p -- "$(dirname -- "$PROFILE_FILE")"
+    printf '%s\n' "$PROFILE" > "$PROFILE_FILE"
+    note_created "$PROFILE_FILE"
+  fi
+fi
+
+printf '\n'
+if (( DRY )); then
+  printf 'dry-run 结束，未写入任何内容。\n'
+  exit 0
+fi
+printf '完成（新建 %s 项）。\n' "$CHANGES"
+if (( ! DO_GIT )) && [[ ! -d "$ROOT/.git" ]]; then
+  printf '提示：跨机同步需要 git 仓库，可重跑 llm-wiki-init --git 补上。\n'
+fi
+exit 0

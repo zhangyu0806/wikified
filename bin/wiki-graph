@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# wiki-graph — 一键在 Windows 浏览器打开 LLM Wiki 的 Graphify 知识图谱。
+#
+# 用法:
+#   wiki-graph             打开现有图谱(若 wiki 比图谱新会提示需重建)
+#   wiki-graph --update    尝试增量提取代码文件;纯文档 wiki 会提示改用 /graphify skill
+#   wiki-graph --report    打开 GRAPH_REPORT.md(god nodes / 社区 / 意外关联)而非 HTML
+#   wiki-graph --no-open   只做新鲜度检查/同步,不弹浏览器
+#
+# 设计:
+#   - 纯本地,不调云 API
+#   - WSL→Windows 用 explorer.exe + wslpath,无需装 wslview
+#   - 若设了 LLM_WIKI_MIRROR,顺带同步一份 graph.html 到镜像目录(便于 Obsidian 侧直接点)
+
+set -euo pipefail
+
+WIKI_ROOT="${LLM_WIKI_ROOT:-$HOME/llm-wiki}"
+GRAPH_DIR="$WIKI_ROOT/graphify-out"
+GRAPH_HTML="$GRAPH_DIR/graph.html"
+GRAPH_JSON="$GRAPH_DIR/graph.json"
+GRAPH_REPORT="$GRAPH_DIR/GRAPH_REPORT.md"
+WIKI_SRC="$WIKI_ROOT/wiki"
+# 镜像目录没有可移植默认值，取决于本机 Obsidian vault 位置。
+# 优先级必须与 llm-wiki-obsidian-sync 完全一致：env > 机器本地配置 > 空（跳过同步）。
+# 若这里只读 env，用户把路径写进 config.env 后会遇到 obsidian-sync 正常同步
+# 而本命令静默跳过的不一致陷阱。
+mirror_from_config() {
+  local cfg="$HOME/.config/llm-wiki/config.env"
+  [[ -f "$cfg" ]] || return 0
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+    key="${line%%=*}"; value="${line#*=}"
+    key="${key//[[:space:]]/}"
+    [[ "$key" == LLM_WIKI_MIRROR ]] || continue
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    [[ ${#value} -ge 2 && ( ( "${value:0:1}" == '"' && "${value: -1}" == '"' ) || ( "${value:0:1}" == "'" && "${value: -1}" == "'" ) ) ]] \
+      && value="${value:1:${#value}-2}"
+    printf '%s' "$value"
+    return 0
+  done < "$cfg"
+}
+MIRROR_ROOT="${LLM_WIKI_MIRROR:-$(mirror_from_config)}"
+MIRROR_GRAPH_DIR="${MIRROR_ROOT:+$MIRROR_ROOT/graphify-out}"
+
+do_update=0
+do_open=1
+open_report=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --update)  do_update=1 ;;
+    --report)  open_report=1 ;;
+    --no-open) do_open=0 ;;
+    -h|--help)
+      sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) echo "未知参数: $arg (用 --help 看用法)" >&2; exit 1 ;;
+  esac
+done
+
+if [[ ! -d "$WIKI_ROOT" ]]; then
+  echo "error: 找不到 LLM Wiki 根目录: $WIKI_ROOT" >&2
+  exit 1
+fi
+
+# --- 新鲜度检查: wiki 里有没有比图谱更新的 md ---
+stale=0
+if [[ -f "$GRAPH_JSON" ]]; then
+  newer="$(find "$WIKI_SRC" -name '*.md' -newer "$GRAPH_JSON" 2>/dev/null | wc -l)"
+  if [[ "$newer" -gt 0 ]]; then
+    stale=1
+    echo "⚠️  图谱可能过时: $newer 个 wiki 页比图谱新(文档图谱重建在 opencode 里跑 /graphify $WIKI_SRC)"
+  fi
+else
+  echo "⚠️  尚无图谱(graph.json 不存在),将自动重建"
+  do_update=1
+fi
+
+# --- 重建 ---
+# graphify >=0.8 拆分了两条路径:
+#   - `graphify update <path>`：仅重新提取【代码文件】(AST,无 API)。对纯 markdown 文档无效。
+#   - 文档语料的全量图谱:0.8 起没有裸路径 CLI 入口了,需在 opencode 里跑 `/graphify .`
+#     (skill runbook 编排:AST + 语义提取 + 聚类)。
+# LLM Wiki 几乎全是 markdown,所以 CLI 无法一键重建文档图谱,只能提示走 skill。
+if [[ "$do_update" -eq 1 ]]; then
+  if ! command -v graphify >/dev/null 2>&1; then
+    echo "error: 未找到 graphify 命令" >&2
+    exit 1
+  fi
+  echo "▶ 尝试增量提取代码文件: graphify update $WIKI_SRC"
+  before_mtime=$(stat -c %Y "$GRAPH_JSON" 2>/dev/null || echo 0)
+  graphify update "$WIKI_SRC" 2>&1 | sed 's/^/  /' || true
+  after_mtime=$(stat -c %Y "$GRAPH_JSON" 2>/dev/null || echo 0)
+  if [[ "$after_mtime" -le "$before_mtime" ]]; then
+    echo ""
+    echo "ℹ️  CLI update 未改动图谱 —— LLM Wiki 是纯 markdown 文档,"
+    echo "    graphify 0.8 的文档图谱全量重建没有裸路径 CLI,需在 opencode 里跑:"
+    echo "        /graphify $WIKI_SRC"
+    echo "    (skill runbook 会做 AST + 语义提取 + 聚类,再生成 graph.html/GRAPH_REPORT.md)"
+    echo "    本命令继续打开【现有】图谱。"
+  else
+    stale=0
+    echo "✓ 图谱已更新"
+  fi
+fi
+
+# --- 同步一份到镜像侧(仅当设了 LLM_WIKI_MIRROR 且该目录存在) ---
+if [[ -n "$MIRROR_ROOT" && -d "$MIRROR_ROOT" && -f "$GRAPH_HTML" ]]; then
+  mkdir -p "$MIRROR_GRAPH_DIR"
+  cp -f "$GRAPH_HTML" "$MIRROR_GRAPH_DIR/graph.html" 2>/dev/null && \
+    echo "✓ 已同步图谱到镜像: $MIRROR_GRAPH_DIR/graph.html" || true
+  [[ -f "$GRAPH_REPORT" ]] && cp -f "$GRAPH_REPORT" "$MIRROR_GRAPH_DIR/GRAPH_REPORT.md" 2>/dev/null || true
+fi
+
+# --- 打开 ---
+target="$GRAPH_HTML"
+[[ "$open_report" -eq 1 ]] && target="$GRAPH_REPORT"
+
+if [[ ! -f "$target" ]]; then
+  echo "error: 找不到 $target" >&2
+  exit 1
+fi
+
+if [[ "$do_open" -eq 0 ]]; then
+  echo "✓ 完成(--no-open,未弹浏览器)。图谱: $target"
+  [[ "$stale" -eq 1 ]] && echo "  提示: 图谱仍是旧的;文档图谱重建在 opencode 里跑 /graphify $WIKI_SRC"
+  exit 0
+fi
+
+if command -v explorer.exe >/dev/null 2>&1; then
+  win_path="$(wslpath -w "$target")"
+  echo "▶ 在 Windows 默认程序打开: $win_path"
+  explorer.exe "$win_path" || true
+elif command -v wslview >/dev/null 2>&1; then
+  wslview "$target"
+else
+  echo "无法自动打开。手动在 Windows 文件管理器粘贴:"
+  echo "  \\\\wsl\$\\Ubuntu$target"
+fi

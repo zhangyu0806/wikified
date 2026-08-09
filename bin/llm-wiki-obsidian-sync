@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Mirror the local LLM Wiki into a Windows/Obsidian-readable folder.
+
+This script intentionally copies only the public knowledge surfaces that are
+useful inside Obsidian:
+- SCHEMA.md
+- Today.md
+- wiki/
+- raw/sessions/
+- raw/notes/
+- raw/articles/
+
+It does not copy graphify outputs, runtime memory, or arbitrary raw folders.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import os
+import shutil
+import sys
+from pathlib import Path
+
+
+DEFAULT_SOURCE = Path.home() / "llm-wiki"
+
+
+def _mirror_from_config() -> str | None:
+    """读机器本地配置里的 LLM_WIKI_MIRROR。
+
+    选配置文件而非 shell profile：家里和公司的 vault 路径本就不同（属机器本地状态），
+    且非登录 shell（cron / systemd / agent 子进程）读不到 profile，而这些正是要用的场景。
+    """
+    cfg = Path.home() / ".config" / "llm-wiki" / "config.env"
+    if not cfg.is_file():
+        return None
+    try:
+        lines = cfg.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() != "LLM_WIKI_MIRROR":
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value or None
+    return None
+
+
+# 镜像目标没有可移植的默认值：它取决于本机 Obsidian vault 放在哪。
+# 优先级 env > 机器本地配置 > None（由 main() 给出可行动报错），
+# 绝不猜一个只对某台机器成立的路径。
+_MIRROR = os.environ.get("LLM_WIKI_MIRROR") or _mirror_from_config()
+DEFAULT_TARGET = Path(_MIRROR).expanduser() if _MIRROR else None
+
+
+def fail(message: str) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def copy_file(source: Path, target: Path, dry_run: bool) -> None:
+    if dry_run:
+        print(f"would copy file {source} -> {target}")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+
+def mirror_dir(source: Path, target: Path, dry_run: bool) -> tuple[int, int]:
+    copied = 0
+    removed = 0
+
+    if not source.exists():
+        return copied, removed
+
+    if dry_run:
+        print(f"would mirror dir {source} -> {target}")
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+
+    source_files = {path.relative_to(source) for path in source.rglob("*") if path.is_file()}
+    target_files = set()
+    if target.exists():
+        target_files = {path.relative_to(target) for path in target.rglob("*") if path.is_file()}
+
+    for rel_path in sorted(source_files):
+        src = source / rel_path
+        dst = target / rel_path
+        if not dst.exists() or src.stat().st_mtime_ns != dst.stat().st_mtime_ns or src.stat().st_size != dst.stat().st_size:
+            copy_file(src, dst, dry_run)
+            copied += 1
+
+    for rel_path in sorted(target_files - source_files):
+        dst = target / rel_path
+        if dry_run:
+            print(f"would remove stale file {dst}")
+        else:
+            dst.unlink()
+        removed += 1
+
+    if not dry_run and target.exists():
+        for dirpath, dirnames, filenames in os.walk(target, topdown=False):
+            path = Path(dirpath)
+            if path == target:
+                continue
+            if not dirnames and not filenames:
+                path.rmdir()
+
+    return copied, removed
+
+
+def count_markdown_files(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(1 for item in path.rglob("*.md") if item.is_file())
+
+
+def latest_markdown_files(directory: Path, limit: int = 10) -> list[Path]:
+    if not directory.exists():
+        return []
+    return sorted(
+        (path for path in directory.glob("*.md") if path.is_file()),
+        key=lambda path: path.name,
+        reverse=True,
+    )[:limit]
+
+
+def write_index(target_root: Path, source_root: Path, dry_run: bool) -> None:
+    now = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    wiki_count = count_markdown_files(source_root / "wiki")
+    session_count = count_markdown_files(source_root / "raw" / "sessions")
+    note_count = count_markdown_files(source_root / "raw" / "notes")
+    article_count = count_markdown_files(source_root / "raw" / "articles")
+    session_links = "\n".join(
+        f"- [[raw/sessions/{path.stem}|{path.stem}]]" for path in latest_markdown_files(source_root / "raw" / "sessions")
+    ) or "- 暂无 session 记录"
+    note_links = "\n".join(
+        f"- [[raw/notes/{path.stem}|{path.stem}]]" for path in latest_markdown_files(source_root / "raw" / "notes")
+    ) or "- 暂无 quick note"
+    article_links = "\n".join(
+        f"- [[raw/articles/{path.stem}|{path.stem}]]" for path in latest_markdown_files(source_root / "raw" / "articles")
+    ) or "- 暂无 article 记录"
+    today_link = "- [[Today|Today 今日沉淀]]" if (source_root / "Today.md").exists() else ""
+    dashboard_links = """
+- [[wiki/dashboards/projects|项目仪表盘]]
+- [[wiki/dashboards/health|健康检查]]
+""".strip()
+
+    content = f"""# LLM Wiki Mirror
+
+> 这是从 `~/llm-wiki` 同步到 Obsidian 的只读镜像入口。  
+> 最后同步：{now}
+
+## 快速入口
+
+- [[wiki/index|Wiki Index]]
+- [[wiki/overview|Overview]]
+- [[wiki/log|Wiki Log]]
+- [[SCHEMA|LLM Wiki Schema]]
+{today_link}
+{dashboard_links}
+
+## 统计
+
+- Wiki Markdown 页面：{wiki_count}
+- Session raw 记录：{session_count}
+- Quick note 记录：{note_count}
+- Article raw 记录：{article_count}
+
+## 最近 Session
+
+{session_links}
+
+## 最近 Quick Notes
+
+{note_links}
+
+## 最近 Articles
+
+{article_links}
+
+## 使用方式
+
+每次在 OpenCode 里说“记录”或“知识沉淀”后，标准收尾命令是：
+
+```bash
+llm-wiki-refresh
+```
+
+它会生成 `Today.md`、项目仪表盘、健康检查，并自动同步到 Obsidian。只需要单纯重建镜像时，才直接运行 `llm-wiki-obsidian-sync`。
+
+然后在 Obsidian 中把 `{target_root}` 作为 vault 打开，或用命令打开入口页：
+
+```bash
+obs --vault "LLM-wiki" open "LLM Wiki Mirror.md"
+```
+
+## 约定
+
+- `wiki/` 是 LLM 编译后的长期知识库。
+- `raw/sessions/` 是每次会话的不可变摘要来源。
+- `raw/notes/` 是“记一下：...”这类快速碎片记录。
+- `raw/articles/` 是外部文章、视频、播客、论文等源材料记录。
+- `{target_root}` 是 Obsidian 可直接打开的镜像目录；长期维护仍以 `{source_root}` 为源。
+"""
+    index_path = target_root / "LLM Wiki Mirror.md"
+    if dry_run:
+        print(f"would write {index_path}")
+        return
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(content, encoding="utf-8")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Mirror an LLM Wiki root into an Obsidian-readable folder.")
+    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE, help="LLM Wiki root directory")
+    parser.add_argument("--target", type=Path, default=DEFAULT_TARGET, help="Target mirror directory")
+    parser.add_argument("--dry-run", action="store_true", help="Print intended changes without writing")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    source_root = args.source.expanduser().resolve()
+    if args.target is None:
+        fail(
+            "no mirror target. Pick one of:\n"
+            "  --target DIR                                  (one-off)\n"
+            "  export LLM_WIKI_MIRROR=DIR                    (this shell)\n"
+            "  echo 'LLM_WIKI_MIRROR=DIR' >> ~/.config/llm-wiki/config.env"
+            "   (persistent, machine-local, also visible to cron/systemd)\n"
+            "e.g. /mnt/<drive>/<YourVault> on WSL, ~/Obsidian/LLM-wiki on macOS/Linux."
+        )
+    target_root = args.target.expanduser().resolve()
+
+    if not source_root.exists():
+        fail(f"source does not exist: {source_root}")
+    if not (source_root / "SCHEMA.md").exists():
+        fail(f"source is not an LLM Wiki root, missing SCHEMA.md: {source_root}")
+    if not args.dry_run:
+        target_root.mkdir(parents=True, exist_ok=True)
+    elif not target_root.exists():
+        print(f"would create target directory {target_root}")
+
+    copied = 0
+    removed = 0
+
+    copy_file(source_root / "SCHEMA.md", target_root / "SCHEMA.md", args.dry_run)
+    copied += 1
+
+    today = source_root / "Today.md"
+    if today.exists():
+        copy_file(today, target_root / "Today.md", args.dry_run)
+        copied += 1
+
+    for rel_dir in (Path("wiki"), Path("raw") / "sessions", Path("raw") / "notes", Path("raw") / "articles"):
+        c, r = mirror_dir(source_root / rel_dir, target_root / rel_dir, args.dry_run)
+        copied += c
+        removed += r
+
+    write_index(target_root, source_root, args.dry_run)
+
+    print(f"source={source_root}")
+    print(f"target={target_root}")
+    print(f"copied_or_updated={copied}")
+    print(f"removed_stale={removed}")
+    print(f"entry={target_root / 'LLM Wiki Mirror.md'}")
+
+
+if __name__ == "__main__":
+    main()

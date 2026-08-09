@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Capture user corrections/preferences into a human-review promotion queue.
+
+Gap C (对标 claude-reflect). Unlike `llm-wiki-event --type preference` which
+writes a *decaying* memory event for semantic recall, a correction is a
+*non-decaying candidate* awaiting human review for promotion into durable rules
+(AGENTS.md / wiki/context/CRITICAL_FACTS.md). Append-only JSONL, secrets redacted,
+fcntl-locked. Never edits wiki/ or AGENTS.md itself — promotion stays human-gated.
+
+用法：
+  llm-wiki-correct "用户纠正/偏好原文" [--kind correction|preference]
+  llm-wiki-correct --list                 列出 pending 队列供人审
+  llm-wiki-correct --resolve <id>          标记某条已晋升（从 pending 移除）
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import re
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+DEFAULT_ROOT = Path.home() / "llm-wiki"
+SCHEMA_VERSION = "llm-wiki-correction/v1"
+
+# 复用 llm-wiki-event 同款脱敏，保证两条入口的密钥防护口径一致。
+SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,'\"]+(?:\s+[a-z0-9._~+/=-]{8,})?"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)([\"']?(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*)([\"']?)[^\s,'\"&]+([\"']?)"), r"\1\2[REDACTED]\3"),
+    (re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|password|passwd|pwd)=)[^\s&#]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{16,}"), "Bearer [REDACTED]"),
+    (re.compile(r"\b(sk-[a-zA-Z0-9_-]{16,})\b"), "[REDACTED_OPENAI_KEY]"),
+    (re.compile(r"\b(gh[pousr]_[a-zA-Z0-9_]{20,})\b"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"\b(xox[baprs]-[a-zA-Z0-9-]{20,})\b"), "[REDACTED_SLACK_TOKEN]"),
+    (re.compile(r"\b(eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})\b"), "[REDACTED_JWT]"),
+]
+
+
+def redact(text: str) -> str:
+    for pattern, replacement in SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def queue_path(root: Path) -> Path:
+    return root / "raw" / "inbox" / "corrections.jsonl"
+
+
+def read_all(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def append_row(root: Path, row: dict[str, Any]) -> None:
+    path = queue_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = root / "raw" / "inbox" / ".corrections.lock"
+    with lock.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def rewrite_all(root: Path, rows: list[dict[str, Any]]) -> None:
+    path = queue_path(root)
+    lock = root / "raw" / "inbox" / ".corrections.lock"
+    with lock.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            path.write_text(
+                "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+                encoding="utf-8",
+            )
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def cmd_list(root: Path) -> int:
+    rows = [r for r in read_all(queue_path(root)) if r.get("status") == "pending"]
+    if not rows:
+        print("corrections 队列为空（无 pending）")
+        return 0
+    print(f"== {len(rows)} 条 pending 待人审晋升 ==")
+    for r in rows:
+        when = str(r.get("timestamp", ""))[:19]
+        print(f"[{r.get('id')}] {r.get('kind')} {when}\n    {r.get('text')}")
+    return 0
+
+
+def cmd_resolve(root: Path, target_id: str) -> int:
+    rows = read_all(queue_path(root))
+    found = False
+    for r in rows:
+        if r.get("id") == target_id and r.get("status") == "pending":
+            r["status"] = "promoted"
+            r["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            found = True
+    if not found:
+        print(f"未找到 pending 项: {target_id}", file=sys.stderr)
+        return 1
+    rewrite_all(root, rows)
+    print(f"已标记晋升: {target_id}")
+    return 0
+
+
+def cmd_add(root: Path, text: str, kind: str) -> int:
+    text = redact(text.strip())
+    if not text:
+        print("llm-wiki-correct: 文本不能为空", file=sys.stderr)
+        return 2
+    now = datetime.now(timezone.utc)
+    seed = f"{now.isoformat()}\0{kind}\0{text}\0{uuid.uuid4()}"
+    row = {
+        "schema_version": SCHEMA_VERSION,
+        "id": hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12],
+        "timestamp": now.isoformat(),
+        "kind": kind,
+        "text": text,
+        "status": "pending",
+    }
+    append_row(root, row)
+    print(f"已入队 {row['id']} ({kind}) -> raw/inbox/corrections.jsonl")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Capture user corrections/preferences for human-gated promotion.")
+    parser.add_argument("text", nargs="?", help="纠正/偏好原文；省略则从 stdin 读")
+    parser.add_argument("--kind", choices=["correction", "preference"], default="correction")
+    parser.add_argument("--list", action="store_true", help="列出 pending 队列")
+    parser.add_argument("--resolve", metavar="ID", help="标记某条已晋升")
+    parser.add_argument("--root", default=str(DEFAULT_ROOT))
+    args = parser.parse_args(argv)
+    root = Path(args.root)
+
+    if args.list:
+        return cmd_list(root)
+    if args.resolve:
+        return cmd_resolve(root, args.resolve)
+    text = args.text or sys.stdin.read()
+    return cmd_add(root, text, args.kind)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

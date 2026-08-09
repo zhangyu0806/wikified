@@ -1,0 +1,19 @@
+# ============================================================
+# 跨机合并策略
+# ============================================================
+
+# append-only 事件日志：两地各自追加，合并时保留双方所有行。
+# union 会产生重复行（两边共同祖先之后的行各留一份），
+# 因此 merge/pull 后必须跑 `llm-wiki-dedupe-events` 按 event id 去重。
+# 不加 union 的后果：每次跨地 pull 都要手工解 jsonl 冲突。
+memory/events/*.jsonl merge=union
+raw/inbox/corrections.jsonl merge=union
+
+# 统一 LF，避免 WSL/Windows 混用产生整文件 diff
+* text=auto eol=lf
+
+# 二进制/不做 diff
+*.png binary
+*.jpg binary
+*.gz binary
+*.tar binary
