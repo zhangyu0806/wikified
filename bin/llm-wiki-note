@@ -4,16 +4,42 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
 
-WIKI_ROOT = Path.home() / "llm-wiki"
+WIKI_ROOT = Path(os.environ.get("LLM_WIKI_ROOT", Path.home() / "llm-wiki")).expanduser()
 NOTES_DIR = WIKI_ROOT / "raw" / "notes"
-REFRESH_COMMAND = Path.home() / ".local" / "bin" / "llm-wiki-refresh"
+
+
+def _resolve_refresh() -> str:
+    """定位 llm-wiki-refresh。
+
+    先看与本文件同目录的兄弟命令：软链安装后两者同在 BIN_TARGET 里，
+    这样即使装到非默认位置也能自洽。其次认 LLM_WIKI_BIN_TARGET，
+    最后交给 PATH 兜底。
+    写死 ~/.local/bin 会导致自定义 BIN_TARGET 下静默跳过刷新——
+    笔记落盘但派生页永不更新，且不报错。
+    """
+    name = "llm-wiki-refresh"
+    candidates = [Path(__file__).resolve().parent]
+    env_bin = os.environ.get("LLM_WIKI_BIN_TARGET")
+    if env_bin:
+        candidates.append(Path(env_bin).expanduser())
+    candidates.append(Path.home() / ".local" / "bin")
+    for d in candidates:
+        p = d / name
+        if p.exists():
+            return str(p)
+    return name
+
+
+REFRESH_COMMAND = _resolve_refresh()
 
 
 def slugify(text: str, fallback: str) -> str:
@@ -95,8 +121,17 @@ def main() -> int:
     path.write_text(build_note(title, text, now), encoding="utf-8")
     print(f"note={path}")
 
-    if not args.no_sync and REFRESH_COMMAND.exists():
-        subprocess.run([str(REFRESH_COMMAND)], check=True)
+    if not args.no_sync:
+        # _resolve_refresh() 可能回落成裸命令名，交给 PATH 解析；
+        # 两条路都找不到时明确告知，不静默跳过刷新。
+        if Path(REFRESH_COMMAND).exists() or shutil.which(REFRESH_COMMAND):
+            subprocess.run([REFRESH_COMMAND], check=True)
+        else:
+            print(
+                f"warn: 未找到 {REFRESH_COMMAND}，已跳过派生页刷新。"
+                "笔记已写入，可稍后手动跑 llm-wiki-refresh。",
+                file=sys.stderr,
+            )
     return 0
 
 

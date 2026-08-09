@@ -390,7 +390,26 @@ tags: [dashboard, health, llm-wiki]
 
 
 def run_sync(root: Path) -> None:
-    subprocess.run(["llm-wiki-obsidian-sync", "--source", str(root)], check=True)
+    """把库镜像到 Obsidian vault。镜像未配置时跳过，不视为失败。
+
+    镜像是可选的展示层，核心写入路径不能因它缺失而失败：llm-wiki-note 会调
+    本命令，若在此抛错，未配置镜像的用户连记笔记都做不了。
+    """
+    result = subprocess.run(
+        ["llm-wiki-obsidian-sync", "--source", str(root)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        if result.stdout:
+            print(result.stdout, end="")
+        return
+    # obsidian-sync 用 rc=1 表示「没有镜像目标」，这是未配置而非故障。
+    if "no mirror target" in (result.stderr or ""):
+        print("skipped Obsidian mirror: LLM_WIKI_MIRROR not set (see llm-wiki-obsidian-sync --help)")
+        return
+    print(result.stderr or "", end="", file=sys.stderr)
+    raise SystemExit(result.returncode)
 
 
 def parse_args() -> argparse.Namespace:
