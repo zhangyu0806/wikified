@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "llm-wiki-memory-event/v1"
+SCHEMA_VERSION = "llm-wiki-memory-event/v2"
 DEFAULT_HALF_LIFE_DAYS = 90
 EVENT_TYPES = {
     "fact",
@@ -35,14 +35,14 @@ EVENT_TYPES = {
 }
 
 SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,'\"]+(?:\s+[a-z0-9._~+/=-]{8,})?"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)([\"']?(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*)([\"']?)[^\s,'\"&]+([\"']?)"), r"\1\2[REDACTED]\3"),
-    (re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|password|passwd|pwd)=)[^\s&#]+"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{16,}"), "Bearer [REDACTED]"),
     (re.compile(r"\b(sk-[a-zA-Z0-9_-]{16,})\b"), "[REDACTED_OPENAI_KEY]"),
     (re.compile(r"\b(gh[pousr]_[a-zA-Z0-9_]{20,})\b"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"\b(xox[baprs]-[a-zA-Z0-9-]{20,})\b"), "[REDACTED_SLACK_TOKEN]"),
     (re.compile(r"\b(eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})\b"), "[REDACTED_JWT]"),
+    (re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,'\"]+(?:\s+[a-z0-9._~+/=-]{8,})?"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)([\"']?(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*)([\"']?)(?!\[REDACTED)[^\s,'\"&]+([\"']?)"), r"\1\2[REDACTED]\3"),
+    (re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|password|passwd|pwd)=)[^\s&#]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{16,}"), "Bearer [REDACTED]"),
 ]
 SENSITIVE_KEY_RE = re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|authorization)")
 
@@ -86,6 +86,73 @@ def normalize_files(files: list[str], cwd: Path) -> list[str]:
 
 def memory_root() -> Path:
     return Path(os.environ.get("LLM_WIKI_ROOT", "~/llm-wiki")).expanduser() / "memory"
+
+
+def parse_valid_time(value: str | None, label: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            parsed = datetime.fromisoformat(f"{value}T00:00:00+00:00")
+        else:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be ISO-8601, got {value!r}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def load_event_index(root: Path) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    events_dir = root / "events"
+    if not events_dir.exists():
+        return index
+    for path in sorted(events_dir.glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and isinstance(event.get("id"), str):
+                index[event["id"]] = event
+    return index
+
+
+def validate_supersedes(event_index: dict[str, dict[str, Any]], targets: list[str], project: str) -> list[str]:
+    normalized = list(dict.fromkeys(targets))
+    for target_id in normalized:
+        if not re.fullmatch(r"[0-9a-f]{16}", target_id):
+            raise ValueError(f"supersedes id must be 16 lowercase hex characters: {target_id!r}")
+        target = event_index.get(target_id)
+        if target is None:
+            raise ValueError(f"supersedes target does not exist: {target_id}")
+        if target.get("project") not in {project, None, ""}:
+            raise ValueError(f"supersedes target belongs to another project: {target_id}")
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(current: str) -> None:
+            if current in visiting:
+                raise ValueError(f"existing supersedes cycle detected at: {current}")
+            if current in visited:
+                return
+            visiting.add(current)
+            linked = event_index.get(current, {}).get("supersedes", [])
+            if isinstance(linked, str):
+                linked = [linked]
+            if isinstance(linked, list):
+                for child in linked:
+                    if isinstance(child, str):
+                        visit(child)
+            visiting.remove(current)
+            visited.add(current)
+
+        visit(target_id)
+    return normalized
 
 
 def month_path(root: Path, now: datetime) -> Path:
@@ -152,6 +219,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--confidence", type=float, default=0.7, help="Initial confidence, 0.0-1.0.")
     parser.add_argument("--half-life-days", type=int, default=DEFAULT_HALF_LIFE_DAYS, help="Confidence decay half-life.")
     parser.add_argument("--source", default="manual", help="Source label, e.g. manual/session/tool.")
+    parser.add_argument("--valid-from", help="ISO-8601 instant/date when this fact becomes current.")
+    parser.add_argument("--valid-until", help="ISO-8601 instant/date when this fact expires (exclusive).")
+    parser.add_argument(
+        "--supersedes",
+        action="append",
+        default=[],
+        help="Existing same-project event id made obsolete by this event. Repeatable.",
+    )
     parser.add_argument("--print", action="store_true", help="Print the redacted event JSON after writing.")
     return parser.parse_args(argv)
 
@@ -167,6 +242,24 @@ def main(argv: list[str]) -> int:
     cwd = Path.cwd()
     now = datetime.now(timezone.utc)
     files = normalize_files(args.files, cwd)
+    project = stable_project(cwd, args.project)
+    try:
+        valid_from = parse_valid_time(args.valid_from, "valid_from") or now
+        valid_until = parse_valid_time(args.valid_until, "valid_until")
+    except ValueError as exc:
+        print(f"llm-wiki-event: {exc}", file=sys.stderr)
+        return 2
+    if valid_until is not None and valid_until <= valid_from:
+        print("llm-wiki-event: valid_until must be later than valid_from", file=sys.stderr)
+        return 2
+
+    root = memory_root()
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        supersedes = validate_supersedes(load_event_index(root), args.supersedes, project)
+    except ValueError as exc:
+        print(f"llm-wiki-event: {exc}", file=sys.stderr)
+        return 2
     event_id_seed = f"{now.isoformat()}\0{args.type}\0{summary}\0{uuid.uuid4()}"
     event_id = hashlib.sha256(event_id_seed.encode("utf-8")).hexdigest()[:16]
 
@@ -175,7 +268,7 @@ def main(argv: list[str]) -> int:
         "id": event_id,
         "timestamp": now.isoformat(),
         "type": args.type,
-        "project": stable_project(cwd, args.project),
+        "project": project,
         "cwd": str(cwd),
         "files": files,
         "concepts": sorted(dict.fromkeys(args.concepts)),
@@ -185,11 +278,14 @@ def main(argv: list[str]) -> int:
         "half_life_days": max(1, int(args.half_life_days)),
         "lifecycle": "active",
         "source": args.source,
+        "valid_from": valid_from.isoformat(),
     }
+    if valid_until is not None:
+        event["valid_until"] = valid_until.isoformat()
+    if supersedes:
+        event["supersedes"] = supersedes
     event = redact(event)
 
-    root = memory_root()
-    root.mkdir(parents=True, exist_ok=True)
     path = month_path(root, now)
     lock_path = root / ".memory.lock"
     with lock_path.open("a", encoding="utf-8") as lock_handle:

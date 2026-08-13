@@ -4,10 +4,11 @@
 本机有一个 LLM Wiki 记忆库，存放已验证的事实、决策、踩过的坑和用户偏好。
 分三层：`raw/`（不可变源材料）→ `wiki/`（编译后的知识）→ `memory/events/`（typed event）。
 
-### 召回：必须主动触发
+### 召回：会话摘要自动注入，具体主题主动触发
 
-Codex 没有会话启动 hook（OpenCode 有 `chat.message` 插件做自动注入），
-因此本机的记忆**不会自动出现**在你的上下文里。需要你主动取：
+当前 Codex 支持 `SessionStart` hook。安装并信任 `templates/codex/hooks.json` 后，
+会话启动、恢复、清空和压缩后会自动注入一份有界摘要；它只提供最低限度的背景，
+不替代针对本次任务的主动召回：
 
 ```bash
 llm-wiki-enrich --session-start          # 任务开始时：关键事实 + 活跃项目 + 未闭环事项

@@ -146,7 +146,7 @@ shopt -u nullglob
 
 # ---------- 4. git hooks ----------
 printf '\n[4/5] git hooks\n'
-if [[ -d "$REPO/.git" ]]; then
+if [[ -e "$REPO/.git" ]]; then
   want=.githooks
   cur=$(git -C "$REPO" config --get core.hooksPath 2>/dev/null || true)
   if [[ "$cur" == "$want" ]]; then
@@ -202,19 +202,30 @@ if [[ -e "$MCP_BIN" ]]; then
     note "      \"llm-wiki\": { \"type\": \"local\", \"command\": [\"$MCP_BIN\"], \"enabled\": true }"
   fi
 
-  # Codex 没有会话启动 hook（OpenCode 靠 chat.message 插件自动注入），
-  # 因此 Codex 侧的召回必须由 agent 主动触发。这两个模板提供那套指令，
-  # 但 AGENTS.md 与 prompts/ 是用户自己的文件、可能已手工调过，
-  # 所以只打印指引、绝不代写——与 skills 的自动软链形成有意的不对称。
-  CODEX_AGENTS_MD="${LLM_WIKI_CODEX_AGENTS_MD:-$HOME/.codex/AGENTS.md}"
+  # Codex 已支持 SessionStart hook，但 hooks.json / AGENTS.md / prompts 都可能
+  # 含用户自己的配置，因此只检测和打印安全合并指引，绝不整文件覆盖。
+  CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+  CODEX_HOOKS_JSON="${LLM_WIKI_CODEX_HOOKS_JSON:-$CODEX_HOME_DIR/hooks.json}"
+  if [[ -f "$CODEX_HOOKS_JSON" ]] \
+    && grep -q 'SessionStart' "$CODEX_HOOKS_JSON" \
+    && grep -q 'llm-wiki-enrich' "$CODEX_HOOKS_JSON"; then
+    note "Codex SessionStart hook 已接线"
+  else
+    warn "Codex 自动召回未接线：$CODEX_HOOKS_JSON 缺 LLM Wiki SessionStart hook"
+    note "  → 合并 $REPO/templates/codex/hooks.json（已有 hooks 时不要覆盖）"
+    note "  → Windows Desktop + WSL 使用模板里的 commandWindows；必要时加 -d <distro>"
+    note "  → 重启 Codex 后用 /hooks 审查并信任精确 hook 定义"
+  fi
+
+  CODEX_AGENTS_MD="${LLM_WIKI_CODEX_AGENTS_MD:-$CODEX_HOME_DIR/AGENTS.md}"
   if [[ -d "$(dirname "$CODEX_AGENTS_MD")" ]]; then
     if [[ -f "$CODEX_AGENTS_MD" ]] && grep -q 'BEGIN llm-wiki-recall' "$CODEX_AGENTS_MD"; then
       note "Codex 召回块已接线"
     else
-      warn "Codex 无自动召回：$CODEX_AGENTS_MD 缺 llm-wiki-recall 块"
+      warn "Codex 缺按需召回规则：$CODEX_AGENTS_MD 缺 llm-wiki-recall 块"
       note "  → cat $REPO/templates/codex/AGENTS.recall.md >> $CODEX_AGENTS_MD"
       note "  → cp $REPO/templates/codex/prompts/llm-wiki-recall.md $(dirname "$CODEX_AGENTS_MD")/prompts/"
-      note "  → 不接线则 Codex 每次都从零开始，不会主动召回已有记忆"
+      note "  → hook 只注入极简卡片；这条规则负责按当前任务做定向召回"
     fi
   fi
 fi

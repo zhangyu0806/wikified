@@ -14,6 +14,7 @@ injection at session start, degrading gracefully when the curated
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import math
 import os
@@ -25,16 +26,19 @@ from pathlib import Path
 from typing import Any, Iterable
 
 SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,'\"]+(?:\s+[a-z0-9._~+/=-]{8,})?"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)([\"']?(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*)([\"']?)[^\s,'\"&]+([\"']?)"), r"\1\2[REDACTED]\3"),
-    (re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|password|passwd|pwd)=)[^\s&#]+"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{16,}"), "Bearer [REDACTED]"),
+    # Match provider-specific credentials before generic ``token=...`` forms so
+    # the output keeps an explainable redaction marker without exposing bytes.
     (re.compile(r"\b(sk-[a-zA-Z0-9_-]{16,})\b"), "[REDACTED_OPENAI_KEY]"),
     (re.compile(r"\b(gh[pousr]_[a-zA-Z0-9_]{20,})\b"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"\b(xox[baprs]-[a-zA-Z0-9-]{20,})\b"), "[REDACTED_SLACK_TOKEN]"),
     (re.compile(r"\b(eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})\b"), "[REDACTED_JWT]"),
+    (re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,'\"]+(?:\s+[a-z0-9._~+/=-]{8,})?"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)([\"']?(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*)([\"']?)(?!\[REDACTED)[^\s,'\"&]+([\"']?)"), r"\1\2[REDACTED]\3"),
+    (re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|password|passwd|pwd)=)[^\s&#]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{16,}"), "Bearer [REDACTED]"),
 ]
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_./:-]{2,}")
+CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 STOP_TOKENS = {
     "and",
     "or",
@@ -51,6 +55,8 @@ STOP_TOKENS = {
 }
 MAX_EVENT_LINES = 5000
 MAX_WIKI_BYTES = 64 * 1024
+MAX_WIKI_FILES = 2000
+MAX_WIKI_TOTAL_BYTES = 8 * 1024 * 1024
 
 # Session-memory injection canary. Lives ONLY in this script's --session-start
 # output (and is intentionally absent from every file under ~/llm-wiki) so it can
@@ -65,6 +71,7 @@ class Candidate:
     source: str
     title: str
     text: str
+    signals: dict[str, Any]
 
 
 def redact(text: str) -> str:
@@ -92,7 +99,8 @@ def normalize_files(files: list[str], cwd: Path) -> list[str]:
     return sorted(dict.fromkeys(normalized))
 
 
-def tokenize(parts: Iterable[str]) -> set[str]:
+def legacy_tokenize(parts: Iterable[str]) -> set[str]:
+    """Original ASCII/path tokenizer kept for reproducible eval comparison."""
     tokens: set[str] = set()
     for part in parts:
         for token in TOKEN_RE.findall(part.lower()):
@@ -105,13 +113,49 @@ def tokenize(parts: Iterable[str]) -> set[str]:
     return {token for token in tokens if len(token) >= 3 and token not in STOP_TOKENS}
 
 
+def token_terms(parts: Iterable[str]) -> list[str]:
+    """Return deterministic lexical terms, including cheap CJK bi/tri-grams.
+
+    Python's stdlib has no Chinese segmenter. Character n-grams are deliberately
+    modest: they make Chinese recall work without adding a model, dictionary,
+    network call, or package dependency. Exact phrases still receive a separate
+    ranking bonus, so n-grams are a recall fallback rather than fake semantics.
+    """
+    terms: list[str] = []
+    for part in parts:
+        lowered = part.lower()
+        for token in TOKEN_RE.findall(lowered):
+            if len(token) >= 3 and token not in STOP_TOKENS:
+                terms.append(token)
+            path = Path(token)
+            for derived in (path.name.lower(), path.stem.lower()):
+                if len(derived) >= 3 and derived not in STOP_TOKENS:
+                    terms.append(derived)
+        for sequence in CJK_RE.findall(lowered):
+            if len(sequence) == 1:
+                terms.append(sequence)
+                continue
+            for width in (2, 3):
+                if len(sequence) < width:
+                    continue
+                terms.extend(sequence[idx : idx + width] for idx in range(len(sequence) - width + 1))
+    return terms
+
+
+def tokenize(parts: Iterable[str]) -> set[str]:
+    return set(token_terms(parts))
+
+
 def parse_time(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def decayed_confidence(event: dict[str, Any]) -> float:
@@ -143,11 +187,41 @@ def load_events(root: Path) -> list[dict[str, Any]]:
                 item = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(item, dict) and item.get("lifecycle", "active") != "deprecated":
+            if isinstance(item, dict):
                 events.append(item)
                 if len(events) >= MAX_EVENT_LINES:
-                    return events
-    return events
+                    break
+        if len(events) >= MAX_EVENT_LINES:
+            break
+
+    now = datetime.now(timezone.utc)
+    superseded: set[str] = set()
+    for event in events:
+        if event.get("lifecycle", "active") == "deprecated":
+            continue
+        valid_from = parse_time(event.get("valid_from") or event.get("timestamp"))
+        if valid_from is not None and valid_from > now:
+            continue
+        targets = event.get("supersedes", [])
+        if isinstance(targets, str):
+            targets = [targets]
+        if isinstance(targets, list):
+            superseded.update(str(item) for item in targets if isinstance(item, str))
+
+    active: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("lifecycle", "active") == "deprecated":
+            continue
+        if str(event.get("id", "")) in superseded:
+            continue
+        valid_from = parse_time(event.get("valid_from") or event.get("timestamp"))
+        valid_until = parse_time(event.get("valid_until"))
+        if valid_from is not None and valid_from > now:
+            continue
+        if valid_until is not None and valid_until <= now:
+            continue
+        active.append(event)
+    return active
 
 
 def event_candidates(events: list[dict[str, Any]], query_tokens: set[str], touched_files: list[str], project: str | None) -> list[Candidate]:
@@ -171,7 +245,10 @@ def event_candidates(events: list[dict[str, Any]], query_tokens: set[str], touch
             elif any(name and name in lowered for name in touched_long_names):
                 file_score += 3
         score = file_score + overlap + (2.0 * decayed_confidence(event))
-        if score <= 0:
+        # Confidence and recency are ranking signals, not evidence of relevance.
+        # Without a lexical or touched-file match, returning every high-confidence
+        # event creates unrelated context and makes prompt injection more likely.
+        if overlap <= 0 and file_score <= 0:
             continue
         when = str(event.get("timestamp", ""))[:19]
         title = f"{event.get('type', 'event')} {event.get('id', '')} {when}".strip()
@@ -180,27 +257,117 @@ def event_candidates(events: list[dict[str, Any]], query_tokens: set[str], touch
             body = f"{body}\n{event['details']}"
         if files:
             body = f"{body}\nFiles: {', '.join(files)}"
-        candidates.append(Candidate(score=score, source="memory-event", title=title, text=body))
+        candidates.append(
+            Candidate(
+                score=score,
+                source="memory-event",
+                title=title,
+                text=body,
+                signals={
+                    "file": file_score,
+                    "token_overlap": overlap,
+                    "decayed_confidence": round(decayed_confidence(event), 6),
+                },
+            )
+        )
     return candidates
 
 
-def wiki_candidates(root: Path, query_tokens: set[str], limit_files: int = 80) -> list[Candidate]:
+def _legacy_wiki_candidates(root: Path, query_tokens: set[str]) -> list[Candidate]:
     wiki_dir = root / "wiki"
     if not wiki_dir.exists():
         return []
     candidates: list[Candidate] = []
-    paths = [path for path in wiki_dir.rglob("*.md") if path.is_file()]
-    for path in paths[:limit_files]:
+    paths = sorted(path for path in wiki_dir.rglob("*.md") if path.is_file())
+    for path in paths[:80]:
         with path.open("rb") as handle:
             text = handle.read(MAX_WIKI_BYTES).decode("utf-8", errors="replace")
         title = path.relative_to(wiki_dir).as_posix()
-        tokens = tokenize([title, text[:12000]])
+        tokens = legacy_tokenize([title, text[:12000]])
         overlap = len(query_tokens & tokens)
         if overlap <= 0:
             continue
-        title_bonus = 2 if query_tokens & tokenize([title]) else 0
+        title_bonus = 2 if query_tokens & legacy_tokenize([title]) else 0
         excerpt = extract_excerpt(text, query_tokens)
-        candidates.append(Candidate(score=float(overlap + title_bonus), source="wiki-page", title=title, text=excerpt))
+        candidates.append(
+            Candidate(
+                score=float(overlap + title_bonus),
+                source="wiki-page",
+                title=title,
+                text=excerpt,
+                signals={"legacy_overlap": overlap, "title_bonus": title_bonus},
+            )
+        )
+    return candidates
+
+
+def wiki_candidates(root: Path, query: str, query_terms: list[str]) -> list[Candidate]:
+    wiki_dir = root / "wiki"
+    if not wiki_dir.exists() or not query_terms:
+        return []
+
+    documents: list[tuple[str, str, list[str], list[str]]] = []
+    total_bytes = 0
+    for path in sorted(item for item in wiki_dir.rglob("*.md") if item.is_file())[:MAX_WIKI_FILES]:
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_WIKI_BYTES)
+        except OSError:
+            continue
+        if total_bytes + len(raw) > MAX_WIKI_TOTAL_BYTES:
+            break
+        total_bytes += len(raw)
+        text = raw.decode("utf-8", errors="replace")
+        title = path.relative_to(wiki_dir).as_posix()
+        documents.append((title, text, token_terms([title, text]), token_terms([title])))
+
+    if not documents:
+        return []
+    document_frequency: Counter[str] = Counter()
+    for _, _, terms, _ in documents:
+        document_frequency.update(set(terms))
+    average_length = sum(len(terms) for _, _, terms, _ in documents) / len(documents)
+    average_length = max(1.0, average_length)
+    query_counts = Counter(query_terms)
+    normalized_query = " ".join(query.lower().split())
+    candidates: list[Candidate] = []
+
+    for title, text, terms, title_terms in documents:
+        frequencies = Counter(terms)
+        bm25 = 0.0
+        matched: list[str] = []
+        for term, query_weight in query_counts.items():
+            frequency = frequencies.get(term, 0)
+            if not frequency:
+                continue
+            matched.append(term)
+            df = document_frequency[term]
+            idf = math.log(1.0 + (len(documents) - df + 0.5) / (df + 0.5))
+            denominator = frequency + 1.2 * (1.0 - 0.75 + 0.75 * len(terms) / average_length)
+            bm25 += query_weight * idf * (frequency * 2.2 / denominator)
+
+        if bm25 <= 0:
+            continue
+        title_overlap = len(set(query_terms) & set(title_terms))
+        title_bonus = min(6.0, 1.5 * title_overlap)
+        haystack = " ".join(text.lower().split())
+        phrase_bonus = 3.0 if len(normalized_query) >= 3 and normalized_query in f"{title.lower()}\n{haystack}" else 0.0
+        score = (2.0 * bm25) + title_bonus + phrase_bonus
+        excerpt = extract_excerpt(text, set(query_terms))
+        candidates.append(
+            Candidate(
+                score=score,
+                source="wiki-page",
+                title=title,
+                text=excerpt,
+                signals={
+                    "bm25": round(bm25, 6),
+                    "title_bonus": title_bonus,
+                    "phrase_bonus": phrase_bonus,
+                    "matched_terms": sorted(set(matched), key=lambda item: (-len(item), item))[:12],
+                },
+            )
+        )
     return candidates
 
 
@@ -220,16 +387,28 @@ def extract_excerpt(text: str, query_tokens: set[str], max_lines: int = 8) -> st
 
 
 def graph_hint(root: Path, query_tokens: set[str]) -> Candidate | None:
+    if not query_tokens:
+        return None
     report = root / "graphify-out" / "GRAPH_REPORT.md"
     if not report.exists():
         report = Path.cwd() / "graphify-out" / "GRAPH_REPORT.md"
     if not report.exists():
         return None
     text = report.read_text(encoding="utf-8", errors="replace")
-    excerpt = extract_excerpt(text, query_tokens, max_lines=5)
-    if not excerpt.strip():
+    matching_lines = [
+        line.rstrip()
+        for line in text.splitlines()
+        if any(token in line.lower() for token in query_tokens)
+    ][:5]
+    if not matching_lines:
         return None
-    return Candidate(score=0.75, source="graphify-report", title=str(report), text=excerpt)
+    return Candidate(
+        score=0.75,
+        source="graphify-report",
+        title=str(report),
+        text="\n".join(matching_lines),
+        signals={"token_overlap": len(matching_lines)},
+    )
 
 
 def read_text_head(path: Path, max_bytes: int = MAX_WIKI_BYTES) -> str:
@@ -393,6 +572,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--max-chars", type=int, default=3500, help="Maximum output characters.")
     parser.add_argument("--json", action="store_true", help="Output machine-readable JSON instead of Markdown.")
     parser.add_argument(
+        "--ranking",
+        choices=("hybrid", "legacy"),
+        default="hybrid",
+        help="Ranking implementation. legacy exists only for reproducible regression comparison.",
+    )
+    parser.add_argument(
         "--session-start",
         action="store_true",
         help="Emit an always-on session-start memory digest (ignores --file/--query).",
@@ -420,6 +605,43 @@ def render_markdown(candidates: list[Candidate], max_chars: int) -> str:
     return output
 
 
+def render_json(candidates: list[Candidate], max_chars: int) -> str:
+    """Return a valid JSON array within budget; never byte-slice serialized JSON."""
+    budget = max(200, max_chars)
+    payload: list[dict[str, Any]] = []
+    for candidate in candidates:
+        base = {
+            "score": candidate.score,
+            "source": candidate.source,
+            "title": candidate.title,
+            "text": redact(candidate.text.strip()),
+            "signals": candidate.signals,
+        }
+        trial = payload + [base]
+        serialized = json.dumps(trial, ensure_ascii=False, indent=2)
+        if len(serialized) <= budget:
+            payload = trial
+            continue
+
+        low, high = 0, len(base["text"])
+        fitted: dict[str, Any] | None = None
+        while low <= high:
+            midpoint = (low + high) // 2
+            clipped = dict(base)
+            clipped["text"] = base["text"][:midpoint]
+            clipped["truncated"] = midpoint < len(base["text"])
+            serialized = json.dumps(payload + [clipped], ensure_ascii=False, indent=2)
+            if len(serialized) <= budget:
+                fitted = clipped
+                low = midpoint + 1
+            else:
+                high = midpoint - 1
+        if fitted is not None:
+            payload.append(fitted)
+        break
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     root = root_path()
@@ -430,27 +652,19 @@ def main(argv: list[str]) -> int:
         print("llm-wiki-enrich: provide --file or --query (or --session-start)", file=sys.stderr)
         return 2
     touched_files = normalize_files(args.files, Path.cwd())
-    query_tokens = tokenize([args.query, *touched_files])
+    query_terms = token_terms([args.query, *touched_files])
+    query_tokens = set(query_terms)
     candidates = event_candidates(load_events(root), query_tokens, touched_files, args.project)
-    candidates.extend(wiki_candidates(root, query_tokens))
+    if args.ranking == "legacy":
+        candidates.extend(_legacy_wiki_candidates(root, legacy_tokenize([args.query, *touched_files])))
+    else:
+        candidates.extend(wiki_candidates(root, args.query, query_terms))
     hint = graph_hint(root, query_tokens)
     if hint is not None:
         candidates.append(hint)
     candidates = sorted(candidates, key=lambda item: item.score, reverse=True)[: max(1, args.limit)]
     if args.json:
-        payload = []
-        remaining = max(200, args.max_chars)
-        for item in candidates:
-            text = redact(item.text.strip())
-            if remaining <= 0:
-                break
-            clipped = text[:remaining]
-            payload.append({"score": item.score, "source": item.source, "title": item.title, "text": clipped})
-            remaining -= len(clipped)
-        output = json.dumps(payload, ensure_ascii=False, indent=2)
-        if len(output) > max(200, args.max_chars):
-            output = output[: max(200, args.max_chars)]
-        print(output)
+        print(render_json(candidates, args.max_chars))
     else:
         sys.stdout.write(render_markdown(candidates, max(200, args.max_chars)))
     return 0

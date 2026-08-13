@@ -51,10 +51,23 @@ class HealthReport:
     uncompiled_raw: list[str]
     broken_links: list[str]
     sensitive_tool_hints: list[str]
+    graph_status: str
+    graph_issues: list[str]
 
     @property
     def issue_count(self) -> int:
-        return sum(len(items) for items in asdict(self).values())
+        return sum(
+            len(getattr(self, field))
+            for field in (
+                "stale_pages",
+                "active_projects_without_next",
+                "raw_needing_full_text",
+                "uncompiled_raw",
+                "broken_links",
+                "sensitive_tool_hints",
+                "graph_issues",
+            )
+        )
 
 
 def fail(message: str) -> None:
@@ -69,7 +82,11 @@ def read_text(path: Path) -> str:
 def markdown_files(path: Path) -> list[Path]:
     if not path.exists():
         return []
-    return sorted(item for item in path.rglob("*.md") if item.is_file())
+    return sorted(
+        item
+        for item in path.rglob("*.md")
+        if item.is_file() and "graphify-out" not in item.relative_to(path).parts
+    )
 
 
 def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -181,6 +198,66 @@ def referenced_raws(root: Path, pages: list[Page]) -> set[str]:
     return set(re.findall(r"raw/(?:sessions|notes|articles)/[^`\]\s,]+\.md", combined))
 
 
+def graph_freshness(root: Path) -> tuple[str, list[str]]:
+    """Compare Graphify's input manifest with current wiki inputs.
+
+    Graphify output is derived and optional. Missing/stale state is therefore a
+    maintenance signal, not a hard failure unless the caller explicitly uses
+    ``--strict``. The manifest's recorded input mtimes are preferable to the
+    report mtime because they identify exactly which source changed.
+    """
+    graph_dir = root / "graphify-out"
+    manifest_path = graph_dir / "manifest.json"
+    report_path = graph_dir / "GRAPH_REPORT.md"
+    if not manifest_path.exists() and not report_path.exists():
+        return "missing", ["graphify-out is missing; graph recall is unavailable until graphify update runs"]
+    if not manifest_path.exists() or not report_path.exists():
+        return "invalid", ["graphify-out is incomplete; expected manifest.json and GRAPH_REPORT.md"]
+    try:
+        manifest = json.loads(read_text(manifest_path))
+    except (OSError, json.JSONDecodeError):
+        return "invalid", ["graphify-out/manifest.json is unreadable or invalid JSON"]
+    if not isinstance(manifest, dict):
+        return "invalid", ["graphify-out/manifest.json must be an object keyed by wiki-relative path"]
+
+    wiki_dir = root / "wiki"
+    current_paths = sorted(
+        path
+        for path in wiki_dir.rglob("*")
+        if (
+            path.is_file()
+            and path.suffix.lower() in {".md", ".json"}
+            and "graphify-out" not in path.relative_to(wiki_dir).parts
+        )
+    ) if wiki_dir.exists() else []
+    changed: list[str] = []
+    current_rel = {path.relative_to(wiki_dir).as_posix() for path in current_paths}
+    for path in current_paths:
+        rel = path.relative_to(wiki_dir).as_posix()
+        entry = manifest.get(rel)
+        if not isinstance(entry, dict):
+            changed.append(f"added:{rel}")
+            continue
+        try:
+            recorded_mtime = float(entry.get("mtime"))
+        except (TypeError, ValueError):
+            changed.append(f"invalid-manifest-entry:{rel}")
+            continue
+        if path.stat().st_mtime > recorded_mtime + 1.0:
+            changed.append(f"modified:{rel}")
+    for rel in sorted(set(manifest) - current_rel):
+        changed.append(f"removed:{rel}")
+
+    if changed:
+        preview = changed[:12]
+        issues = [f"graph is stale: {len(changed)} wiki input(s) changed since the last graph build"]
+        issues.extend(preview)
+        if len(changed) > len(preview):
+            issues.append(f"... and {len(changed) - len(preview)} more")
+        return "stale", issues
+    return "current", []
+
+
 def check(root: Path, stale_days: int) -> HealthReport:
     today = dt.datetime.now().astimezone().date()
     pages = [parse_page(root, path) for path in markdown_files(root / "wiki")]
@@ -235,6 +312,8 @@ def check(root: Path, stale_days: int) -> HealthReport:
         if found:
             sensitive_tool_hints.append(f"{path.relative_to(root).as_posix()}: {', '.join(found)}")
 
+    graph_status, graph_issues = graph_freshness(root)
+
     return HealthReport(
         stale_pages=stale_pages,
         active_projects_without_next=active_projects_without_next,
@@ -242,11 +321,19 @@ def check(root: Path, stale_days: int) -> HealthReport:
         uncompiled_raw=uncompiled_raw,
         broken_links=broken_links,
         sensitive_tool_hints=sensitive_tool_hints,
+        graph_status=graph_status,
+        graph_issues=graph_issues,
     )
 
 
 def print_markdown(report: HealthReport) -> None:
     print("# LLM Wiki Health")
+    print()
+    print("## Graphify 图谱新鲜度")
+    print()
+    print(f"- status: `{report.graph_status}`")
+    for item in report.graph_issues:
+        print(f"- `{item}`")
     print()
     sections = (
         ("超过阈值未更新页面", report.stale_pages),

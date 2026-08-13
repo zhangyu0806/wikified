@@ -31,6 +31,7 @@
 - [命令清单](#命令清单)
 - [各 Agent 的支持程度](#各-agent-的支持程度)
 - [接进 Codex](#接进-codex)
+- [事件生命周期与召回评测](#事件生命周期与召回评测)
 - [接进 OpenCode](#接进-opencode)
 - [MCP tools](#mcp-tools)
 - [记忆库结构](#记忆库结构)
@@ -78,7 +79,7 @@ cd ~/wikified
 
 这条命令做两件事：
 
-1. **装工具链** — 15 个 CLI 软链进 `~/.local/bin`，agent skills 分发到各 Agent 目录，
+1. **装工具链** — 16 个 CLI 软链进 `~/.local/bin`，agent skills 分发到各 Agent 目录，
    OpenCode 召回插件软链进 `~/.opencode/plugins`
 2. **`--init` 建记忆库** — 在 `~/llm-wiki` 建出目录骨架、`SCHEMA.md`、git 仓库与凭据门禁，
    并落一个首个 commit
@@ -115,7 +116,7 @@ llm-wiki-health --json     # 应 rc=0 并输出合法 JSON
 # 记一条零散事实 / 命令 / 坑
 llm-wiki-note "WSL 里 cron 不可靠，改用会话启动节流"
 
-# 记 typed event（会进语义召回）
+# 记 typed event（会进按需召回）
 llm-wiki-event --type decision "MCP 传输统一走 NDJSON，Codex 只认这个"
 llm-wiki-event --type bug      "secret-scan 的词边界在 db_password 上失效"
 
@@ -125,6 +126,9 @@ llm-wiki-correct "以后结论用中文" --kind preference
 # 召回
 llm-wiki-enrich --session-start        # 关键事实 + 活跃项目 + 未闭环事项
 llm-wiki-enrich --query "secret-scan"  # 针对具体主题的定向召回
+
+# 离线、无用户数据地量化召回质量与安全边界
+llm-wiki-eval --json
 
 # 体检：陈旧页、孤儿页、断链、未编译的 raw
 llm-wiki-health --json
@@ -155,7 +159,8 @@ llm-wiki-promote-notes --json
 
 | 命令 | 用途 |
 |---|---|
-| `llm-wiki-enrich` | 语义召回。`--session-start` 取极简卡片，`--query` 定向检索 |
+| `llm-wiki-enrich` | 混合词法召回。`--session-start` 取极简卡片，`--query` 定向检索 |
+| `llm-wiki-eval` | 生成隔离夹具，比较 hybrid / legacy Recall@5 与 MRR，并检查安全边界 |
 | `llm-wiki-health` | 结构体检：陈旧页、孤儿页、断链、未编译 raw |
 | `llm-wiki-promote-notes` | 建议哪些 quick note 值得晋升（只读，不自动改） |
 
@@ -187,40 +192,122 @@ llm-wiki-promote-notes --json
 
 | 能力 | OpenCode | Codex | Claude Code | 其他 MCP 客户端 |
 |---|---|---|---|---|
-| 15 个 CLI | 是 | 是 | 是 | 是（能跑 shell 即可） |
+| 16 个 CLI | 是 | 是 | 是 | 是（能跑 shell 即可） |
 | Agent skills | 是 | 是 | 是 | 看是否支持 `SKILL.md` |
 | MCP（6 个 tool） | 是 | 是 | 是 | 是 |
-| **会话启动自动注入** | **是** | 否 | 否 | 否 |
+| **会话启动自动注入** | **是** | **是（SessionStart hook）** | 依客户端配置 | 依客户端配置 |
 
-最后一行是**真实的能力差，不是配置问题**。OpenCode 有 `chat.message` hook，
-插件能在 agent 开口前注入记忆。Codex 与 Claude Code 没有等价 hook，
-只能由 agent 主动调 `llm-wiki-enrich` 或 MCP 的 `search_pages`。
-
-`templates/codex/` 提供对应的指令模板，让 Codex 知道该主动召回。
-效果取决于 agent 是否遵循指令，不如 hook 确定。
+OpenCode 由 `chat.message` 插件注入；当前 Codex 已正式支持 `SessionStart` hook，
+`templates/codex/hooks.json` 同时给出 Linux 与 Windows→WSL 命令。仍保留 MCP、
+`AGENTS.md` 与手动 prompt：hook 是低成本常驻摘要，具体主题继续按需检索。
 
 ---
 
 ## 接进 Codex
+
+### Linux / WSL 内运行 Codex CLI
 
 ```bash
 # 1. 注册 MCP（注意 -- 分隔符，且用绝对路径）
 codex mcp add llm-wiki -- ~/.local/bin/llm-wiki-mcp
 codex mcp list                      # 确认 Status=enabled
 
-# 2. 装召回指令
+# 2. 合并 SessionStart hook；已有 hooks.json 时不要直接覆盖
+mkdir -p ~/.codex
+cp templates/codex/hooks.json ~/.codex/hooks.json
+
+# 3. 保留按需召回指令
 cat templates/codex/AGENTS.recall.md >> ~/.codex/AGENTS.md
 cp templates/codex/prompts/llm-wiki-recall.md ~/.codex/prompts/
 ```
 
-第 2 步为什么必要：Codex 不会自动注入记忆，需要 `AGENTS.md` 告诉它主动召回。
-`prompts/llm-wiki-recall.md` 提供一个确定性的手动入口。
+非托管 hook 首次运行前必须在 Codex 的 `/hooks` 页面审查并信任；hook 内容变化后
+hash 会变化，需要重新审查。`matcher` 覆盖 `startup / resume / clear / compact`，
+所以压缩上下文后也会重新注入极简摘要。
 
-`install.sh` 只打印这些指引、**不代写**这两个文件——它们是你自己的配置，
-可能已手工调过。
+### Windows Codex Desktop 读取 WSL 记忆库
+
+在 Desktop 实际使用的 `%CODEX_HOME%\config.toml` 中注册 WSL MCP；不要默认它与
+WSL 的 `~/.codex` 是同一个目录：
+
+```toml
+[mcp_servers.llm-wiki-wsl]
+command = "wsl.exe"
+args = ["-d", "Ubuntu", "--", "/home/<linux-user>/llm-wiki/bin/llm-wiki-mcp"]
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+```
+
+把 `templates/codex/hooks.json` **合并**到同一 `%CODEX_HOME%\hooks.json`。
+其中 `commandWindows` 通过默认 WSL distro 执行；默认 distro 不是记忆库所在 distro
+时，在 `wsl.exe` 后加入 `-d <distro>`。保存后重启 Desktop，并在 `/hooks` 审查 hook。
+
+`AGENTS.recall.md` 仍有价值：它告诉 agent 何时做主题检索；
+`prompts/llm-wiki-recall.md` 是确定性的人工入口。hook 只负责 3500 字符以内、已脱敏、
+去掉“下一步”任务语句的 session 摘要，不替代完整查询。
+
+`install.sh` 只打印接线指引、**不覆盖**现有 `hooks.json` / `AGENTS.md` / prompts——
+这些文件可能已有其他 hook 或手工规则，粗暴替换会吞掉用户配置。
 
 Codex 用户级 skills 的首选路径就是 `~/.agents/skills`（`$CODEX_HOME/skills` 已标 deprecated），
 `install.sh` 正是以它为主副本，且 Codex 会跟随软链。
+
+### 与 Codex 原生 Memories 的边界
+
+Codex 原生 Memories 是 `%CODEX_HOME%/memories/` 下的**生成状态**；本项目是可审查、
+可 Git 同步、跨 Agent 的知识源。两者可以共存，但不要把原生 memories 目录提交到
+记忆库，也不要让同一段对话被两套自动链路重复摄入。一个保守配置是：
+
+```toml
+[features]
+memories = true
+
+[memories]
+disable_on_external_context = true
+```
+
+这样，使用 MCP / web 等外部上下文的聊天不会再进入 Codex 原生记忆生成；长期、
+可携带知识仍由 LLM Wiki 管，人机习惯类的自动提醒可留给原生 Memories。是否开启
+原生 Memories 是用户选择，不是安装脚本应暗改的全局设置。
+
+---
+
+## 事件生命周期与召回评测
+
+事件 schema v2 保持 append-only，同时补上双时态里最实用的三件事：生效时间、
+失效时间、替代关系。
+
+```bash
+# 未来才生效、到期后不再召回
+llm-wiki-event --type fact --project billing \
+  --valid-from 2026-09-01 --valid-until 2026-12-01 \
+  "Q4 账单导出走新版接口"
+
+# 用新事实替代同项目的旧事件；--supersedes 可重复
+llm-wiki-event --type decision --project billing \
+  --supersedes 0123456789abcdef \
+  "账单主键改用 invoice_id"
+```
+
+替代目标必须存在、是 16 位小写 hex id、属于同一项目且不能形成环。旧事件不会被
+改写或删除，但当前召回会隐藏它；未来事件和已过期事件也不会参与结果。事件的
+`confidence` 与 `half_life_days` 只影响匹配结果的排序，不能让无关事件凭高置信度混入。
+
+`llm-wiki-enrich` 的默认 `hybrid` 排名是纯标准库 BM25 风格词法排名，加标题/原短语
+加分与 CJK 二、三元字符召回；它不声称等价于向量语义搜索，也不需要模型、网络、
+数据库或 embedding 服务。用以下命令可复现实验，不读取真实记忆：
+
+```bash
+llm-wiki-eval --json
+```
+
+报告同时给出 hybrid 与保留的 `legacy` 基线 Recall@5 / MRR，并检查项目隔离、时间
+衰减、替代与有效期、无关查询零上下文、凭据脱敏和有界合法 JSON。`legacy` 仅供
+回归比较，不建议作为日常检索模式。
+
+`llm-wiki-health` 现在也报告 `graph_status` / `graph_issues`：Graphify manifest 缺失、
+损坏，或 wiki 输入比 manifest 更新时会明确标成 missing / invalid / stale。默认仍是
+建议项；`--strict` 才把健康问题升级为非零退出码。
 
 ---
 
@@ -250,11 +337,11 @@ Codex 用户级 skills 的首选路径就是 `~/.agents/skills`（`$CODEX_HOME/s
 
 | tool | 作用 |
 |---|---|
-| `search_pages` | 按自然语言查询检索记忆 |
+| `search_pages` | 按自然语言查询检索记忆，可用 `project` 做项目隔离 |
 | `read_page` | 按相对路径读某一页 |
 | `find_related` | 经 Graphify 图谱找相关概念（需 `graphify`） |
 | `list_recent_raw` | 列出待编译的原始材料 |
-| `record_event` | 记一条 typed event |
+| `record_event` | 记 typed event，支持有效期与同项目 `supersedes` |
 | `lint` | 跑健康检查 |
 
 **传输层同时支持两种框架**：换行分隔 JSON（NDJSON，MCP stdio 规范，Codex 只认这个）
@@ -389,14 +476,19 @@ skills 走「主副本 + 分发」：repo → `~/.agents/skills` → 各 Agent �
 
 ```bash
 grep -c FRAMING "$(readlink -f ~/.local/bin/llm-wiki-mcp)"    # 应 >0
-bash tests/test-mcp-framing.sh                                # 应 8/8
+bash tests/test-mcp-framing.sh                                # 应 10/10
 ```
 
 **Codex 不主动召回记忆**
-Codex 没有自动注入 hook。确认 `~/.codex/AGENTS.md` 里有 `llm-wiki-recall` 块：
+先确认 `SessionStart` hook 已放进当前 Codex 实际使用的 `hooks.json`，然后重启 Codex，
+在 `/hooks` 审查并信任它。Windows Desktop 与 WSL CLI 可能使用不同的 Codex home，
+不要只检查 WSL 的 `~/.codex`。`AGENTS.md` 召回块负责告诉 agent 何时做主题检索，
+但不能代替 hook 本身：
 
 ```bash
-grep -c 'BEGIN llm-wiki-recall' ~/.codex/AGENTS.md            # 应为 1
+python3 -m json.tool ~/.codex/hooks.json >/dev/null           # WSL/CLI
+grep -c 'BEGIN llm-wiki-recall' ~/.codex/AGENTS.md            # 建议为 1
+# Windows Desktop: 检查 %CODEX_HOME%\hooks.json，并确认 commandWindows 指向正确 distro
 ```
 
 **跨机 pull 后 JSONL 有重复行**
@@ -499,19 +591,30 @@ append-only 的 JSONL 走 `merge=union` 保留双方所有行，再按 event id 
 
 ```bash
 bash tests/test-init.sh             # 引导能力，44 项
-bash tests/test-mcp-framing.sh      # MCP 双传输框架，8 项
+bash tests/test-mcp-framing.sh      # MCP 双传输框架与失败传播，10 项
 bash tests/test-mirror-optional.sh  # 可选层不得拖垮核心路径，12 项
+bash tests/test-retrieval-eval.sh   # 离线检索质量与安全边界
+bash tests/test-event-lifecycle.sh  # 生效/失效/替代/跨项目/脱敏
+bash tests/test-remote-sync-stamp.sh # 只有完整成功同步才能写成功戳
+bash tests/test-graph-freshness.sh  # Graphify manifest 新鲜度
+bash tests/test-codex-hook-template.sh # SessionStart hook 模板与有界输出
 ```
 
-三者都用隔离 `HOME` 与临时目录，**不碰你的真实记忆库**。
+全部使用隔离 `HOME` 或临时目录，**不碰你的真实记忆库**。召回评测夹具由脚本
+临时生成，不包含用户数据，也不调用网络、模型或 embedding 服务。
 
 后两个套件锁住的都是**静默失败**——这类缺陷不报错，只是悄悄不干活：
 
 - `test-mcp-framing.sh` 同时验证 NDJSON 与 `Content-Length` 两条路径。
-  只支持后者的 server 在 Codex 下会静默挂起。
+  只支持后者的 server 在 Codex 下会静默挂起；CLI 非零退出必须传播成
+  JSON-RPC error，不能包装成假成功 content。
 - `test-mirror-optional.sh` 验证未配镜像时核心写入仍成功、自定义
   `LLM_WIKI_BIN_TARGET` 时派生页仍刷新、`LLM_WIKI_ROOT` 被尊重。
   这三项都曾以「rc=0 但没干活」的形式存在过。
+- `test-remote-sync-stamp.sh` 锁住成功戳语义：pull/push/status、脏工作区、fetch、
+  dedupe 或 push 失败都不得伪装成一次完整成功同步。
+- `test-codex-hook-template.sh` 验证当前官方 hook schema 形状，并确保常驻上下文
+  有界、脱敏、带 canary，且不会把“下一步”变成自动任务。
 
 ---
 
@@ -519,7 +622,7 @@ bash tests/test-mirror-optional.sh  # 可选层不得拖垮核心路径，12 项
 
 欢迎 issue 和 PR。几点约定：
 
-- **行为改动要带测试。** 现有两个测试套件是模板，用隔离 `HOME`、不碰真实数据
+- **行为改动要带测试。** 测试必须用隔离 `HOME` / 临时目录，不碰真实数据
 - **别加数据库。** 纯文件是刻意选择：可 diff、可 grep、可手改、无迁移负担
 - **别把自动化伸进 `wiki/` 正文。** 晋升经人审是信噪比的来源。工具可以*建议*
   （`llm-wiki-promote-notes` 就是），但不该代替人决定

@@ -1,6 +1,7 @@
 # llm-wiki-recall
 
-手动召回 LLM Wiki 记忆库。Codex 没有会话启动 hook，此命令是确定性的手动入口。
+手动召回 LLM Wiki 记忆库。即使已配置 SessionStart hook，这仍是针对当前主题的
+确定性入口；hook 只提供有界的会话摘要，不替代按需查询。
 
 ## 执行
 

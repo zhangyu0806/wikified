@@ -25,10 +25,12 @@ trap cleanup EXIT
 STUB_BIN="$WORK/bin"
 mkdir -p "$STUB_BIN"
 cp "$MCP" "$STUB_BIN/llm-wiki-mcp"
-for c in llm-wiki-enrich llm-wiki-event llm-wiki-health; do
+for c in llm-wiki-enrich llm-wiki-health; do
   printf '#!/bin/sh\necho "STUB-OK"\n' > "$STUB_BIN/$c"
   chmod +x "$STUB_BIN/$c"
 done
+printf '#!/bin/sh\nlast=""\nfor arg do last=$arg; done\nif [ "$last" = "force-fail" ]; then echo "STUB-FAIL" >&2; exit 2; fi\necho "STUB-OK"\n' > "$STUB_BIN/llm-wiki-event"
+chmod +x "$STUB_BIN/llm-wiki-event"
 
 # 驱动器：按指定框架收发，输出解析到的 JSON 每行一条
 cat > "$WORK/drive.js" <<'DRIVER'
@@ -61,6 +63,8 @@ send({ jsonrpc: '2.0', id: 1, method: 'initialize',
 send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
 send({ jsonrpc: '2.0', id: 3, method: 'tools/call',
        params: { name: 'search_pages', arguments: { query: 'x' } } });
+send({ jsonrpc: '2.0', id: 4, method: 'tools/call',
+       params: { name: 'record_event', arguments: { type: 'fact', summary: 'force-fail' } } });
 
 setTimeout(() => {
   p.kill();
@@ -119,6 +123,13 @@ check_framing() {
     ok "$label: tools/call 到达同目录 CLI"
   else
     bad "$label: tools/call 未到达同目录 CLI"
+  fi
+
+  if grep '"id":4' <<<"$res" | grep -q '"error"' \
+    && grep '"id":4' <<<"$res" | grep -q 'STUB-FAIL'; then
+    ok "$label: CLI 非零退出传播为 JSON-RPC error"
+  else
+    bad "$label: CLI 非零退出被伪装成成功 content"
   fi
 }
 

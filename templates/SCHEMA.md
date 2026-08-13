@@ -117,6 +117,36 @@ tags: [tag1, tag2]
 ---
 ```
 
+### Typed event (`memory/events/{YYYY-MM}.jsonl`)
+
+用于短小、可衰减、可按项目检索的事实、决策、bug、工作流与偏好。每行是一个
+`llm-wiki-memory-event/v2` JSON 对象；该目录 **append-only**，纠正旧事实时追加
+新事件并用 `supersedes` 指向旧 id，不原地改历史行。
+
+```json
+{
+  "schema_version": "llm-wiki-memory-event/v2",
+  "id": "0123456789abcdef",
+  "timestamp": "2026-08-12T12:00:00+00:00",
+  "type": "decision",
+  "project": "example",
+  "summary": "新事实",
+  "confidence": 0.8,
+  "half_life_days": 90,
+  "lifecycle": "active",
+  "valid_from": "2026-08-12T12:00:00+00:00",
+  "valid_until": "2027-01-01T00:00:00+00:00",
+  "supersedes": ["fedcba9876543210"]
+}
+```
+
+- `valid_from` 是生效时刻；未来事件不参与当前召回。
+- `valid_until` 是可选的排他失效时刻；到期后不参与召回。
+- `supersedes` 可选且可重复；目标必须存在、属于同项目、不能形成环。
+- 替代关系不删除历史；目标一旦被当前新事件替代，不会因新事件日后过期而自动复活。
+- `confidence` / `half_life_days` 只影响已匹配候选的排序，不能单独构成相关性。
+- 用 `llm-wiki-event` 写入，不手工拼 JSONL；写入前会脱敏并持锁追加。
+
 ## 工作流
 
 ### Ingest（摄入新源材料）
@@ -233,10 +263,11 @@ tags: [tag1, tag2]
 
 ### Query（查询知识库）
 
-1. 先读 `wiki/index.md` 定位相关页面
-2. 读取相关页面
-3. 综合回答
-4. 如果答案有价值 → 存入 `wiki/queries/`
+1. 任务开始只读 `wiki/context/` 的有界摘要；不要把“下一步”当作当前用户指令。
+2. 对具体主题运行 `llm-wiki-enrich --query "<主题>" --project "<项目>"`。
+3. 读取命中的相关页面和可核验来源；不要只凭摘要下高风险结论。
+4. 综合回答；如果答案有长期价值 → 存入 `wiki/queries/`。
+5. 定期运行 `llm-wiki-eval --json`，用隔离夹具验证 Recall@5、MRR 与安全不变式。
 
 ### Lint（维护健康度）
 
@@ -245,6 +276,7 @@ tags: [tag1, tag2]
 - 断链（`[[target]]` 不存在）
 - 过时页面（超过 30 天未更新且标记 active）
 - 矛盾信息（同一主题不同页面说法冲突）
+- Graphify manifest 缺失、损坏或落后于当前 `wiki/` 输入
 
 可脚本化健康检查使用：
 
@@ -254,7 +286,9 @@ llm-wiki-health --json
 llm-wiki-health --strict
 ```
 
-`--strict` 在发现问题时返回非零退出码，适合定期任务或 CI。敏感信息检查只输出文件路径和关键词类别，不展开内容。
+`--strict` 在发现问题时返回非零退出码，适合定期任务或 CI。JSON 输出包含
+`graph_status` 与 `graph_issues`；图谱缺失/陈旧在非 strict 模式是建议项。敏感信息
+检查只输出文件路径和关键词类别，不展开内容。
 
 ### Promote Notes（复盘 quick notes）
 

@@ -35,10 +35,16 @@ const GRAPH_JSON = path.join(ROOT, 'graphify-out', 'graph.json');
 const run = (file, args, timeoutMs = 8000) =>
   new Promise((resolve) => {
     execFile(file, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err && !stdout) resolve({ ok: false, text: (stderr || err.message || 'command failed').trim() });
+      if (err) resolve({ ok: false, text: (stderr || stdout || err.message || 'command failed').trim() });
       else resolve({ ok: true, text: (stdout || '').trim() });
     });
   });
+
+const runRequired = async (file, args, timeoutMs = 8000) => {
+  const result = await run(file, args, timeoutMs);
+  if (!result.ok) throw new Error(result.text || `${path.basename(file)} failed`);
+  return result.text;
+};
 
 const tools = [
   {
@@ -48,6 +54,7 @@ const tools = [
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Natural-language query or task description.' },
+        project: { type: 'string', description: 'Optional project id used to isolate memory events.' },
         limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Max candidates (default 5).' },
         maxChars: { type: 'integer', minimum: 200, maximum: 8000, description: 'Max output chars (default 2000).' },
       },
@@ -89,10 +96,17 @@ const tools = [
     inputSchema: {
       type: 'object',
       properties: {
-        type: { type: 'string', enum: ['fact', 'decision', 'bug', 'workflow', 'preference', 'architecture', 'lesson', 'session'], description: 'Event type.' },
+        type: { type: 'string', enum: ['fact', 'decision', 'bug', 'workflow', 'preference', 'architecture', 'touch', 'lesson', 'session'], description: 'Event type.' },
         summary: { type: 'string', description: 'Short event summary.' },
         details: { type: 'string', description: 'Optional longer details.' },
         project: { type: 'string', description: 'Optional project id.' },
+        validFrom: { type: 'string', description: 'Optional ISO-8601 date/instant when the event becomes current.' },
+        validUntil: { type: 'string', description: 'Optional ISO-8601 date/instant when the event expires.' },
+        supersedes: {
+          type: 'array',
+          items: { type: 'string', pattern: '^[0-9a-f]{16}$' },
+          description: 'Existing same-project event ids made obsolete by this event.',
+        },
       },
       required: ['type', 'summary'],
     },
@@ -107,7 +121,8 @@ const tools = [
 async function dispatch(name, args) {
   if (name === 'search_pages') {
     const a = ['--query', String(args.query || ''), '--limit', String(args.limit || 5), '--max-chars', String(args.maxChars || 2000)];
-    return (await run(ENRICH, a)).text;
+    if (args.project) a.push('--project', String(args.project));
+    return await runRequired(ENRICH, a);
   }
   if (name === 'read_page') {
     // 防目录穿越 + 防 symlink 逃逸：用 realpathSync 解析真实路径后必须仍在 ROOT 内，
@@ -127,7 +142,7 @@ async function dispatch(name, args) {
       const r = await run(GRAPHIFY, ['query', String(args.topic || ''), '--graph', GRAPH_JSON, '--budget', String(args.budget || 1500)]);
       if (r.ok && r.text) return r.text;
     }
-    return (await run(ENRICH, ['--query', String(args.topic || ''), '--limit', '5', '--max-chars', '2000'])).text;
+    return await runRequired(ENRICH, ['--query', String(args.topic || ''), '--limit', '5', '--max-chars', '2000']);
   }
   if (name === 'list_recent_raw') {
     const limit = Number(args.limit || 15);
@@ -150,7 +165,7 @@ async function dispatch(name, args) {
   if (name === 'record_event') {
     // 前置校验 type 白名单（与 llm-wiki-event 的 EVENT_TYPES 对齐），
     // 给出友好错误而非依赖 CLI argparse 的栈式报错。
-    const TYPES = ['fact', 'decision', 'bug', 'workflow', 'preference', 'architecture', 'lesson', 'session'];
+    const TYPES = ['fact', 'decision', 'bug', 'workflow', 'preference', 'architecture', 'touch', 'lesson', 'session'];
     const t = String(args.type || '');
     if (!TYPES.includes(t)) throw new Error(`invalid type: ${t} (allowed: ${TYPES.join(', ')})`);
     const summary = String(args.summary || '').trim();
@@ -158,11 +173,19 @@ async function dispatch(name, args) {
     const a = ['--type', t, '--source', 'mcp'];
     if (args.details) a.push('--details', String(args.details));
     if (args.project) a.push('--project', String(args.project));
+    if (args.validFrom) a.push('--valid-from', String(args.validFrom));
+    if (args.validUntil) a.push('--valid-until', String(args.validUntil));
+    if (args.supersedes !== undefined && !Array.isArray(args.supersedes)) throw new Error('supersedes must be an array');
+    for (const eventId of (args.supersedes || [])) {
+      const normalized = String(eventId);
+      if (!/^[0-9a-f]{16}$/.test(normalized)) throw new Error(`invalid supersedes id: ${normalized}`);
+      a.push('--supersedes', normalized);
+    }
     a.push(summary);
-    return (await run(EVENT, a)).text;
+    return await runRequired(EVENT, a);
   }
   if (name === 'lint') {
-    return (await run(HEALTH, ['--json'])).text;
+    return await runRequired(HEALTH, ['--json']);
   }
   throw new Error(`Unknown tool: ${name}`);
 }

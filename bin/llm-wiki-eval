@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Deterministic, offline retrieval evaluation for llm-wiki-enrich.
+
+The fixture is generated in a temporary directory and contains no user data.
+It compares the current hybrid ranker with the preserved legacy ranker, then
+checks isolation, lifecycle, decay, redaction, no-match behavior and JSON
+budget validity. No network, model, embedding service or database is used.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+
+ENRICH = Path(__file__).resolve().parent / "llm-wiki-enrich"
+
+
+def write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def event_line(**values: Any) -> str:
+    base = {
+        "schema_version": "llm-wiki-memory-event/v2",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "type": "fact",
+        "project": "eval",
+        "cwd": "/tmp/eval",
+        "files": [],
+        "concepts": [],
+        "summary": "fixture",
+        "details": "",
+        "confidence": 0.8,
+        "half_life_days": 90,
+        "lifecycle": "active",
+        "source": "eval",
+    }
+    base.update(values)
+    return json.dumps(base, ensure_ascii=False, separators=(",", ":"))
+
+
+def seed(root: Path) -> None:
+    write(root / "SCHEMA.md", "# Eval schema\n")
+    for idx in range(90):
+        body = "ordinary filler material for deterministic corpus length"
+        if idx == 3:
+            body += "\nlegacy-anchor exactneedle lives in the early corpus"
+        write(root / "wiki" / "concepts" / f"{idx:03d}-filler.md", f"# Filler {idx}\n\n{body}\n")
+    write(
+        root / "wiki" / "tools" / "zz-chinese-sync.md",
+        "# 跨机器记忆同步\n\n记忆同步发生冲突时保留现场，使用确定性 JSONL 去重。\n",
+    )
+    write(
+        root / "wiki" / "tools" / "zz-late-english.md",
+        "# Late corpus target\n\nrare-late-needle describes a page after the legacy eighty-file cutoff.\n",
+    )
+    write(
+        root / "wiki" / "tools" / "zz-secret.md",
+        "# Secret fixture\n\nsecretmarker token=ghp_FAKE1234567890abcdefghij1234 must be redacted.\n",
+    )
+
+    now = datetime.now(timezone.utc)
+    rows = [
+        event_line(id="aaaaaaaaaaaaaaaa", project="alpha", summary="sharedmarker alpha-only fact"),
+        event_line(id="bbbbbbbbbbbbbbbb", project="beta", summary="sharedmarker beta-only fact"),
+        event_line(
+            id="cccccccccccccccc",
+            project="alpha",
+            summary="decaymarker old observation",
+            timestamp=(now - timedelta(days=365)).isoformat(),
+            valid_from=(now - timedelta(days=365)).isoformat(),
+            confidence=0.9,
+            half_life_days=30,
+        ),
+        event_line(
+            id="dddddddddddddddd",
+            project="alpha",
+            summary="decaymarker recent observation",
+            timestamp=now.isoformat(),
+            valid_from=now.isoformat(),
+            confidence=0.8,
+            half_life_days=30,
+        ),
+        event_line(id="eeeeeeeeeeeeeeee", project="alpha", summary="currentcolor blue historical fact"),
+        event_line(
+            id="ffffffffffffffff",
+            project="alpha",
+            summary="currentcolor green replacement fact",
+            supersedes=["eeeeeeeeeeeeeeee"],
+        ),
+        event_line(
+            id="1111111111111111",
+            project="alpha",
+            summary="expiredmarker temporary fact",
+            valid_until=(now - timedelta(days=1)).isoformat(),
+        ),
+        event_line(
+            id="2222222222222222",
+            project="alpha",
+            summary="futuremarker scheduled fact",
+            valid_from=(now + timedelta(days=1)).isoformat(),
+        ),
+    ]
+    write(root / "memory" / "events" / "eval.jsonl", "\n".join(rows) + "\n")
+
+
+def search(root: Path, query: str, *, ranking: str = "hybrid", project: str | None = None, max_chars: int = 8000) -> list[dict[str, Any]]:
+    command = [
+        str(ENRICH),
+        "--query",
+        query,
+        "--ranking",
+        ranking,
+        "--limit",
+        "5",
+        "--max-chars",
+        str(max_chars),
+        "--json",
+    ]
+    if project:
+        command.extend(["--project", project])
+    env = os.environ.copy()
+    env["LLM_WIKI_ROOT"] = str(root)
+    completed = subprocess.run(command, env=env, text=True, capture_output=True, timeout=10, check=True)
+    parsed = json.loads(completed.stdout)
+    if not isinstance(parsed, list):
+        raise RuntimeError("enrich JSON output must be an array")
+    return parsed
+
+
+def rank_of(results: list[dict[str, Any]], title: str) -> int | None:
+    for index, result in enumerate(results, 1):
+        if result.get("title") == title:
+            return index
+    return None
+
+
+def metrics(ranks: list[int | None], k: int = 5) -> dict[str, float]:
+    recall = sum(1 for rank in ranks if rank is not None and rank <= k) / max(1, len(ranks))
+    mrr = sum(0.0 if rank is None else 1.0 / rank for rank in ranks) / max(1, len(ranks))
+    return {f"recall_at_{k}": round(recall, 6), "mrr": round(mrr, 6)}
+
+
+def run() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="llm-wiki-eval-") as temp:
+        root = Path(temp)
+        seed(root)
+        cases = [
+            ("记忆同步冲突", "tools/zz-chinese-sync.md"),
+            ("rare-late-needle", "tools/zz-late-english.md"),
+            ("legacy-anchor exactneedle", "concepts/003-filler.md"),
+        ]
+        hybrid_ranks = [rank_of(search(root, query), title) for query, title in cases]
+        legacy_ranks = [rank_of(search(root, query, ranking="legacy"), title) for query, title in cases]
+        violations: list[str] = []
+
+        isolated = search(root, "sharedmarker", project="alpha")
+        ids = "\n".join(str(item.get("title", "")) for item in isolated)
+        if "aaaaaaaaaaaaaaaa" not in ids or "bbbbbbbbbbbbbbbb" in ids:
+            violations.append("project isolation failed")
+
+        decayed = search(root, "decaymarker", project="alpha")
+        if not decayed or "dddddddddddddddd" not in str(decayed[0].get("title", "")):
+            violations.append("decay ordering failed")
+
+        current = search(root, "currentcolor", project="alpha")
+        current_ids = "\n".join(str(item.get("title", "")) for item in current)
+        if "ffffffffffffffff" not in current_ids or "eeeeeeeeeeeeeeee" in current_ids:
+            violations.append("supersession filtering failed")
+
+        for query, marker in (("expiredmarker", "1111111111111111"), ("futuremarker", "2222222222222222")):
+            results = search(root, query, project="alpha")
+            if any(marker in str(item.get("title", "")) for item in results):
+                violations.append(f"temporal filtering failed: {query}")
+
+        if search(root, "量子海豚七号完全无关"):
+            violations.append("unrelated query returned context")
+
+        secret_results = search(root, "secretmarker")
+        serialized_secret = json.dumps(secret_results, ensure_ascii=False)
+        if "ghp_FAKE1234567890abcdefghij1234" in serialized_secret or "[REDACTED_GITHUB_TOKEN]" not in serialized_secret:
+            violations.append("secret redaction failed")
+
+        budget_results = search(root, "secretmarker", max_chars=260)
+        serialized_budget = json.dumps(budget_results, ensure_ascii=False, indent=2)
+        if len(serialized_budget) > 260:
+            violations.append("JSON character budget exceeded")
+
+        hybrid = metrics(hybrid_ranks)
+        legacy = metrics(legacy_ranks)
+        return {
+            "schema_version": "llm-wiki-retrieval-eval/v1",
+            "fixture": "generated-temporary-no-user-data",
+            "cases": [
+                {"query": query, "expected": title, "hybrid_rank": hybrid_ranks[index], "legacy_rank": legacy_ranks[index]}
+                for index, (query, title) in enumerate(cases)
+            ],
+            "hybrid": hybrid,
+            "legacy": legacy,
+            "checks": {
+                "project_isolation": "pass" if "project isolation failed" not in violations else "fail",
+                "decay_ordering": "pass" if "decay ordering failed" not in violations else "fail",
+                "supersession": "pass" if "supersession filtering failed" not in violations else "fail",
+                "temporal_validity": "pass" if not any("temporal filtering failed" in item for item in violations) else "fail",
+                "unrelated_zero_context": "pass" if "unrelated query returned context" not in violations else "fail",
+                "secret_redaction": "pass" if "secret redaction failed" not in violations else "fail",
+                "valid_bounded_json": "pass" if "JSON character budget exceeded" not in violations else "fail",
+            },
+            "violations": violations,
+        }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run deterministic offline LLM Wiki retrieval evaluation.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON (the default output is a short text summary).")
+    args = parser.parse_args()
+    report = run()
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(f"hybrid Recall@5={report['hybrid']['recall_at_5']:.3f} MRR={report['hybrid']['mrr']:.3f}")
+        print(f"legacy Recall@5={report['legacy']['recall_at_5']:.3f} MRR={report['legacy']['mrr']:.3f}")
+        print(f"violations={len(report['violations'])}")
+    if report["violations"]:
+        return 1
+    if report["hybrid"]["recall_at_5"] < 1.0 or report["hybrid"]["mrr"] < 0.99:
+        return 1
+    if report["hybrid"]["recall_at_5"] <= report["legacy"]["recall_at_5"]:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

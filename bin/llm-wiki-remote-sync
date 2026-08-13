@@ -14,9 +14,12 @@
 #
 # 用法：
 #   llm-wiki-remote-sync              # 节流同步（会话启动用，通常秒退）
-#   llm-wiki-remote-sync --pull       # 只拉不推
-#   llm-wiki-remote-sync --push       # 只推不拉（SessionCapture 后用）
+#   llm-wiki-remote-sync --pull       # 只拉不推（不受节流，不写成功戳）
+#   llm-wiki-remote-sync --push       # 只推不拉（SessionCapture 后用；同上）
 #   llm-wiki-remote-sync --force      # 忽略节流
+#
+# 成功戳只在「完整 sync 且无阶段被跳过」时写入。脏工作区导致 merge/push 被跳过
+# 时不写戳，下个窗口自动重试，避免「显示已同步但提交卡在本地」。
 #   llm-wiki-remote-sync --status     # 查看状态，不做任何写操作
 #   llm-wiki-remote-sync --dry-run    # 打印将要执行的动作
 
@@ -151,7 +154,10 @@ fi
 phase_success
 
 # ---------- 节流（拿锁前先粗判，避免无谓抢锁）----------
-if ((FORCE == 0)); then
+# 只有自动 sync 受节流约束。--pull / --push 是人显式发起的单向操作，一律执行。
+# （真实踩过的坑：commit 后手动 --push 被节流静默秒退，提交卡在本地推不上去，
+#   而 --status 显示「刚同步成功」。）
+if ((FORCE == 0)) && [[ "$MODE" == sync ]]; then
   age=$(stamp_age)
   if ((age >= 0 && age < THROTTLE_SECONDS)); then
     exit 0
@@ -165,13 +171,16 @@ if ! flock -n 9; then
 fi
 
 # 拿到锁后复查（防止等锁期间别的窗口已完成）
-if ((FORCE == 0)); then
+if ((FORCE == 0)) && [[ "$MODE" == sync ]]; then
   NOW=$(date +%s)
   age=$(stamp_age)
   if ((age >= 0 && age < THROTTLE_SECONDS)); then
     exit 0
   fi
 fi
+
+# 任一阶段「跳过了本该做的事」就置 1：结尾不写成功戳，下个窗口自动重试。
+SYNC_INCOMPLETE=0
 
 log_line "[$(date -Is)] === run start: mode=$MODE profile=$PROFILE force=$FORCE dry=$DRY_RUN ==="
 
@@ -196,6 +205,7 @@ if [[ "$MODE" == sync || "$MODE" == pull ]]; then
   if [[ -n "$(run_git status --porcelain)" ]]; then
     log_line "工作区有未提交改动，跳过 merge（保留现场，不做任何丢弃）"
     printf 'llm-wiki-remote-sync: 工作区有未提交改动，已跳过 merge。请先提交或暂存后重跑。\n' >&2
+    SYNC_INCOMPLETE=1
   else
     behind=$(run_git rev-list --count "HEAD..$REMOTE/$BRANCH" 2>/dev/null || echo 0)
     if [[ "$behind" != 0 ]]; then
@@ -234,6 +244,7 @@ if [[ "$MODE" == sync || "$MODE" == push ]]; then
   if [[ -n "$(run_git status --porcelain)" ]]; then
     log_line "工作区有未提交改动，不自动提交（提交需显式意图），跳过 push"
     printf 'llm-wiki-remote-sync: 有未提交改动，未自动提交。确认后手动 commit 再 push。\n' >&2
+    SYNC_INCOMPLETE=1
   else
     ahead=$(run_git rev-list --count "$REMOTE/$BRANCH..HEAD" 2>/dev/null || echo 0)
     if [[ "$ahead" == 0 ]]; then
@@ -246,13 +257,28 @@ if [[ "$MODE" == sync || "$MODE" == push ]]; then
   phase_success
 fi
 
-# ---------- 写成功戳（仅全阶段成功）----------
+# ---------- 写成功戳 ----------
+# 三个前提，缺一不写戳（不写戳 = 下个窗口自动重试）：
+#   1. MODE==sync：单向 --pull / --push 不代表完整同步，不能顶替节流窗口
+#   2. SYNC_INCOMPLETE==0：脏工作区导致 merge/push 被跳过时，本次并未真正同步完
+#   3. 走到这里（前面任何 fatal 都会提前退出）
+# 坑的来历：以前脏工作区跳过 push 仍写戳并 rc=0，于是 --status 显示「刚同步成功」，
+# 实际 commit 卡在本地，且 3 小时内不再重试。
 phase_start stamp
-STAMP_TMP=$(mktemp "$CACHE_DIR/.last-sync.XXXXXX")
-printf '%s\n' "$(date +%s)" >"$STAMP_TMP"
-chmod 600 "$STAMP_TMP"
-mv -f -- "$STAMP_TMP" "$STAMP"
-STAMP_TMP=
+if [[ "$MODE" != sync ]]; then
+  log_line "stamp: 跳过（mode=$MODE 为单向操作，不顶替 sync 节流窗口）"
+elif ((SYNC_INCOMPLETE)); then
+  log_line "stamp: 跳过（本次有阶段被跳过，未完成完整同步，下个窗口重试）"
+  phase_success
+  log_line "[$(date -Is)] === run incomplete（未写成功戳）==="
+  exit 0
+else
+  STAMP_TMP=$(mktemp "$CACHE_DIR/.last-sync.XXXXXX")
+  printf '%s\n' "$(date +%s)" >"$STAMP_TMP"
+  chmod 600 "$STAMP_TMP"
+  mv -f -- "$STAMP_TMP" "$STAMP"
+  STAMP_TMP=
+fi
 phase_success
 
 log_line "[$(date -Is)] === run success ==="
