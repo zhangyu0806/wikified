@@ -327,7 +327,7 @@ def check(root: Path, stale_days: int) -> HealthReport:
 
 
 def print_markdown(report: HealthReport) -> None:
-    print("# LLM Wiki Health")
+    print("# Wikified Health")
     print()
     print("## Graphify 图谱新鲜度")
     print()
@@ -356,8 +356,8 @@ def print_markdown(report: HealthReport) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run scriptable checks for an LLM Wiki root.")
-    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="LLM Wiki root directory")
+    parser = argparse.ArgumentParser(description="Run scriptable checks for a Wikified data root.")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="Wikified data root directory")
     parser.add_argument("--stale-days", type=int, default=30, help="Stale page threshold")
     parser.add_argument("--json", action="store_true", help="Print JSON")
     parser.add_argument("--strict", action="store_true", help="Exit 1 when any issue is found")
@@ -368,7 +368,7 @@ def main() -> None:
     args = parse_args()
     root = args.root.expanduser().resolve()
     if not (root / "SCHEMA.md").exists():
-        fail(f"not an LLM Wiki root, missing SCHEMA.md: {root}")
+        fail(f"not a Wikified data root, missing SCHEMA.md: {root}")
     report = check(root, args.stale_days)
     if args.json:
         print(json.dumps(asdict(report) | {"issue_count": report.issue_count}, ensure_ascii=False, indent=2))

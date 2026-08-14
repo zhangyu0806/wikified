@@ -66,6 +66,18 @@ def seed(root: Path) -> None:
         root / "wiki" / "tools" / "zz-secret.md",
         "# Secret fixture\n\nsecretmarker token=ghp_FAKE1234567890abcdefghij1234 must be redacted.\n",
     )
+    write(
+        root / "wiki" / "concepts" / "transport-protocol.md",
+        "# Transport protocol\n\n这个协议只描述 ordinary transport framing。\n",
+    )
+    write(
+        root / "wiki" / "tools" / "targettool.md",
+        "# TargetTool\n\nTargetTool 的安装、命令和完整用法。\n",
+    )
+    write(
+        root / "wiki" / "projects" / "howto-decoy.md",
+        "# Unrelated project\n\n## 怎么用 TargetTool\nTargetTool 只在这里作为旁支被反复提及。TargetTool TargetTool。\n",
+    )
 
     now = datetime.now(timezone.utc)
     rows = [
@@ -184,6 +196,24 @@ def run() -> dict[str, Any]:
         if search(root, "量子海豚七号完全无关"):
             violations.append("unrelated query returned context")
 
+        # A realistic no-answer query can share one generic word with the corpus.
+        # Flat BM25 alone used to return the protocol page here; coherent query
+        # coverage must keep that weak overlap from becoming injected context.
+        if search(root, "量子海豚烤面包协议 zyxwvut"):
+            violations.append("partial generic overlap returned context")
+
+        direct_generic = search(root, "协议")
+        if rank_of(direct_generic, "concepts/transport-protocol.md") is None:
+            violations.append("direct short query was over-filtered")
+
+        verbose_anchor = search(root, "我想知道怎么用 rare-late-needle")
+        if rank_of(verbose_anchor, "tools/zz-late-english.md") is None:
+            violations.append("distinctive anchor query was over-filtered")
+
+        title_identity = search(root, "我想知道怎么用 targettool")
+        if rank_of(title_identity, "tools/targettool.md") != 1:
+            violations.append("exact title identity did not rank first")
+
         secret_results = search(root, "secretmarker")
         serialized_secret = json.dumps(secret_results, ensure_ascii=False)
         if "ghp_FAKE1234567890abcdefghij1234" in serialized_secret or "[REDACTED_GITHUB_TOKEN]" not in serialized_secret:
@@ -211,6 +241,10 @@ def run() -> dict[str, Any]:
                 "supersession": "pass" if "supersession filtering failed" not in violations else "fail",
                 "temporal_validity": "pass" if not any("temporal filtering failed" in item for item in violations) else "fail",
                 "unrelated_zero_context": "pass" if "unrelated query returned context" not in violations else "fail",
+                "partial_overlap_zero_context": "pass" if "partial generic overlap returned context" not in violations else "fail",
+                "short_direct_query": "pass" if "direct short query was over-filtered" not in violations else "fail",
+                "verbose_distinctive_anchor": "pass" if "distinctive anchor query was over-filtered" not in violations else "fail",
+                "exact_title_identity": "pass" if "exact title identity did not rank first" not in violations else "fail",
                 "secret_redaction": "pass" if "secret redaction failed" not in violations else "fail",
                 "valid_bounded_json": "pass" if "JSON character budget exceeded" not in violations else "fail",
             },

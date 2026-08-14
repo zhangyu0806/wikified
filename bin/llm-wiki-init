@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# llm-wiki-init — 把一个空目录初始化为可用的 LLM Wiki 数据库。
+# llm-wiki-init — 把一个空目录初始化为可用的 Wikified 数据库。
 #
 # 为什么需要它：其余工具都假定库已存在。隔离 HOME 实测，缺 SCHEMA.md 时
 # llm-wiki-health / promote-notes / refresh 直接 rc=1，dedupe-events rc=2；
@@ -153,6 +153,13 @@ if (( DO_GIT )); then
       git -C "$ROOT" config core.hooksPath .githooks
       note_created "$ROOT (core.hooksPath=.githooks)"
     fi
+    # 数据仓不应复制公开工具链的 bin/。把经过安装/调用的工具目录写入本地
+    # git config，让 pre-commit 能找到扫描器并明确扫描当前数据仓；缺工具时
+    # 门禁会 fail closed，而不是静默跳过。
+    if [[ "$(git -C "$ROOT" config --get wikified.toolkitBin 2>/dev/null || true)" != "$SELF_DIR" ]]; then
+      git -C "$ROOT" config wikified.toolkitBin "$SELF_DIR"
+      note_created "$ROOT (wikified.toolkitBin=$SELF_DIR)"
+    fi
 
     # 必须落一个首个 commit：0 commit 的库没有 HEAD，remote-sync 只能输出
     # 降级状态（branch: HEAD）且无法 push；.gitattributes 的 merge=union
@@ -161,7 +168,7 @@ if (( DO_GIT )); then
       git -C "$ROOT" add -A
       if git -C "$ROOT" -c user.name="llm-wiki-init" \
              -c user.email="llm-wiki-init@localhost" \
-             commit -q -m "chore: initialize LLM Wiki structure" 2>/dev/null; then
+             commit -q -m "chore: initialize Wikified structure" 2>/dev/null; then
         note_created "$ROOT (initial commit)"
       else
         printf 'warn: 首个 commit 失败（可能是 pre-commit 门禁拒绝）。请手工检查后再提交。\n' >&2

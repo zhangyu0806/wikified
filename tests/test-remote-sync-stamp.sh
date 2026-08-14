@@ -18,10 +18,11 @@ git init --bare -q "$REMOTE"
 git init -q "$ROOT"
 git -C "$ROOT" config user.name eval
 git -C "$ROOT" config user.email eval@example.invalid
-mkdir -p "$ROOT/bin" "$ROOT/memory/events" "$ROOT/raw/inbox"
+TOOL_BIN="$WORK/tools"
+mkdir -p "$TOOL_BIN" "$ROOT/memory/events" "$ROOT/raw/inbox"
 printf '# schema\n' >"$ROOT/SCHEMA.md"
-printf '#!/bin/sh\nexit 0\n' >"$ROOT/bin/llm-wiki-dedupe-events"
-chmod +x "$ROOT/bin/llm-wiki-dedupe-events"
+printf '#!/bin/sh\nexit 0\n' >"$TOOL_BIN/llm-wiki-dedupe-events"
+chmod +x "$TOOL_BIN/llm-wiki-dedupe-events"
 git -C "$ROOT" add .
 git -C "$ROOT" commit -qm initial
 git -C "$ROOT" branch -M main
@@ -34,6 +35,7 @@ run_sync() {
     LLM_WIKI_SYNC_CACHE_DIR="$CACHE" \
     LLM_WIKI_SYNC_THROTTLE=3600 \
     LLM_WIKI_SYNC_GIT_TIMEOUT=5 \
+    LLM_WIKI_BIN_TARGET="$TOOL_BIN" \
     "$SYNC" "$@"
 }
 
@@ -76,15 +78,15 @@ fi
 git -C "$ROOT" remote set-url origin "$REMOTE"
 
 # Dedupe failure is a gated phase: non-zero, no stamp.
-printf '#!/bin/sh\nexit 17\n' >"$ROOT/bin/llm-wiki-dedupe-events"
-chmod +x "$ROOT/bin/llm-wiki-dedupe-events"
+printf '#!/bin/sh\nexit 17\n' >"$TOOL_BIN/llm-wiki-dedupe-events"
+chmod +x "$TOOL_BIN/llm-wiki-dedupe-events"
 if run_sync --force >/dev/null 2>&1; then
   bad "dedupe failure returned zero"
 else
   ok "dedupe failure is non-zero"
 fi
 [[ ! -e "$CACHE/last-sync" ]] && ok "dedupe failure does not write stamp" || bad "dedupe failure wrote stamp"
-git -C "$ROOT" checkout -q -- bin/llm-wiki-dedupe-events
+printf '#!/bin/sh\nexit 0\n' >"$TOOL_BIN/llm-wiki-dedupe-events"
 
 # A fresh stamp must not throttle an explicit push. The rejecting hook proves push was attempted.
 printf 'local commit\n' >"$ROOT/local.txt"

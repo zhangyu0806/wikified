@@ -12,7 +12,7 @@
 home 和 office 各自独立运行本脚本，必须产出**字节完全一致**的文件，
 否则每次同步都会重新出现 diff，形成永久冲突。因此：
   - 排序键固定为 (timestamp, id)，不依赖行在文件中的原始顺序
-  - 同 id 冲突时按 (timestamp, sha256) 确定性选胜者，不用「最后出现的赢」
+  - 同 id 不同内容属于身份冲突，失败并交给人审，不自动丢弃任一版本
   - 输出统一 LF、无尾随空行差异、json 键序保持原样（不重新序列化）
 
 用法
@@ -26,10 +26,12 @@ home 和 office 各自独立运行本脚本，必须产出**字节完全一致**
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 CONFLICT_MARKERS = ("<<<<<<< ", "=======", ">>>>>>> ")
@@ -105,13 +107,10 @@ def process_file(path: Path, *, check_only: bool) -> dict:
         if prev["digest"] == digest:
             # 纯重复行，丢弃即可
             continue
-        # 同 id 不同内容：确定性选择 (timestamp, digest) 最大者
-        prev_key = (prev["timestamp"], prev["digest"])
-        cand_key = (cand["timestamp"], cand["digest"])
-        if cand_key > prev_key:
-            records[ev_id] = cand
-        cand.setdefault("conflict", True)
-        prev.setdefault("conflict", True)
+        raise DedupeError(
+            f"{path}: id={ev_id!r} 出现不同内容（行 {lineno}）；"
+            "拒绝自动选择胜者以免静默丢数据，请人工保留正确记录并为另一条分配新 id"
+        )
 
     if malformed or no_id:
         raise DedupeError(
@@ -123,7 +122,7 @@ def process_file(path: Path, *, check_only: bool) -> dict:
     ordered = sorted(records.values(), key=lambda r: (r["timestamp"], r["line"]))
     out = "".join(r["line"] + "\n" for r in ordered)
     changed = out != raw
-    conflicts = sum(1 for r in records.values() if r.get("conflict"))
+    conflicts = 0
 
     if changed and not check_only:
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -154,9 +153,25 @@ def main() -> int:
 
     files = target_files(root)
     results = []
+    # 与事件 append 和 corrections append/resolve 使用相同锁，并覆盖完整的
+    # read/compute/replace 窗口。两把锁固定按 memory -> corrections 获取，
+    # 防止 dedupe 覆盖并发追加，也避免不同命令间形成锁顺序死锁。
+    lock_paths = [
+        root / "memory" / ".memory.lock",
+        root / "raw" / "inbox" / ".corrections.lock",
+    ]
     try:
-        for f in files:
-            results.append(process_file(f, check_only=args.check))
+        with ExitStack() as stack:
+            handles = []
+            for lock_path in lock_paths:
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                handle = stack.enter_context(lock_path.open("a", encoding="utf-8"))
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                handles.append(handle)
+            for f in files:
+                results.append(process_file(f, check_only=args.check))
+            for handle in reversed(handles):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     except DedupeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

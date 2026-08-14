@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LLM Wiki pre-commit 门禁
+# Wikified pre-commit 门禁
 #
 # 两道检查，任一失败即拒绝提交：
 #   1. secret scan —— 只扫 staged 内容（不是工作树），防凭据入库
@@ -15,11 +15,24 @@ cd "$REPO_ROOT" || exit 1
 
 FAIL=0
 
+resolve_tool() {
+  local name=$1 configured candidate
+  configured=$(git config --local --get wikified.toolkitBin 2>/dev/null || true)
+  for candidate in \
+    "${configured:+$configured/$name}" \
+    "${LLM_WIKI_BIN_TARGET:+$LLM_WIKI_BIN_TARGET/$name}" \
+    "$REPO_ROOT/bin/$name"; do
+    [[ -n "$candidate" && -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  command -v "$name" 2>/dev/null || return 1
+}
+
 # ---------- 1. secret scan（扫 staged 内容）----------
 # 用 --staged 让扫描器读 git index 的内容，而非工作树；
 # 避免「工作树已修好但提交的是脏版本」的漏网。
-if [[ -x bin/llm-wiki-secret-scan ]]; then
-  if ! python3 bin/llm-wiki-secret-scan --staged; then
+SCANNER=$(resolve_tool llm-wiki-secret-scan || true)
+if [[ -n "$SCANNER" ]]; then
+  if ! "$SCANNER" --root "$REPO_ROOT" --staged; then
     echo ""
     echo "✗ pre-commit 拒绝：staged 内容含疑似凭据。"
     echo "  处理方式："
@@ -28,7 +41,9 @@ if [[ -x bin/llm-wiki-secret-scan ]]; then
     FAIL=1
   fi
 else
-  echo "! 警告：bin/llm-wiki-secret-scan 不存在或不可执行，跳过 secret 门禁"
+  echo "✗ pre-commit 拒绝：找不到 llm-wiki-secret-scan，不能安全跳过凭据门禁"
+  echo "  请重新运行 llm-wiki-init --git，或设置 git config wikified.toolkitBin <工具目录>"
+  FAIL=1
 fi
 
 # ---------- 2. jsonl 规范序 ----------
@@ -37,14 +52,18 @@ STAGED_JSONL="$(git diff --cached --name-only --diff-filter=ACM \
   | grep -E '^(memory/events/.*\.jsonl|raw/inbox/corrections\.jsonl)$' || true)"
 
 if [[ -n "$STAGED_JSONL" ]]; then
-  if [[ -x bin/llm-wiki-dedupe-events ]]; then
-    if ! python3 bin/llm-wiki-dedupe-events --check >/dev/null 2>&1; then
+  DEDUPE=$(resolve_tool llm-wiki-dedupe-events || true)
+  if [[ -n "$DEDUPE" ]]; then
+    if ! "$DEDUPE" --root "$REPO_ROOT" --check >/dev/null 2>&1; then
       echo ""
       echo "✗ pre-commit 拒绝：jsonl 未处于规范序（去重+排序）。"
       echo "  修复：python3 bin/llm-wiki-dedupe-events && git add -u"
-      python3 bin/llm-wiki-dedupe-events --check 2>&1 | sed 's/^/    /'
+      "$DEDUPE" --root "$REPO_ROOT" --check 2>&1 | sed 's/^/    /'
       FAIL=1
     fi
+  else
+    echo "✗ pre-commit 拒绝：staged JSONL 需要 llm-wiki-dedupe-events 校验，但工具不可用"
+    FAIL=1
   fi
 fi
 

@@ -1,0 +1,1475 @@
+#!/usr/bin/env python3
+"""Inspect and safely configure Wikified integrations for supported harnesses.
+
+The command never reads credential stores directly. Claude/Grok/Codex MCP state
+is queried through their own CLIs; JSON/JSONC hook/config files are structurally
+merged with backups, validation, atomic replacement, and conflict detection.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import datetime as dt
+import json
+import os
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Iterable
+
+NAME = "llm-wiki"
+MARKER_BEGIN = "<!-- BEGIN llm-wiki-recall -->"
+MARKER_END = "<!-- END llm-wiki-recall -->"
+VALID_STATES = ("absent", "installed-unconfigured", "configured", "stale/wrong-link", "unverifiable")
+
+
+class HarnessError(RuntimeError):
+    pass
+
+
+class JsoncError(ValueError):
+    pass
+
+
+@dataclasses.dataclass
+class JsonNode:
+    kind: str
+    start: int
+    end: int
+    value: Any
+    close: int | None = None
+    members: dict[str, "JsonNode"] = dataclasses.field(default_factory=dict)
+    items: list["JsonNode"] = dataclasses.field(default_factory=list)
+    trailing_comma: bool = False
+
+
+class JsoncParser:
+    def __init__(self, text: str):
+        self.text = text
+        self.length = len(text)
+
+    def error(self, message: str, position: int) -> JsoncError:
+        line = self.text.count("\n", 0, position) + 1
+        col = position - self.text.rfind("\n", 0, position)
+        return JsoncError(f"{message} at line {line}, column {col}")
+
+    def skip(self, position: int) -> int:
+        while position < self.length:
+            if self.text[position].isspace():
+                position += 1
+                continue
+            if self.text.startswith("//", position):
+                newline = self.text.find("\n", position + 2)
+                return self.length if newline == -1 else self.skip(newline + 1)
+            if self.text.startswith("/*", position):
+                end = self.text.find("*/", position + 2)
+                if end == -1:
+                    raise self.error("unterminated comment", position)
+                position = end + 2
+                continue
+            break
+        return position
+
+    def parse(self) -> JsonNode:
+        start = self.skip(0)
+        if start >= self.length:
+            raise self.error("empty document", start)
+        node, position = self.parse_value(start)
+        position = self.skip(position)
+        if position != self.length:
+            raise self.error("unexpected trailing content", position)
+        return node
+
+    def parse_value(self, position: int) -> tuple[JsonNode, int]:
+        position = self.skip(position)
+        if position >= self.length:
+            raise self.error("expected value", position)
+        char = self.text[position]
+        if char == "{":
+            return self.parse_object(position)
+        if char == "[":
+            return self.parse_array(position)
+        if char == '"':
+            value, end = self.parse_string(position)
+            return JsonNode("string", position, end, value), end
+        end = position
+        while end < self.length and not self.text[end].isspace() and self.text[end] not in ",]}":
+            if self.text.startswith("//", end) or self.text.startswith("/*", end):
+                break
+            end += 1
+        raw = self.text[position:end]
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise self.error(f"invalid primitive {raw!r}", position) from exc
+        return JsonNode("primitive", position, end, value), end
+
+    def parse_string(self, position: int) -> tuple[str, int]:
+        end = position + 1
+        escaped = False
+        while end < self.length:
+            char = self.text[end]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                end += 1
+                try:
+                    return json.loads(self.text[position:end]), end
+                except json.JSONDecodeError as exc:
+                    raise self.error("invalid string", position) from exc
+            end += 1
+        raise self.error("unterminated string", position)
+
+    def parse_object(self, position: int) -> tuple[JsonNode, int]:
+        start = position
+        position += 1
+        members: dict[str, JsonNode] = {}
+        python_value: dict[str, Any] = {}
+        trailing = False
+        while True:
+            position = self.skip(position)
+            if position >= self.length:
+                raise self.error("unterminated object", start)
+            if self.text[position] == "}":
+                end = position + 1
+                return JsonNode("object", start, end, python_value, position, members, [], trailing), end
+            if self.text[position] != '"':
+                raise self.error("object keys must be quoted", position)
+            key, position = self.parse_string(position)
+            if key in members:
+                raise self.error(f"duplicate key {key!r}", position)
+            position = self.skip(position)
+            if position >= self.length or self.text[position] != ":":
+                raise self.error("expected ':'", position)
+            child, position = self.parse_value(position + 1)
+            members[key] = child
+            python_value[key] = child.value
+            position = self.skip(position)
+            if position >= self.length:
+                raise self.error("unterminated object", start)
+            if self.text[position] == ",":
+                position += 1
+                next_position = self.skip(position)
+                if next_position < self.length and self.text[next_position] == "}":
+                    trailing = True
+                    position = next_position
+                continue
+            if self.text[position] == "}":
+                end = position + 1
+                return JsonNode("object", start, end, python_value, position, members, [], False), end
+            raise self.error("expected ',' or '}'", position)
+
+    def parse_array(self, position: int) -> tuple[JsonNode, int]:
+        start = position
+        position += 1
+        items: list[JsonNode] = []
+        python_value: list[Any] = []
+        trailing = False
+        while True:
+            position = self.skip(position)
+            if position >= self.length:
+                raise self.error("unterminated array", start)
+            if self.text[position] == "]":
+                end = position + 1
+                return JsonNode("array", start, end, python_value, position, {}, items, trailing), end
+            child, position = self.parse_value(position)
+            items.append(child)
+            python_value.append(child.value)
+            position = self.skip(position)
+            if position >= self.length:
+                raise self.error("unterminated array", start)
+            if self.text[position] == ",":
+                position += 1
+                next_position = self.skip(position)
+                if next_position < self.length and self.text[next_position] == "]":
+                    trailing = True
+                    position = next_position
+                continue
+            if self.text[position] == "]":
+                end = position + 1
+                return JsonNode("array", start, end, python_value, position, {}, items, False), end
+            raise self.error("expected ',' or ']'", position)
+
+
+def parse_jsonc(text: str) -> JsonNode:
+    return JsoncParser(text).parse()
+
+
+def leading_indent(text: str, position: int) -> str:
+    line_start = text.rfind("\n", 0, position) + 1
+    prefix = text[line_start:position]
+    match = re.match(r"[ \t]*", prefix)
+    return match.group(0) if match else ""
+
+
+def close_insert_position(text: str, close: int) -> tuple[int, str]:
+    line_start = text.rfind("\n", 0, close) + 1
+    prefix = text[line_start:close]
+    if not prefix.strip():
+        return line_start, prefix
+    return close, leading_indent(text, close)
+
+
+def render_object_member(key: str, value: Any, indent: str) -> str:
+    lines = json.dumps({key: value}, ensure_ascii=False, indent=2).splitlines()[1:-1]
+    rendered: list[str] = []
+    for line in lines:
+        rendered.append(indent + (line[2:] if line.startswith("  ") else line))
+    return "\n".join(rendered)
+
+
+def render_array_item(value: Any, indent: str) -> str:
+    lines = json.dumps(value, ensure_ascii=False, indent=2).splitlines()
+    return "\n".join(indent + line for line in lines)
+
+
+def insert_object_member(text: str, node: JsonNode, key: str, value: Any) -> str:
+    if node.kind != "object" or node.close is None:
+        raise JsoncError("target is not an object")
+    position, parent_indent = close_insert_position(text, node.close)
+    child_indent = parent_indent + "  "
+    fragment = render_object_member(key, value, child_indent)
+    if node.members:
+        prefix = "" if node.trailing_comma else ","
+        insertion = f"{prefix}\n{fragment}\n"
+    else:
+        insertion = f"\n{fragment}\n"
+    return text[:position] + insertion + text[position:]
+
+
+def append_array_item(text: str, node: JsonNode, value: Any) -> str:
+    if node.kind != "array" or node.close is None:
+        raise JsoncError("target is not an array")
+    position, parent_indent = close_insert_position(text, node.close)
+    child_indent = parent_indent + "  "
+    fragment = render_array_item(value, child_indent)
+    if node.items:
+        prefix = "" if node.trailing_comma else ","
+        insertion = f"{prefix}\n{fragment}\n"
+    else:
+        insertion = f"\n{fragment}\n"
+    return text[:position] + insertion + text[position:]
+
+
+def flatten_strings(value: Any) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, str):
+        found.append(value)
+    elif isinstance(value, dict):
+        for child in value.values():
+            found.extend(flatten_strings(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(flatten_strings(child))
+    return found
+
+
+def managed_bin_target() -> Path:
+    return Path(os.environ.get("LLM_WIKI_BIN_TARGET", str(Path.home() / ".local" / "bin"))).expanduser().absolute()
+
+
+def expected_command() -> str:
+    return str(managed_bin_target() / "llm-wiki-mcp")
+
+
+def session_start_command() -> str:
+    return str(managed_bin_target() / "llm-wiki-session-start")
+
+
+def hook_command(format_name: str) -> str:
+    return f"{shlex.quote(session_start_command())} --format {format_name} --max-chars 2500"
+
+
+def repo_root() -> Path:
+    explicit = os.environ.get("LLM_WIKI_REPO")
+    return Path(explicit).expanduser().resolve() if explicit else Path(__file__).resolve().parent.parent
+
+
+def backup_file(path: Path, reason: str) -> Path:
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup = path.with_name(f"{path.name}.bak-wikified-{reason}-{stamp}")
+    backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.is_symlink():
+        backup.symlink_to(os.readlink(path))
+    else:
+        shutil.copy2(path, backup)
+    return backup
+
+
+def fsync_directory(path: Path) -> None:
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+        fsync_directory(path.parent)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def load_jsonc_for_change(path: Path) -> tuple[str, JsonNode]:
+    if path.exists() or path.is_symlink():
+        if path.is_symlink():
+            raise HarnessError(f"refusing to edit symlinked config: {path}")
+        text = path.read_text(encoding="utf-8")
+    else:
+        text = "{}\n"
+    try:
+        node = parse_jsonc(text)
+    except (OSError, UnicodeError, JsoncError) as exc:
+        if path.exists():
+            backup = backup_file(path, "malformed")
+            raise HarnessError(f"malformed config left unchanged; recovery snapshot: {backup}") from exc
+        raise HarnessError(f"cannot create config: {exc}") from exc
+    if node.kind != "object":
+        if path.exists():
+            backup = backup_file(path, "malformed")
+            raise HarnessError(f"config root is not an object; recovery snapshot: {backup}")
+        raise HarnessError("new config root is not an object")
+    return text, node
+
+
+def validate_and_write(path: Path, original: str, updated: str) -> bool:
+    if updated == original:
+        return False
+    try:
+        root = parse_jsonc(updated)
+        if root.kind != "object":
+            raise JsoncError("root must be an object")
+    except JsoncError as exc:
+        raise HarnessError(f"internal merge validation failed for {path}: {exc}") from exc
+    if path.exists():
+        backup = backup_file(path, "before-merge")
+        try:
+            atomic_write(path, updated, stat.S_IMODE(path.stat().st_mode) or 0o600)
+        except Exception:
+            shutil.copy2(backup, path)
+            raise
+    else:
+        atomic_write(path, updated, 0o600)
+    return True
+
+
+def mapping_contains(actual: Any, required: Any) -> bool:
+    """Return whether ``actual`` preserves every required managed field exactly."""
+    if isinstance(required, dict):
+        return isinstance(actual, dict) and all(
+            key in actual and mapping_contains(actual[key], value)
+            for key, value in required.items()
+        )
+    if isinstance(required, list):
+        return isinstance(actual, list) and actual == required
+    return actual == required
+
+
+def named_entry_status(path: Path, outer: str, required: dict[str, Any]) -> str:
+    if path.is_symlink():
+        return "unverifiable"
+    if not path.exists():
+        return "installed-unconfigured"
+    try:
+        node = parse_jsonc(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, JsoncError):
+        return "unverifiable"
+    if node.kind != "object" or not isinstance(node.value, dict):
+        return "unverifiable"
+    container = node.value.get(outer)
+    if container is None:
+        return "installed-unconfigured"
+    if not isinstance(container, dict):
+        return "unverifiable"
+    entry = container.get(NAME)
+    if entry is None:
+        return "installed-unconfigured"
+    return "configured" if mapping_contains(entry, required) else "stale/wrong-link"
+
+
+def merge_named_entry(
+    path: Path,
+    outer: str,
+    value: dict[str, Any],
+    required: dict[str, Any],
+) -> bool:
+    original, root = load_jsonc_for_change(path)
+    outer_node = root.members.get(outer)
+    if outer_node is None:
+        updated = insert_object_member(original, root, outer, {NAME: value})
+        return validate_and_write(path, original, updated)
+    if outer_node.kind != "object":
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"{outer} is user-owned non-object; unchanged; recovery snapshot: {backup}")
+    entry_node = outer_node.members.get(NAME)
+    if entry_node is not None:
+        if mapping_contains(entry_node.value, required):
+            return False
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"existing {outer}.{NAME} differs; unchanged; recovery snapshot: {backup}")
+    updated = insert_object_member(original, outer_node, NAME, value)
+    return validate_and_write(path, original, updated)
+
+
+def command_strings(value: Any) -> list[str]:
+    commands: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in ("command", "commandWindows") and isinstance(child, str):
+                commands.append(child)
+            else:
+                commands.extend(command_strings(child))
+    elif isinstance(value, list):
+        for child in value:
+            commands.extend(command_strings(child))
+    return commands
+
+
+def managed_hook_commands(value: Any) -> list[str]:
+    return [
+        command
+        for command in command_strings(value)
+        if "llm-wiki-session-start" in command or "llm-wiki-enrich" in command
+    ]
+
+
+def hook_status(path: Path, event: str, expected_fragments: Iterable[str]) -> str:
+    if path.is_symlink():
+        return "unverifiable"
+    if not path.exists():
+        return "installed-unconfigured"
+    try:
+        node = parse_jsonc(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, JsoncError):
+        return "unverifiable"
+    hooks = node.value.get("hooks") if isinstance(node.value, dict) else None
+    groups = hooks.get(event) if isinstance(hooks, dict) else None
+    if not isinstance(groups, list):
+        return "installed-unconfigured"
+    commands = managed_hook_commands(groups)
+    if not commands:
+        return "installed-unconfigured"
+    fragments = tuple(expected_fragments)
+    return "configured" if any(all(fragment in command for fragment in fragments) for command in commands) else "stale/wrong-link"
+
+
+def merge_hook(path: Path, event: str, group: dict[str, Any], expected_fragments: Iterable[str], version: int | None = None) -> bool:
+    original, root = load_jsonc_for_change(path)
+    updated = original
+    if version is not None and "version" not in root.members:
+        updated = insert_object_member(updated, root, "version", version)
+        root = parse_jsonc(updated)
+    hooks_node = root.members.get("hooks")
+    if hooks_node is None:
+        updated = insert_object_member(updated, root, "hooks", {event: [group]})
+        return validate_and_write(path, original, updated)
+    if hooks_node.kind != "object":
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"hooks is user-owned non-object; unchanged; recovery snapshot: {backup}")
+    event_node = hooks_node.members.get(event)
+    if event_node is None:
+        updated = insert_object_member(updated, hooks_node, event, [group])
+        return validate_and_write(path, original, updated)
+    if event_node.kind != "array":
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"hooks.{event} is user-owned non-array; unchanged; recovery snapshot: {backup}")
+    managed = managed_hook_commands(event_node.value)
+    if managed:
+        fragments = tuple(expected_fragments)
+        if any(all(fragment in command for fragment in fragments) for command in managed):
+            return False
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"existing Wikified {event} hook differs; unchanged; recovery snapshot: {backup}")
+    updated = append_array_item(updated, event_node, group)
+    return validate_and_write(path, original, updated)
+
+
+
+def preflight_named_entry(path: Path, outer: str, required: dict[str, Any]) -> None:
+    _original, root = load_jsonc_for_change(path)
+    outer_node = root.members.get(outer)
+    if outer_node is None:
+        return
+    if outer_node.kind != "object":
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"{outer} is user-owned non-object; unchanged; recovery snapshot: {backup}")
+    entry_node = outer_node.members.get(NAME)
+    if entry_node is None or mapping_contains(entry_node.value, required):
+        return
+    backup = backup_file(path, "conflict")
+    raise HarnessError(f"existing {outer}.{NAME} differs; unchanged; recovery snapshot: {backup}")
+
+
+def preflight_hook(path: Path, event: str, expected_fragments: Iterable[str]) -> None:
+    _original, root = load_jsonc_for_change(path)
+    hooks_node = root.members.get("hooks")
+    if hooks_node is None:
+        return
+    if hooks_node.kind != "object":
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"hooks is user-owned non-object; unchanged; recovery snapshot: {backup}")
+    event_node = hooks_node.members.get(event)
+    if event_node is None:
+        return
+    if event_node.kind != "array":
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"hooks.{event} is user-owned non-array; unchanged; recovery snapshot: {backup}")
+    managed = managed_hook_commands(event_node.value)
+    if not managed:
+        return
+    fragments = tuple(expected_fragments)
+    if any(all(fragment in command for fragment in fragments) for command in managed):
+        return
+    backup = backup_file(path, "conflict")
+    raise HarnessError(f"existing Wikified {event} hook differs; unchanged; recovery snapshot: {backup}")
+
+
+def preflight_managed_text(path: Path, template: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink():
+        raise HarnessError(f"refusing to edit symlinked instruction file: {path}")
+    if not path.is_file():
+        raise HarnessError(f"instruction path is not a regular file: {path}")
+    try:
+        current = path.read_text(encoding="utf-8")
+        wanted = template.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as exc:
+        raise HarnessError(f"cannot read instruction file {path}: {exc}") from exc
+    begin_count = current.count(MARKER_BEGIN)
+    end_count = current.count(MARKER_END)
+    if begin_count == 0 and end_count == 0:
+        return
+    if begin_count != 1 or end_count != 1:
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"invalid Wikified marker layout in {path}; unchanged; recovery snapshot: {backup}")
+    start = current.index(MARKER_BEGIN)
+    end = current.index(MARKER_END, start) + len(MARKER_END)
+    if current[start:end].strip() == wanted:
+        return
+    backup = backup_file(path, "conflict")
+    raise HarnessError(f"managed instruction block was edited; unchanged; recovery snapshot: {backup}")
+
+
+def preflight_link(source: Path, target: Path) -> None:
+    source_real = source.resolve()
+    if target.is_symlink():
+        try:
+            if target.resolve() == source_real:
+                return
+        except OSError:
+            pass
+        raise HarnessError(
+            f"stale/wrong symlink left unchanged: {target}; review then run: mv -- {target} {target}.bak-manual"
+        )
+    if target.exists():
+        raise HarnessError(f"user-owned path left unchanged: {target}; review then move it before rerunning configuration")
+
+
+def preflight_managed_file(path: Path, source: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_file() and not path.is_symlink():
+        try:
+            if path.read_text(encoding="utf-8") == source.read_text(encoding="utf-8"):
+                return
+        except (OSError, UnicodeError):
+            pass
+    backup = backup_file(path, "conflict")
+    raise HarnessError(f"managed file path is occupied by different content: {path}; unchanged; snapshot: {backup}")
+
+def install_managed_text(path: Path, template: Path) -> bool:
+    wanted = template.read_text(encoding="utf-8").strip() + "\n"
+    if not path.exists():
+        atomic_write(path, wanted, 0o600)
+        return True
+    if path.is_symlink():
+        raise HarnessError(f"refusing to edit symlinked instruction file: {path}")
+    if not path.is_file():
+        raise HarnessError(f"instruction path is not a regular file: {path}")
+    try:
+        current = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise HarnessError(f"cannot read instruction file {path}: {exc}") from exc
+    has_begin = MARKER_BEGIN in current
+    has_end = MARKER_END in current
+    if has_begin != has_end:
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"partial Wikified marker in {path}; unchanged; recovery snapshot: {backup}")
+    if has_begin:
+        start = current.index(MARKER_BEGIN)
+        end = current.index(MARKER_END, start) + len(MARKER_END)
+        existing = current[start:end].strip()
+        if existing == wanted.strip():
+            return False
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"managed instruction block was edited; unchanged; recovery snapshot: {backup}")
+    separator = "" if not current or current.endswith("\n\n") else ("\n" if current.endswith("\n") else "\n\n")
+    updated = current + separator + wanted
+    backup = backup_file(path, "before-merge")
+    try:
+        atomic_write(path, updated, stat.S_IMODE(path.stat().st_mode) or 0o600)
+    except Exception:
+        shutil.copy2(backup, path)
+        raise
+    return True
+
+
+def safe_create_file(path: Path, source: Path) -> bool:
+    wanted = source.read_text(encoding="utf-8")
+    if not path.exists() and not path.is_symlink():
+        atomic_write(path, wanted, 0o600)
+        return True
+    if path.is_file() and not path.is_symlink():
+        try:
+            if path.read_text(encoding="utf-8") == wanted:
+                return False
+        except (OSError, UnicodeError):
+            pass
+    backup = backup_file(path, "conflict")
+    raise HarnessError(f"managed file path is occupied by different content: {path}; unchanged; snapshot: {backup}")
+
+
+def safe_link(source: Path, target: Path) -> bool:
+    source_real = source.resolve()
+    if target.is_symlink():
+        try:
+            if target.resolve() == source_real:
+                return False
+        except OSError:
+            pass
+        raise HarnessError(
+            f"stale/wrong symlink left unchanged: {target}; review then run: mv -- {target} {target}.bak-manual"
+        )
+    if target.exists():
+        raise HarnessError(
+            f"user-owned path left unchanged: {target}; review then move it before rerunning configuration"
+        )
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target.symlink_to(source_real)
+    return True
+
+
+@dataclasses.dataclass(frozen=True)
+class BinaryInfo:
+    path: Path | None
+    source: str
+
+
+def detect_binary(harness: str) -> BinaryInfo:
+    env_name = f"LLM_WIKI_{harness.upper()}_BIN"
+    explicit = os.environ.get(env_name)
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            return BinaryInfo(None, "explicit-missing")
+        if harness != "cursor":
+            return BinaryInfo(candidate, "explicit")
+        identity = cursor_binary_identity(candidate)
+        if identity.startswith("confirmed"):
+            source = "explicit-verified" if candidate.name.lower() == "agent" else "explicit"
+            return BinaryInfo(candidate, source)
+        return BinaryInfo(None, f"explicit-identity-{identity}")
+
+    rejected_cursor_identity = ""
+    seen_cursor_candidates: set[str] = set()
+
+    def consider_cursor(candidate: Path, source: str) -> BinaryInfo | None:
+        nonlocal rejected_cursor_identity
+        try:
+            key = str(candidate.resolve(strict=True))
+        except OSError:
+            key = str(candidate.absolute())
+        if key in seen_cursor_candidates:
+            return None
+        seen_cursor_candidates.add(key)
+        identity = cursor_binary_identity(candidate)
+        if identity.startswith("confirmed"):
+            verified_source = f"{source}-verified" if candidate.name.lower() == "agent" else source
+            return BinaryInfo(candidate, verified_source)
+        if identity == "mismatch" or not rejected_cursor_identity:
+            rejected_cursor_identity = identity
+        return None
+
+    if os.environ.get("LLM_WIKI_DISABLE_PATH_DETECTION") != "1":
+        path_names = {
+            # Prefer the product-specific alias. The generic `agent` name is also
+            # used by Grok and must pass the bounded identity probe below.
+            "cursor": ("cursor-agent", "agent"),
+        }.get(harness, (harness,))
+        for name in path_names:
+            found = shutil.which(name)
+            if not found:
+                continue
+            candidate = Path(found)
+            if harness == "cursor":
+                accepted = consider_cursor(candidate, "PATH")
+                if accepted is not None:
+                    return accepted
+                continue
+            return BinaryInfo(candidate, "PATH")
+
+    home = Path.home()
+    candidates: dict[str, tuple[tuple[Path, str], ...]] = {
+        "claude": ((home / ".local/bin/claude", "home-local-bin"),),
+        "opencode": (
+            (home / ".opencode/bin/opencode", "private-bin"),
+            (home / ".local/bin/opencode", "home-local-bin"),
+        ),
+        "grok": (
+            (home / ".local/bin/grok", "home-local-bin"),
+            (home / ".grok/bin/grok", "private-bin"),
+        ),
+        "codex": (
+            (home / ".local/bin/codex", "home-local-bin"),
+            (home / ".codex/bin/codex", "private-bin"),
+        ),
+        "cursor": (
+            (home / ".cursor/bin/cursor-agent", "private-bin"),
+            (home / ".cursor/bin/agent", "private-bin"),
+            (home / ".local/bin/cursor-agent", "home-local-bin"),
+            (home / ".local/bin/agent", "home-local-bin"),
+        ),
+    }
+    for candidate, source in candidates[harness]:
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        if harness == "cursor":
+            accepted = consider_cursor(candidate, source)
+            if accepted is not None:
+                return accepted
+            continue
+        return BinaryInfo(candidate, source)
+    if harness == "cursor" and rejected_cursor_identity:
+        return BinaryInfo(None, f"identity-{rejected_cursor_identity}")
+    return BinaryInfo(None, "absent")
+
+
+@dataclasses.dataclass
+class CommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def run_readonly(
+    command: list[str],
+    timeout: int = 8,
+    env: dict[str, str] | None = None,
+) -> CommandResult:
+    try:
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env={**(os.environ if env is None else env), "LC_ALL": "C"},
+        )
+        return CommandResult(completed.returncode, completed.stdout[:131072], completed.stderr[:131072])
+    except subprocess.TimeoutExpired:
+        return CommandResult(124, "", "command timed out")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return CommandResult(126, "", str(exc))
+
+
+def path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def cursor_binary_identity(candidate: Path) -> str:
+    """Return confirmed-path, confirmed-probe, mismatch or unverifiable.
+
+    Product-specific names/roots are strong local evidence, except when a
+    symlink resolves into Grok's tree. A generic `agent` must identify itself
+    through the official read-only `--version` surface. The probe runs with a
+    disposable HOME/config/cache and a hard timeout, and it does not pass the
+    user's Cursor config paths or API-key environment to the candidate.
+    """
+
+    try:
+        raw = candidate.expanduser().absolute()
+        resolved = candidate.expanduser().resolve(strict=True)
+        home = Path.home().resolve(strict=True)
+    except OSError:
+        return "unverifiable"
+
+    grok_root = home / ".grok"
+    if path_is_within(resolved, grok_root) or "grok" in resolved.name.lower():
+        return "mismatch"
+
+    cursor_roots = (
+        home / ".cursor" / "bin",
+        home / ".local" / "share" / "cursor-agent",
+    )
+    if candidate.name.lower() == "cursor-agent":
+        return "confirmed-path"
+    if any(path_is_within(raw, root) or path_is_within(resolved, root) for root in cursor_roots):
+        return "confirmed-path"
+
+    with tempfile.TemporaryDirectory(prefix="llm-wiki-cursor-probe-") as temp:
+        root = Path(temp)
+        probe_home = root / "home"
+        probe_home.mkdir(mode=0o700)
+        probe_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "CURSOR_API_KEY",
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "XAI_API_KEY",
+            }
+        }
+        probe_env.update(
+            {
+                "HOME": str(probe_home),
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "XDG_STATE_HOME": str(root / "state"),
+                "XDG_CACHE_HOME": str(root / "cache"),
+                "CURSOR_CONFIG_DIR": str(root / "cursor-config"),
+                "NO_OPEN_BROWSER": "1",
+            }
+        )
+        result = run_readonly([str(candidate), "--version"], timeout=3, env=probe_env)
+
+    output = (result.stdout + "\n" + result.stderr).lower()
+    if "grok" in output or "x.ai" in output:
+        return "mismatch"
+    cursor_markers = ("cursor agent", "cursor-agent", "cursor.com", "cursor_api_key")
+    if result.returncode == 0 and any(marker in output for marker in cursor_markers):
+        return "confirmed-probe"
+    # A successful but product-neutral version string is not enough by
+    # itself. It remains eligible only when the resolved path already supplied
+    # Cursor-specific evidence above.
+    return "unverifiable"
+
+
+def cli_get_status(binary: Path, harness: str, expected: str) -> str:
+    if harness in ("claude", "codex"):
+        result = run_readonly([str(binary), "mcp", "get", NAME])
+        combined = result.stdout + "\n" + result.stderr
+        lower = combined.lower()
+        if result.returncode == 0:
+            if expected in combined:
+                return "configured"
+            if "llm-wiki-mcp" in combined:
+                return "stale/wrong-link"
+            return "unverifiable"
+        claude_named_absent = (
+            harness == "claude"
+            and re.search(
+                rf"no\s+mcp\s+server\s+named\s+[\"']?{re.escape(NAME)}[\"']?",
+                lower,
+            )
+            is not None
+        )
+        if claude_named_absent or any(
+            term in lower for term in ("not found", "does not exist", "no server", "unknown server")
+        ):
+            return "installed-unconfigured"
+        return "unverifiable"
+    if harness == "grok":
+        result = run_readonly([str(binary), "mcp", "list", "--json"])
+        if result.returncode != 0:
+            return "unverifiable"
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return "unverifiable"
+        server = find_named_server(data, NAME)
+        if server is None:
+            return "installed-unconfigured"
+        strings = flatten_strings(server)
+        if expected in strings or any(expected in item for item in strings):
+            return "configured"
+        if strings:
+            return "stale/wrong-link"
+        return "unverifiable"
+    raise ValueError(harness)
+
+
+def find_named_server(value: Any, name: str) -> Any | None:
+    if isinstance(value, dict):
+        if name in value:
+            return value[name]
+        if value.get("name") == name:
+            return value
+        for child in value.values():
+            found = find_named_server(child, name)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_named_server(child, name)
+            if found is not None:
+                return found
+    return None
+
+
+def add_mcp(binary: Path, harness: str, expected: str) -> bool:
+    state = cli_get_status(binary, harness, expected)
+    if state == "configured":
+        return False
+    if state in ("stale/wrong-link", "unverifiable"):
+        raise HarnessError(f"{harness} MCP state is {state}; no mutation performed")
+    commands = {
+        "claude": [str(binary), "mcp", "add", "--scope", "user", NAME, "--", expected],
+        "grok": [str(binary), "mcp", "add", NAME, "--", expected],
+        "codex": [str(binary), "mcp", "add", NAME, "--", expected],
+    }
+    result = run_readonly(commands[harness], timeout=15)
+    if result.returncode != 0:
+        raise HarnessError(f"{harness} MCP add failed (rc={result.returncode}); CLI output suppressed")
+    verified = cli_get_status(binary, harness, expected)
+    if verified != "configured":
+        raise HarnessError(f"{harness} MCP add could not be verified ({verified})")
+    return True
+
+
+def first_existing(paths: Iterable[Path], default: Path) -> Path:
+    for path in paths:
+        if path.exists() or path.is_symlink():
+            return path
+    return default
+
+
+def opencode_config_path() -> Path:
+    explicit = os.environ.get("LLM_WIKI_OPENCODE_CONFIG") or os.environ.get("OPENCODE_CONFIG")
+    if explicit:
+        return Path(explicit).expanduser()
+    root = Path(os.environ.get("OPENCODE_CONFIG_DIR", str(Path.home() / ".config" / "opencode"))).expanduser()
+    return first_existing(
+        (root / "opencode.jsonc", root / "opencode.json", root / "config.json"),
+        root / "opencode.json",
+    )
+
+
+def claude_settings_path() -> Path:
+    return Path(os.environ.get("LLM_WIKI_CLAUDE_SETTINGS", str(Path.home() / ".claude/settings.json"))).expanduser()
+
+
+def claude_instructions_path() -> Path:
+    return Path(os.environ.get("LLM_WIKI_CLAUDE_INSTRUCTIONS", str(Path.home() / ".claude/CLAUDE.md"))).expanduser()
+
+
+def opencode_instructions_path() -> Path:
+    return Path(os.environ.get("LLM_WIKI_OPENCODE_INSTRUCTIONS", str(Path.home() / ".config/opencode/AGENTS.md"))).expanduser()
+
+
+def opencode_plugin_path() -> Path:
+    return Path(
+        os.environ.get(
+            "LLM_WIKI_OPENCODE_PLUGIN_TARGET",
+            str(Path.home() / ".config/opencode/plugins"),
+        )
+    ).expanduser() / "llm-wiki-recall.js"
+
+
+def opencode_legacy_plugin_path() -> Path:
+    return Path(
+        os.environ.get(
+            "LLM_WIKI_OPENCODE_LEGACY_PLUGIN_TARGET",
+            str(Path.home() / ".opencode/plugins"),
+        )
+    ).expanduser() / "llm-wiki-recall.js"
+
+
+def grok_instructions_path() -> Path:
+    return Path(os.environ.get("LLM_WIKI_GROK_INSTRUCTIONS", str(Path.home() / ".grok/AGENTS.md"))).expanduser()
+
+
+def grok_hook_path() -> Path:
+    root = Path(os.environ.get("LLM_WIKI_GROK_HOOKS_DIR", str(Path.home() / ".grok/hooks"))).expanduser()
+    return root / "llm-wiki.json"
+
+
+def codex_home_paths() -> list[Path]:
+    paths = [Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()]
+    windows = os.environ.get("LLM_WIKI_WINDOWS_CODEX_HOME")
+    if windows:
+        candidate = Path(windows).expanduser()
+        if candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
+def cursor_mcp_path() -> Path:
+    return Path(os.environ.get("LLM_WIKI_CURSOR_MCP", str(Path.home() / ".cursor/mcp.json"))).expanduser()
+
+
+def cursor_hooks_path() -> Path:
+    return Path(os.environ.get("LLM_WIKI_CURSOR_HOOKS", str(Path.home() / ".cursor/hooks.json"))).expanduser()
+
+
+def managed_text_status(path: Path, template: Path) -> str:
+    """Validate the exact managed marker block without judging user text around it."""
+    if not path.exists() and not path.is_symlink():
+        return "installed-unconfigured"
+    if path.is_symlink() or not path.is_file():
+        return "unverifiable"
+    try:
+        text = path.read_text(encoding="utf-8")
+        wanted = template.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return "unverifiable"
+    begin_count = text.count(MARKER_BEGIN)
+    end_count = text.count(MARKER_END)
+    if begin_count == 0 and end_count == 0:
+        return "installed-unconfigured"
+    if begin_count != 1 or end_count != 1:
+        return "unverifiable"
+    start = text.index(MARKER_BEGIN)
+    end = text.index(MARKER_END, start) + len(MARKER_END)
+    actual = text[start:end].strip()
+    return "configured" if actual == wanted else "stale/wrong-link"
+
+
+def opencode_lifecycle_status() -> str:
+    target = opencode_plugin_path()
+    expected = (repo_root() / "plugins/llm-wiki-recall.js").resolve()
+    if target.is_symlink():
+        try:
+            return "configured" if target.resolve() == expected else "stale/wrong-link"
+        except OSError:
+            return "stale/wrong-link"
+    if target.exists():
+        return "stale/wrong-link"
+    legacy = opencode_legacy_plugin_path()
+    if legacy.exists() or legacy.is_symlink():
+        return "stale/wrong-link"
+    return "installed-unconfigured"
+
+
+def simple_toml_mcp_status(path: Path, expected: str) -> str:
+    if path.is_symlink():
+        return "unverifiable"
+    if not path.exists():
+        return "installed-unconfigured"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return "unverifiable"
+    section_re = re.compile(r"(?ms)^\s*\[mcp_servers\.(?:\"llm-wiki\"|'llm-wiki'|llm-wiki)\]\s*$")
+    match = section_re.search(text)
+    if not match:
+        return "installed-unconfigured"
+    next_section = re.search(r"(?m)^\s*\[", text[match.end():])
+    end = match.end() + next_section.start() if next_section else len(text)
+    block = text[match.start():end]
+    if expected in block or "llm-wiki-mcp" in block:
+        return "configured" if (expected in block or "wsl" in block.lower()) else "stale/wrong-link"
+    return "stale/wrong-link"
+
+
+@dataclasses.dataclass
+class HarnessStatus:
+    harness: str
+    executable: str
+    mcp: str
+    lifecycle: str
+    rules: str
+    overall: str
+    note: str = ""
+
+    def as_dict(self) -> dict[str, str]:
+        return dataclasses.asdict(self)
+
+
+def overall_state(evidence: bool, required: Iterable[str]) -> str:
+    states = list(required)
+    if not evidence:
+        return "absent"
+    if "unverifiable" in states:
+        return "unverifiable"
+    if "stale/wrong-link" in states:
+        return "stale/wrong-link"
+    if states and all(state == "configured" for state in states):
+        return "configured"
+    return "installed-unconfigured"
+
+
+def aggregate_component_states(states: Iterable[str]) -> str:
+    values = list(states)
+    # Multiple Codex homes can coexist under WSL. Never let one healthy home
+    # mask an unverifiable or known-stale sibling; an unconfigured sibling is
+    # tolerated when another home is explicitly configured.
+    if "unverifiable" in values:
+        return "unverifiable"
+    if "stale/wrong-link" in values:
+        return "stale/wrong-link"
+    if "configured" in values:
+        return "configured"
+    return "installed-unconfigured"
+
+
+def inspect_all() -> list[HarnessStatus]:
+    expected = expected_command()
+    adapter = session_start_command()
+    templates = repo_root() / "templates"
+    results: list[HarnessStatus] = []
+
+    claude = detect_binary("claude")
+    claude_mcp = cli_get_status(claude.path, "claude", expected) if claude.path else "installed-unconfigured"
+    claude_hook = hook_status(
+        claude_settings_path(),
+        "SessionStart",
+        (adapter, "--format claude", "--max-chars 2500"),
+    )
+    claude_rules = managed_text_status(claude_instructions_path(), templates / "claude/CLAUDE.recall.md")
+    claude_evidence = claude.path is not None
+    results.append(
+        HarnessStatus(
+            "claude",
+            claude.source,
+            claude_mcp,
+            claude_hook,
+            claude_rules,
+            overall_state(claude_evidence, (claude_mcp, claude_hook, claude_rules)),
+        )
+    )
+
+    opencode = detect_binary("opencode")
+    oc_config = opencode_config_path()
+    oc_required = {"type": "local", "command": [expected], "enabled": True}
+    oc_mcp = named_entry_status(oc_config, "mcp", oc_required)
+    oc_lifecycle = opencode_lifecycle_status()
+    oc_rules = managed_text_status(opencode_instructions_path(), templates / "opencode/AGENTS.recall.md")
+    opencode_evidence = opencode.path is not None
+    results.append(
+        HarnessStatus(
+            "opencode",
+            opencode.source,
+            oc_mcp,
+            oc_lifecycle,
+            oc_rules,
+            overall_state(opencode_evidence, (oc_mcp, oc_lifecycle, oc_rules)),
+        )
+    )
+
+    grok = detect_binary("grok")
+    grok_mcp = cli_get_status(grok.path, "grok", expected) if grok.path else "installed-unconfigured"
+    grok_hook = hook_status(
+        grok_hook_path(),
+        "SessionStart",
+        (adapter, "--format grok-probe", "--max-chars 2500"),
+    )
+    grok_rules = managed_text_status(grok_instructions_path(), templates / "grok/AGENTS.recall.md")
+    grok_evidence = grok.path is not None
+    results.append(
+        HarnessStatus(
+            "grok",
+            grok.source,
+            grok_mcp,
+            grok_hook,
+            grok_rules,
+            overall_state(grok_evidence, (grok_mcp, grok_hook, grok_rules)),
+            "passive hook is diagnostic only",
+        )
+    )
+
+    codex = detect_binary("codex")
+    codex_homes = codex_home_paths()
+    codex_mcp_states = [simple_toml_mcp_status(home / "config.toml", expected) for home in codex_homes]
+    codex_mcp = aggregate_component_states(codex_mcp_states)
+    # A Windows Codex home may legitimately use $HOME inside commandWindows, so
+    # status accepts the managed adapter basename while WSL configuration itself
+    # writes the exact absolute managed path.
+    codex_hook_states = [
+        hook_status(home / "hooks.json", "SessionStart", ("llm-wiki-session-start", "--format codex", "2500"))
+        for home in codex_homes
+    ]
+    codex_hook = aggregate_component_states(codex_hook_states)
+    codex_rule_states = [
+        managed_text_status(home / "AGENTS.md", templates / "codex/AGENTS.recall.md")
+        for home in codex_homes
+    ]
+    codex_rules = aggregate_component_states(codex_rule_states)
+    codex_evidence = bool(codex.path or any(home.exists() for home in codex_homes))
+    results.append(
+        HarnessStatus(
+            "codex",
+            codex.source if codex.path else ("external-config" if codex_evidence else "absent"),
+            codex_mcp,
+            codex_hook,
+            codex_rules,
+            overall_state(codex_evidence, (codex_mcp, codex_hook, codex_rules)),
+        )
+    )
+
+    cursor = detect_binary("cursor")
+    cursor_value = {"command": "sh", "args": ["-lc", f"exec {shlex.quote(expected)}"]}
+    cursor_identity_rejected = cursor.path is None and "identity-" in cursor.source
+    if cursor_identity_rejected:
+        # Do not even interpret existing Cursor config as configured when the
+        # only executable evidence is a different or unidentifiable `agent`.
+        cursor_mcp = "unverifiable"
+        cursor_hook = "unverifiable"
+    else:
+        cursor_mcp = named_entry_status(cursor_mcp_path(), "mcpServers", cursor_value)
+        cursor_hook = hook_status(
+            cursor_hooks_path(),
+            "sessionStart",
+            (adapter, "--format cursor", "--max-chars 2500"),
+        )
+    cursor_evidence = cursor.path is not None
+    cursor_overall = overall_state(cursor_evidence, (cursor_mcp, cursor_hook))
+    cursor_note = "sessionStart is local only; Cloud Agents use MCP/manual recall"
+    if cursor_identity_rejected:
+        cursor_note = (
+            "generic agent rejected because Cursor identity was not confirmed; "
+            "Cursor config was not inspected or mutated; " + cursor_note
+        )
+    results.append(
+        HarnessStatus(
+            "cursor",
+            cursor.source,
+            cursor_mcp,
+            cursor_hook,
+            "template/manual",
+            cursor_overall,
+            cursor_note,
+        )
+    )
+    return results
+
+
+def print_status(statuses: list[HarnessStatus], as_json: bool) -> None:
+    if as_json:
+        json.dump({"harnesses": [status.as_dict() for status in statuses]}, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return
+    headers = ("HARNESS", "EXECUTABLE", "MCP", "LIFECYCLE", "RULES", "OVERALL")
+    rows = [headers] + [
+        (s.harness, s.executable, s.mcp, s.lifecycle, s.rules, s.overall)
+        for s in statuses
+    ]
+    widths = [max(len(str(row[index])) for row in rows) for index in range(len(headers))]
+    for row_index, row in enumerate(rows):
+        print("  ".join(str(value).ljust(widths[index]) for index, value in enumerate(row)))
+        if row_index == 0:
+            print("  ".join("-" * width for width in widths))
+    for status in statuses:
+        if status.note:
+            print(f"note[{status.harness}]: {status.note}")
+
+
+def template_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def set_nested_hook_command(group: dict[str, Any], format_name: str) -> dict[str, Any]:
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list) or not hooks or not isinstance(hooks[0], dict):
+        raise HarnessError("invalid managed hook template")
+    hooks[0]["command"] = hook_command(format_name)
+    return group
+
+
+def set_direct_hook_command(group: dict[str, Any], format_name: str) -> dict[str, Any]:
+    group["command"] = hook_command(format_name)
+    return group
+
+
+def configure_claude(binary: Path, expected: str) -> int:
+    changes = 0
+    fragment = template_json(repo_root() / "templates/claude/settings.hooks.json")
+    group = set_nested_hook_command(fragment["hooks"]["SessionStart"][0], "claude")
+    expected_hook = (session_start_command(), "--format claude", "--max-chars 2500")
+    preflight_hook(claude_settings_path(), "SessionStart", expected_hook)
+    preflight_managed_text(claude_instructions_path(), repo_root() / "templates/claude/CLAUDE.recall.md")
+    changes += int(add_mcp(binary, "claude", expected))
+    changes += int(
+        merge_hook(
+            claude_settings_path(),
+            "SessionStart",
+            group,
+            expected_hook,
+        )
+    )
+    changes += int(install_managed_text(claude_instructions_path(), repo_root() / "templates/claude/CLAUDE.recall.md"))
+    return changes
+
+
+def configure_opencode(expected: str) -> int:
+    changes = 0
+    value = {"type": "local", "command": [expected], "enabled": True, "timeout": 5000}
+    required = {"type": "local", "command": [expected], "enabled": True}
+    preflight_named_entry(opencode_config_path(), "mcp", required)
+    preflight_link(repo_root() / "plugins/llm-wiki-recall.js", opencode_plugin_path())
+    preflight_managed_text(opencode_instructions_path(), repo_root() / "templates/opencode/AGENTS.recall.md")
+    changes += int(merge_named_entry(opencode_config_path(), "mcp", value, required))
+    changes += int(safe_link(repo_root() / "plugins/llm-wiki-recall.js", opencode_plugin_path()))
+    changes += int(install_managed_text(opencode_instructions_path(), repo_root() / "templates/opencode/AGENTS.recall.md"))
+    return changes
+
+
+def configure_grok(binary: Path, expected: str) -> int:
+    changes = 0
+    fragment = template_json(repo_root() / "templates/grok/hooks.json")
+    group = set_nested_hook_command(fragment["hooks"]["SessionStart"][0], "grok-probe")
+    expected_hook = (session_start_command(), "--format grok-probe", "--max-chars 2500")
+    preflight_managed_text(grok_instructions_path(), repo_root() / "templates/grok/AGENTS.recall.md")
+    preflight_hook(grok_hook_path(), "SessionStart", expected_hook)
+    changes += int(add_mcp(binary, "grok", expected))
+    changes += int(install_managed_text(grok_instructions_path(), repo_root() / "templates/grok/AGENTS.recall.md"))
+    changes += int(
+        merge_hook(
+            grok_hook_path(),
+            "SessionStart",
+            group,
+            expected_hook,
+        )
+    )
+    return changes
+
+
+def configure_codex(binary: Path, expected: str) -> int:
+    changes = 0
+    home = codex_home_paths()[0]
+    fragment = template_json(repo_root() / "templates/codex/hooks.json")
+    group = set_nested_hook_command(fragment["hooks"]["SessionStart"][0], "codex")
+    expected_hook = (session_start_command(), "--format codex", "--max-chars 2500")
+    preflight_hook(home / "hooks.json", "SessionStart", expected_hook)
+    preflight_managed_text(home / "AGENTS.md", repo_root() / "templates/codex/AGENTS.recall.md")
+    preflight_managed_file(home / "prompts/llm-wiki-recall.md", repo_root() / "templates/codex/prompts/llm-wiki-recall.md")
+    changes += int(add_mcp(binary, "codex", expected))
+    changes += int(
+        merge_hook(
+            home / "hooks.json",
+            "SessionStart",
+            group,
+            expected_hook,
+        )
+    )
+    changes += int(install_managed_text(home / "AGENTS.md", repo_root() / "templates/codex/AGENTS.recall.md"))
+    changes += int(safe_create_file(home / "prompts/llm-wiki-recall.md", repo_root() / "templates/codex/prompts/llm-wiki-recall.md"))
+    return changes
+
+
+def configure_cursor(expected: str) -> int:
+    changes = 0
+    value = {"command": "sh", "args": ["-lc", f"exec {shlex.quote(expected)}"]}
+    fragment = template_json(repo_root() / "templates/cursor/hooks.json")
+    group = set_direct_hook_command(fragment["hooks"]["sessionStart"][0], "cursor")
+    expected_hook = (session_start_command(), "--format cursor", "--max-chars 2500")
+    preflight_named_entry(cursor_mcp_path(), "mcpServers", value)
+    preflight_hook(cursor_hooks_path(), "sessionStart", expected_hook)
+    changes += int(merge_named_entry(cursor_mcp_path(), "mcpServers", value, value))
+    changes += int(
+        merge_hook(
+            cursor_hooks_path(),
+            "sessionStart",
+            group,
+            expected_hook,
+            version=1,
+        )
+    )
+    return changes
+
+
+def configure(harnesses: list[str]) -> int:
+    expected = expected_command()
+    if not Path(expected).is_file() or not os.access(expected, os.X_OK):
+        raise HarnessError(f"managed MCP command is not executable: {expected}; run install.sh first")
+    if not Path(session_start_command()).is_file() or not os.access(session_start_command(), os.X_OK):
+        raise HarnessError(
+            f"managed session-start adapter is not executable: {session_start_command()}; run install.sh first"
+        )
+    selected: list[str] = []
+    for harness in harnesses:
+        expanded = ("claude", "opencode", "grok", "codex", "cursor") if harness == "all" else (harness,)
+        for item in expanded:
+            if item not in selected:
+                selected.append(item)
+    total = 0
+    failures = 0
+    for harness in selected:
+        binary = detect_binary(harness)
+        if binary.path is None:
+            print(f"SKIP {harness}: absent ({binary.source})")
+            continue
+        before = total
+        try:
+            if harness == "claude":
+                total += configure_claude(binary.path, expected)
+            elif harness == "opencode":
+                total += configure_opencode(expected)
+            elif harness == "grok":
+                total += configure_grok(binary.path, expected)
+            elif harness == "codex":
+                total += configure_codex(binary.path, expected)
+            elif harness == "cursor":
+                total += configure_cursor(expected)
+        except HarnessError as exc:
+            failures += 1
+            print(f"ERROR {harness}: {exc}", file=sys.stderr)
+            continue
+        print(f"OK   {harness}: changes={total - before}")
+    print(f"configuration complete: changes={total}, failures={failures}")
+    return 1 if failures else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    status_parser = sub.add_parser("status", help="print non-secret capability matrix")
+    status_parser.add_argument("--json", action="store_true")
+    status_parser.add_argument("--strict", action="store_true", help="fail if an installed harness is not configured")
+    configure_parser = sub.add_parser("configure", help="explicitly configure installed harnesses")
+    configure_parser.add_argument(
+        "--harness",
+        action="append",
+        choices=("claude", "opencode", "grok", "codex", "cursor", "all"),
+        default=[],
+        help="repeat to select harnesses; default: claude, opencode, grok",
+    )
+    args = parser.parse_args()
+    if args.command == "status":
+        statuses = inspect_all()
+        print_status(statuses, args.json)
+        if args.strict and any(status.overall not in ("absent", "configured") for status in statuses):
+            return 1
+        return 0
+    harnesses = args.harness or ["claude", "opencode", "grok"]
+    try:
+        return configure(harnesses)
+    except HarnessError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "llm-wiki": {
+      "command": "sh",
+      "args": ["-lc", "exec \"$HOME/.local/bin/llm-wiki-mcp\""]
+    }
+  }
+}

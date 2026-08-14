@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wiki-graph — 一键在 Windows 浏览器打开 LLM Wiki 的 Graphify 知识图谱。
+# wiki-graph — 一键在 Windows 浏览器打开 Wikified 的 Graphify 知识图谱。
 #
 # 用法:
 #   wiki-graph             打开现有图谱(若 wiki 比图谱新会提示需重建)
@@ -62,7 +62,7 @@ for arg in "$@"; do
 done
 
 if [[ ! -d "$WIKI_ROOT" ]]; then
-  echo "error: 找不到 LLM Wiki 根目录: $WIKI_ROOT" >&2
+  echo "error: 找不到 Wikified 数据根目录: $WIKI_ROOT" >&2
   exit 1
 fi
 
@@ -84,7 +84,7 @@ fi
 #   - `graphify update <path>`：仅重新提取【代码文件】(AST,无 API)。对纯 markdown 文档无效。
 #   - 文档语料的全量图谱:0.8 起没有裸路径 CLI 入口了,需在 opencode 里跑 `/graphify .`
 #     (skill runbook 编排:AST + 语义提取 + 聚类)。
-# LLM Wiki 几乎全是 markdown,所以 CLI 无法一键重建文档图谱,只能提示走 skill。
+# Wikified 数据几乎全是 markdown,所以 CLI 无法一键重建文档图谱,只能提示走 skill。
 if [[ "$do_update" -eq 1 ]]; then
   if ! command -v graphify >/dev/null 2>&1; then
     echo "error: 未找到 graphify 命令" >&2
@@ -96,7 +96,7 @@ if [[ "$do_update" -eq 1 ]]; then
   after_mtime=$(stat -c %Y "$GRAPH_JSON" 2>/dev/null || echo 0)
   if [[ "$after_mtime" -le "$before_mtime" ]]; then
     echo ""
-    echo "ℹ️  CLI update 未改动图谱 —— LLM Wiki 是纯 markdown 文档,"
+    echo "ℹ️  CLI update 未改动图谱 —— Wikified 是纯 markdown 文档,"
     echo "    graphify 0.8 的文档图谱全量重建没有裸路径 CLI,需在 opencode 里跑:"
     echo "        /graphify $WIKI_SRC"
     echo "    (skill runbook 会做 AST + 语义提取 + 聚类,再生成 graph.html/GRAPH_REPORT.md)"
