@@ -171,7 +171,7 @@ def print_markdown(suggestions: list[PromotionSuggestion]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Review quick notes and suggest wiki promotion targets.")
-    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="LLM Wiki root directory")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="Wikified data root directory")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     return parser.parse_args()
 
@@ -181,7 +181,7 @@ def main() -> None:
     root = args.root.expanduser().resolve()
     notes_dir = root / "raw" / "notes"
     if not (root / "SCHEMA.md").exists():
-        fail(f"not an LLM Wiki root, missing SCHEMA.md: {root}")
+        fail(f"not a Wikified data root, missing SCHEMA.md: {root}")
     if not notes_dir.exists():
         fail(f"notes directory does not exist: {notes_dir}")
     suggestions = iter_notes(notes_dir)

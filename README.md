@@ -26,13 +26,15 @@
 ## 目录
 
 - [它解决什么问题](#它解决什么问题)
+- [私有数据问题如何回流公有机制仓](#私有数据问题如何回流公有机制仓)
 - [安装](#安装)
 - [五分钟上手](#五分钟上手)
 - [命令清单](#命令清单)
-- [各 Agent 的支持程度](#各-agent-的支持程度)
+- [五个 Harness 的支持边界](#五个-harness-的支持边界)
 - [接进 Codex](#接进-codex)
 - [事件生命周期与召回评测](#事件生命周期与召回评测)
-- [接进 OpenCode](#接进-opencode)
+- [接进 Claude Code、OpenCode、Grok 与 Cursor](#接进-claude-codeopencodegrok-与-cursor)
+- [共享项目 MCP 模板](#共享项目-mcp-模板)
 - [MCP tools](#mcp-tools)
 - [记忆库结构](#记忆库结构)
 - [跨机同步](#跨机同步)
@@ -45,8 +47,6 @@
 - [依赖](#依赖)
 - [测试](#测试)
 - [参与](#参与)
-
----
 
 ## 它解决什么问题
 
@@ -69,6 +69,17 @@ memory/events/  typed event。一行一条 JSONL，记 bug / decision / preferen
 
 ---
 
+## 私有数据问题如何回流公有机制仓
+
+私有记忆库只保存个人数据，不能成为机制修复的长期分叉。凡是在私有记忆库、真实
+Harness 配置或跨机同步中发现的通用问题，都应先用脱敏夹具复现，再把实现、测试和
+公开文档修复提交到本仓库；私有仓只保留数据和兼容配置，不复制一份长期漂移的工具链。
+
+详细分类、脱敏和发布门禁见
+[`docs/PRIVATE_TO_PUBLIC_WORKFLOW.md`](docs/PRIVATE_TO_PUBLIC_WORKFLOW.md)。
+
+---
+
 ## 安装
 
 ```bash
@@ -77,38 +88,58 @@ cd ~/wikified
 ./install.sh --init
 ```
 
-这条命令做两件事：
+正常安装只做两类受管工作：
 
-1. **装工具链** — 16 个 CLI 软链进 `~/.local/bin`，agent skills 分发到各 Agent 目录，
-   OpenCode 召回插件软链进 `~/.opencode/plugins`
-2. **`--init` 建记忆库** — 在 `~/llm-wiki` 建出目录骨架、`SCHEMA.md`、git 仓库与凭据门禁，
-   并落一个首个 commit
+1. 把 18 个 CLI 软链到 `~/.local/bin`，把三个 lowercase kebab-case skill
+   软链到 `~/.agents/skills`，并在已存在的 Agent skill 目录做可选 fanout。
+2. 把 OpenCode 插件链接到当前官方全局目录
+   `~/.config/opencode/plugins/llm-wiki-recall.js`。
 
-装完立刻验证：
+`--init` 还会在另一个目录（默认 `~/llm-wiki`）创建私有 Markdown/JSONL + Git
+记忆库。机制仓库与私有数据仓库不会互相复制插件或配置。
 
-```bash
-llm-wiki-health --json     # 应 rc=0 并输出合法 JSON
-```
-
-> **`--init` 不是可选的。** 其余命令都假定记忆库已存在。缺 `SCHEMA.md` 时
-> `llm-wiki-health` / `llm-wiki-promote-notes` / `llm-wiki-refresh` 以 rc=1 退出，
-> `llm-wiki-dedupe-events` rc=2，`llm-wiki-remote-sync` 缺 `.git` 会中止。
-> 已有记忆库的话省掉 `--init`。
-
-**其他安装模式**
+**正常安装绝不写 Claude/OpenCode/Grok/Codex/Cursor 的 settings、MCP、hooks 或
+instruction 文件。** 安装后显式配置当前 WSL 的 Claude Code、OpenCode 和 Grok：
 
 ```bash
-./install.sh --dry-run   # 只打印将要做什么，不落盘
-./install.sh --check     # 校验现有安装是否与本 repo 一致，可当 CI 门禁
-./install.sh             # 装工具链，但不建记忆库
+./install.sh --configure-harnesses
+./install.sh --status
+./install.sh --check
 ```
 
-`install.sh` 是**幂等**的，重复运行零改动。它只创建软链、不复制文件，
-所以 `git pull` 之后工具立即是新版，无需重装。
+也可以直接使用专用命令：
 
-`~/.local/bin` 不在 `PATH` 里的话，脚本会提示。
+```bash
+llm-wiki-harness status --json
+llm-wiki-harness configure --harness claude --harness opencode --harness grok
+llm-wiki-harness configure --harness codex
+llm-wiki-harness configure --harness cursor
+```
 
----
+配置器会在非交互 PATH 缺少私有 bin 时继续检查：
+
+- Claude/Grok：`~/.local/bin/`
+- OpenCode：`~/.opencode/bin/`，再检查 `~/.local/bin/`
+- Codex：常见用户级 bin
+- Cursor：优先 `cursor-agent` 与 Cursor 专属目录；通用名 `agent` 只有在隔离、
+  最多 3 秒的 `--version` 探针明确识别为 Cursor 时才算已安装。Grok 的兼容
+  `agent` 命令不会触发 Cursor 配置。
+
+Claude、Grok、Codex 的 MCP 通过其原生 CLI 添加并回读验证；OpenCode/Cursor 的
+JSON/JSONC 只做结构合并。现有文件在修改前创建恢复快照，修改后重新解析，重复运行
+应为零改动。格式损坏、已有同名但不同的 `llm-wiki` 条目、用户文件、错误软链或
+受管块被手改时都会安全停止；脚本不会自动删除、覆盖或重新指向它们。
+
+其他模式：
+
+```bash
+./install.sh               # 只装受管链接
+./install.sh --dry-run     # 只打印链接动作
+./install.sh --status      # 只读五端能力矩阵
+./install.sh --check       # 链接 + 已安装 harness 配置门禁；缺失的可选 harness 不算失败
+```
+
+`~/.local/bin` 不在 PATH 时脚本会提示，但状态检测不依赖交互 shell 的 PATH。
 
 ## 五分钟上手
 
@@ -147,130 +178,100 @@ llm-wiki-promote-notes --json
 
 ## 命令清单
 
-**写入**
+**写入与治理**
 
 | 命令 | 用途 |
 |---|---|
-| `llm-wiki-note` | 记零散事实 / 命令 / 坑到 `raw/notes/` |
-| `llm-wiki-event` | 记 typed event（`fact` / `decision` / `bug` / `preference` …） |
-| `llm-wiki-correct` | 记录用户的纠正与偏好，入待人审队列 |
+| `llm-wiki-note` | 记零散事实/命令/坑到 `raw/notes/` |
+| `llm-wiki-event` | 记 append-only typed event |
+| `llm-wiki-correct` | 记录纠正与偏好，进入待人审队列 |
+| `llm-wiki-refresh` | 重建 Today、仪表盘与可选镜像；刷新不等于 wiki 晋升 |
+| `llm-wiki-govern` | 带节流的周期治理 |
+| `llm-wiki-dedupe-events` | 按 event id 去重 JSONL |
+| `llm-wiki-secret-scan` | 凭据扫描与 pre-commit 门禁 |
 
-**读取**
-
-| 命令 | 用途 |
-|---|---|
-| `llm-wiki-enrich` | 混合词法召回。`--session-start` 取极简卡片，`--query` 定向检索 |
-| `llm-wiki-eval` | 生成隔离夹具，比较 hybrid / legacy Recall@5 与 MRR，并检查安全边界 |
-| `llm-wiki-health` | 结构体检：陈旧页、孤儿页、断链、未编译 raw |
-| `llm-wiki-promote-notes` | 建议哪些 quick note 值得晋升（只读，不自动改） |
-
-**维护**
+**读取与评测**
 
 | 命令 | 用途 |
 |---|---|
-| `llm-wiki-init` | 从零建出记忆库 |
-| `llm-wiki-refresh` | 重建派生页（`Today.md`、仪表盘、健康检查） |
-| `llm-wiki-govern` | 带节流的周期治理，适合挂在会话启动（命中节流即秒退） |
-| `llm-wiki-dedupe-events` | 按 event id 去重 append-only jsonl |
-| `llm-wiki-secret-scan` | 凭据扫描，装作 pre-commit hook |
+| `llm-wiki-enrich` | critical 会话卡或主题定向召回 |
+| `llm-wiki-eval` | 离线 Recall@5/MRR 与安全不变式评测 |
+| `llm-wiki-health` | 陈旧页、孤儿页、断链、未复核 raw 等体检 |
+| `llm-wiki-promote-notes` | 只读晋升建议，不自动写 `wiki/` |
 
-**同步与外部**
+**安装、集成与外部接口**
 
 | 命令 | 用途 |
 |---|---|
-| `llm-wiki-remote-sync` | 带节流的多机双向同步 |
-| `llm-wiki-obsidian-sync` | 镜像成 Obsidian 可直接打开的 vault |
-| `wiki-graph` | 打开 Graphify 知识图谱（需另装 `graphify`） |
-| `llm-wiki-mcp` | MCP server，把上述能力暴露给任意 MCP 客户端 |
+| `llm-wiki-init` | 创建私有记忆库 |
+| `llm-wiki-harness` | 五端检测、状态矩阵与显式安全配置 |
+| `llm-wiki-session-start` | 统一的 critical-only、脱敏、2500 字符 hook 适配器 |
+| `llm-wiki-mcp` | 零 npm 依赖 MCP server |
+| `llm-wiki-remote-sync` | 带节流的多机双向 Git 同步 |
+| `llm-wiki-obsidian-sync` | 生成可读 Obsidian 镜像 |
+| `wiki-graph` | 打开可选 Graphify 图谱 |
 
-> 命令名保留 `llm-wiki-` 前缀，与仓库名 `wikified` 不同。这是有意的：
-> 改前缀会打断既有安装，也会让已沉淀的知识记录失真。
+命令名继续保留 `llm-wiki-*`，MCP server 名继续为 `llm-wiki`，以避免破坏既有
+配置和已经沉淀的事实记录。
 
----
+## 五个 Harness 的支持边界
 
-## 各 Agent 的支持程度
+“支持”在这里不是一条 README 命令，而是检测、配置或模板、生命周期、失败语义和
+隔离合同测试的组合。
 
-| 能力 | OpenCode | Codex | Claude Code | 其他 MCP 客户端 |
-|---|---|---|---|---|
-| 16 个 CLI | 是 | 是 | 是 | 是（能跑 shell 即可） |
-| Agent skills | 是 | 是 | 是 | 看是否支持 `SKILL.md` |
-| MCP（6 个 tool） | 是 | 是 | 是 | 是 |
-| **会话启动自动注入** | **是** | **是（SessionStart hook）** | 依客户端配置 | 依客户端配置 |
+| 能力 | Claude Code | OpenCode | Grok CLI | Codex | Cursor |
+|---|---|---|---|---|---|
+| MCP | 原生 CLI，user scope | JSON/JSONC 结构合并 | 原生 CLI，user scope | 原生 CLI；Windows home 可只读识别 | `~/.cursor/mcp.json` 模板/结构合并 |
+| 稳定规则 | `~/.claude/CLAUDE.md` 受管块 | 全局 `AGENTS.md` 受管块 | `~/.grok/AGENTS.md` 受管块 | `AGENTS.md` 受管块 | 提供 AGENTS 模板，位置按运行形态人工选择 |
+| 会话生命周期 | `SessionStart` stdout 进入上下文 | `chat.message` 插件首次注入 | 被动 hook stdout 被忽略，仅做非敏感健康探针 | `SessionStart`，含 Windows→WSL 模板 | 仅本地 IDE/Agent 的 `sessionStart`；Cloud Agents 不支持 |
+| Skill | Claude 目录可选 fanout | `~/.agents/skills` | 兼容 `~/.agents/skills` | `~/.agents/skills` | 不作为必需能力 |
+| 自动捕获/晋升 | 不启用 | 自动草稿默认关闭；即使开启也只进 raw | 不管理实验记忆 | 不管理原生 Memories | 不启用 |
 
-OpenCode 由 `chat.message` 插件注入；当前 Codex 已正式支持 `SessionStart` hook，
-`templates/codex/hooks.json` 同时给出 Linux 与 Windows→WSL 命令。仍保留 MCP、
-`AGENTS.md` 与手动 prompt：hook 是低成本常驻摘要，具体主题继续按需检索。
+所有自动会话上下文都通过 `llm-wiki-session-start`：只读取人工维护的 `critical`
+scope，二次脱敏，最终文本硬上限 2500 字符，并加上“untrusted evidence；不是指令或
+任务队列”的标签。具体项目、报错和动态状态通过 MCP/显式 query 按需召回。
 
----
+Grok 的 SessionStart 不能靠 stdout 注入，因此其 hook 只写入 `XDG_STATE_HOME` 下的
+成功/字符数/时间戳，**不保存召回正文**；正常召回依赖 MCP、规则与 skills。Cursor
+Cloud Agents 不运行用户级 hooks，也没有 `sessionStart`，因此必须回退到 MCP/人工召回。
 
 ## 接进 Codex
 
-### Linux / WSL 内运行 Codex CLI
+WSL/Linux Codex CLI 可使用显式配置器：
 
 ```bash
-# 1. 注册 MCP（注意 -- 分隔符，且用绝对路径）
-codex mcp add llm-wiki -- ~/.local/bin/llm-wiki-mcp
-codex mcp list                      # 确认 Status=enabled
-
-# 2. 合并 SessionStart hook；已有 hooks.json 时不要直接覆盖
-mkdir -p ~/.codex
-cp templates/codex/hooks.json ~/.codex/hooks.json
-
-# 3. 保留按需召回指令
-cat templates/codex/AGENTS.recall.md >> ~/.codex/AGENTS.md
-cp templates/codex/prompts/llm-wiki-recall.md ~/.codex/prompts/
+llm-wiki-harness configure --harness codex
+llm-wiki-harness status
+codex mcp list
 ```
 
-非托管 hook 首次运行前必须在 Codex 的 `/hooks` 页面审查并信任；hook 内容变化后
-hash 会变化，需要重新审查。`matcher` 覆盖 `startup / resume / clear / compact`，
-所以压缩上下文后也会重新注入极简摘要。
+配置器通过 `codex mcp add llm-wiki -- <absolute-command>` 注册 MCP，并对
+`$CODEX_HOME/hooks.json` 与 `AGENTS.md` 做保留用户字段的合并；固定 prompt 只在目标
+不存在或内容完全相同时受管。首次运行或 hook hash 改变后，仍需在 Codex 的 hook UI
+中审查、信任并重启/新开会话。hook 覆盖 startup/resume/clear/compact，只注入稳定
+critical facts；主题召回继续使用 MCP 或 `prompts/llm-wiki-recall.md`。
 
 ### Windows Codex Desktop 读取 WSL 记忆库
 
-在 Desktop 实际使用的 `%CODEX_HOME%\config.toml` 中注册 WSL MCP；不要默认它与
-WSL 的 `~/.codex` 是同一个目录：
+Windows Desktop 与 WSL CLI 通常不是同一个 Codex home。`install.sh` 可以通过
+`LLM_WIKI_WINDOWS_CODEX_HOME`（在标准 WSL 环境下也会尝试只读发现）检查 Windows
+home，但不会替你写入 Windows 配置。示例：
 
 ```toml
-[mcp_servers.llm-wiki-wsl]
+[mcp_servers.llm-wiki]
 command = "wsl.exe"
-args = ["-d", "Ubuntu", "--", "/home/<linux-user>/llm-wiki/bin/llm-wiki-mcp"]
+args = ["-d", "Ubuntu", "--", "/home/<linux-user>/.local/bin/llm-wiki-mcp"]
 startup_timeout_sec = 20
 tool_timeout_sec = 60
 ```
 
-把 `templates/codex/hooks.json` **合并**到同一 `%CODEX_HOME%\hooks.json`。
-其中 `commandWindows` 通过默认 WSL distro 执行；默认 distro 不是记忆库所在 distro
-时，在 `wsl.exe` 后加入 `-d <distro>`。保存后重启 Desktop，并在 `/hooks` 审查 hook。
+把 `templates/codex/hooks.json` 的 `SessionStart` group **合并**到实际
+`%CODEX_HOME%/hooks.json`；不要覆盖整个文件。`commandWindows` 使用 WSL 适配器，
+默认 distro 不正确时显式加 `-d <distro>`。`AGENTS.recall.md` 与 prompt 同样按实际
+Windows Codex home 放置，并在 `/hooks` 中审查。
 
-`AGENTS.recall.md` 仍有价值：它告诉 agent 何时做主题检索；
-`prompts/llm-wiki-recall.md` 是确定性的人工入口。hook 只负责 3500 字符以内、已脱敏、
-去掉“下一步”任务语句的 session 摘要，不替代完整查询。
-
-`install.sh` 只打印接线指引、**不覆盖**现有 `hooks.json` / `AGENTS.md` / prompts——
-这些文件可能已有其他 hook 或手工规则，粗暴替换会吞掉用户配置。
-
-Codex 用户级 skills 的首选路径就是 `~/.agents/skills`（`$CODEX_HOME/skills` 已标 deprecated），
-`install.sh` 正是以它为主副本，且 Codex 会跟随软链。
-
-### 与 Codex 原生 Memories 的边界
-
-Codex 原生 Memories 是 `%CODEX_HOME%/memories/` 下的**生成状态**；本项目是可审查、
-可 Git 同步、跨 Agent 的知识源。两者可以共存，但不要把原生 memories 目录提交到
-记忆库，也不要让同一段对话被两套自动链路重复摄入。一个保守配置是：
-
-```toml
-[features]
-memories = true
-
-[memories]
-disable_on_external_context = true
-```
-
-这样，使用 MCP / web 等外部上下文的聊天不会再进入 Codex 原生记忆生成；长期、
-可携带知识仍由 LLM Wiki 管，人机习惯类的自动提醒可留给原生 Memories。是否开启
-原生 Memories 是用户选择，不是安装脚本应暗改的全局设置。
-
----
+Codex 原生 Memories 与 Wikified 是两套系统。本安装器不启用、清空、同步或提交
+`memories/`，也不把同一会话自动送入两条摄取链；是否启用原生 Memories 由用户单独决定。
 
 ## 事件生命周期与召回评测
 
@@ -311,25 +312,95 @@ llm-wiki-eval --json
 
 ---
 
-## 接进 OpenCode
+## 接进 Claude Code、OpenCode、Grok 与 Cursor
 
-```jsonc
-// ~/.config/opencode/opencode.json
-{
-  "mcp": {
-    "llm-wiki": {
-      "type": "local",
-      "command": ["~/.local/bin/llm-wiki-mcp"],
-      "enabled": true
-    }
-  }
-}
+### Claude Code
+
+```bash
+llm-wiki-harness configure --harness claude
+claude mcp get llm-wiki
 ```
 
-会话启动自动注入由 `plugins/llm-wiki-recall.js` 提供，`install.sh` 已软链进
-`~/.opencode/plugins`。**改动插件后需重启 OpenCode 才生效。**
+MCP 通过 `claude mcp add --scope user llm-wiki -- <absolute-command>` 添加；配置器不直接
+编辑同时承载登录/MCP 状态的 `~/.claude.json`。它只结构合并
+`~/.claude/settings.json` 的 `SessionStart` hook，并在 `~/.claude/CLAUDE.md` 追加一个
+带 BEGIN/END 标记的受管规则块。已有 hooks、permissions 和其他字段保留。项目级 MCP
+仍可能需要逐项目信任。
 
----
+### OpenCode 1.18+
+
+当前全局插件目录是：
+
+```text
+~/.config/opencode/plugins/
+```
+
+旧的 `~/.opencode/plugins/` 只作为迁移诊断对象，不再作为发布版真源。配置器在当前
+`opencode.json`/`opencode.jsonc` 的 `mcp` 对象中添加本地 server，支持注释和尾逗号，
+并在全局 `AGENTS.md` 合并规则。插件会在每个 session 的第一条消息注入一次 critical
+摘要，并对每条用户 prompt 做最多 2000 字符的主题召回；两者都标记为不可信证据。
+
+`LLM_WIKI_OPENCODE_AUTO_DRAFT=1` 才允许 compact 前写脱敏草稿到
+`raw/inbox/auto-drafts/`。默认关闭；开启后也不会写 `wiki/`。插件状态日志只写入
+`XDG_STATE_HOME/llm-wiki/harness/`，不记录 prompt 正文。
+
+### Grok CLI
+
+```bash
+llm-wiki-harness configure --harness grok
+grok mcp list --json
+grok mcp doctor llm-wiki --json   # 若当前版本支持
+```
+
+MCP 使用 Grok 原生 CLI；稳定规则进入 `~/.grok/AGENTS.md`，skills 复用
+`~/.agents/skills`。`~/.grok/hooks/llm-wiki.json` 的 SessionStart 只是 fail-open 的
+健康探针，因为 Grok 对被动 hook stdout 不做上下文注入。
+
+本项目不读取 `~/.grok/auth.json`，也不启用、flush、dream 或写入 Grok 的实验记忆。
+若用户自行启用实验记忆，必须把它视为独立系统，避免同一 transcript 被双重摄取。
+
+### Cursor
+
+当本地 Cursor Agent CLI 被**身份确认**后，可使用：
+
+```bash
+llm-wiki-harness configure --harness cursor
+```
+
+`cursor-agent`、Cursor 专属 bin 目录，以及解析到
+`~/.local/share/cursor-agent/` 的安装路径可作为明确证据。通用命令名 `agent`
+本身不是证据：配置器只执行官方用于验证安装的 `agent --version`，使用临时
+HOME/XDG/Cursor config、移除 API-key 环境变量并设置 3 秒硬超时；输出必须包含
+Cursor 标识，否则按 `identity-mismatch` 或 `identity-unverifiable` 处理。
+这两种状态的 `overall` 都是 `absent`，不会读取、创建或改动任何 `~/.cursor`
+配置。`~/.local/bin/agent` 若解析进 `~/.grok/` 会直接拒绝。
+
+`LLM_WIKI_CURSOR_BIN` 只覆盖候选位置，**不绕过身份校验**；它指向通用
+`agent` 时仍须通过同一探针，指向 Grok 会得到
+`explicit-identity-mismatch`。这允许非标准 Cursor 安装显式给出路径，同时不会
+把错误产品“强制认证”为 Cursor。
+
+身份确认后，配置器才会结构合并 `~/.cursor/mcp.json` 与本地 `hooks.json`。
+仅安装 IDE、但没有可确认 Agent CLI 时，配置器不会据此猜测运行形态或自动写
+用户目录；请人工审阅并合并 `templates/cursor/`。Cursor 的本地
+`sessionStart` 期望
+`{"additional_context": ...}`，统一适配器会输出该结构。Cursor Cloud Agents 不运行
+user-level hooks，也不支持 `sessionStart`，所以云端只承诺 MCP/人工召回，不把本地能力
+泛化为所有 Cursor 运行形态。`templates/cursor/AGENTS.recall.md` 是人工合并模板。
+
+## 共享项目 MCP 模板
+
+`templates/shared/mcp.project.json` 使用 Claude/Grok 兼容的 `mcpServers` 根对象和 stdio
+`command`/`args`：
+
+```bash
+cp templates/shared/mcp.project.json .mcp.json
+```
+
+该模板使用 `sh -lc` 与 `$HOME/.local/bin/llm-wiki-mcp`，因此只承诺 WSL/Linux 项目级
+可移植性，不是原生 Windows 路径。Claude/Grok 仍可能要求项目 trust/重启；OpenCode
+使用自己的 `mcp` JSONC schema，Cursor 使用 `~/.cursor/mcp.json`，不能把一个文件
+无条件复制到五端。对单机 WSL，用户级原生 CLI 配置通常比项目文件更确定。
 
 ## MCP tools
 
@@ -439,101 +510,116 @@ llm-wiki-obsidian-sync
 
 | 变量 | 作用 |
 |---|---|
-| `LLM_WIKI_ROOT` | 记忆库位置（默认 `~/llm-wiki`） |
-| `LLM_WIKI_MIRROR` | Obsidian 镜像目标，也可写进 `~/.config/llm-wiki/config.env` |
-| `LLM_WIKI_BIN_TARGET` | CLI 安装位置（默认 `~/.local/bin`） |
-| `LLM_WIKI_AGENT_SKILL_ROOT` | skills 主副本位置（默认 `~/.agents/skills`） |
-| `LLM_WIKI_SKILL_FANOUT` | 空格分隔的分发目标；设为**空字符串**关闭分发 |
-| `LLM_WIKI_OPENCODE_PLUGIN_TARGET` | OpenCode 插件位置 |
-| `LLM_WIKI_TEMPLATES` | 显式指定 templates 目录 |
-| `LLM_WIKI_SYNC_THROTTLE` | 同步节流窗口（秒） |
-| `LLM_WIKI_GOVERN_THROTTLE` | 治理节流窗口（秒） |
+| `LLM_WIKI_ROOT` | 私有记忆库位置（默认 `~/llm-wiki`） |
+| `LLM_WIKI_MIRROR` | Obsidian 镜像目标 |
+| `LLM_WIKI_BIN_TARGET` | 受管 CLI 目录（默认 `~/.local/bin`） |
+| `LLM_WIKI_AGENT_SKILL_ROOT` | skill 主目录（默认 `~/.agents/skills`） |
+| `LLM_WIKI_SKILL_FANOUT` | 空格分隔的既有 Agent skill 目录；空字符串关闭 |
+| `LLM_WIKI_OPENCODE_PLUGIN_TARGET` | 当前 OpenCode 插件目录（默认 `~/.config/opencode/plugins`） |
+| `LLM_WIKI_OPENCODE_LEGACY_PLUGIN_TARGET` | 仅用于诊断旧 `~/.opencode/plugins` |
+| `LLM_WIKI_WINDOWS_CODEX_HOME` | WSL 中只读检查的 Windows Codex home |
+| `LLM_WIKI_CLAUDE_BIN` / `..._OPENCODE_BIN` / `..._GROK_BIN` / `..._CODEX_BIN` | 显式 harness 可执行文件，适合非标准安装 |
+| `LLM_WIKI_CURSOR_BIN` | 覆盖 Cursor 候选位置，但不绕过通用 `agent` 的身份校验；错误产品保持 absent 且不可写配置 |
+| `LLM_WIKI_OPENCODE_AUTO_DRAFT` | 设为 `1` 才允许 OpenCode 写脱敏 raw 草稿 |
+| `LLM_WIKI_SYNC_THROTTLE` | Git 同步节流秒数 |
+| `LLM_WIKI_GOVERN_THROTTLE` | 治理节流秒数 |
 
-skills 走「主副本 + 分发」：repo → `~/.agents/skills` → 各 Agent 目录。
-这样多生态共享同一份 `SKILL.md`，不会各存一份导致分叉。
-本机不存在的 Agent 目录会被跳过，且不计为偏差。
-
----
+测试还使用 `LLM_WIKI_DISABLE_PATH_DETECTION=1` 隔离真实 PATH；它主要是合同测试开关，
+日常无需设置。harness 专用目标路径也可通过 `llm-wiki-harness --help` 与源码中的
+`LLM_WIKI_*` override 查看。
 
 ## 排查
 
-**`llm-wiki-health` 报 `not an LLM Wiki root, missing SCHEMA.md`**
-记忆库还没建。跑 `llm-wiki-init --git`。
-
-**`llm-wiki-obsidian-sync` 报 `no mirror target`**
-没配镜像目标。按报错给的三条路选一条，推荐写进 `~/.config/llm-wiki/config.env`。
-
-**`install.sh --check` 报「链接指向他处」**
-`--check` 校验的是「软链是否指向**本 repo**」。若你之前从别处装过同一套工具，
-软链会指向那个位置，于是被报为偏差。跑 `./install.sh` 让它们指向本 repo，
-或者接受现状——两处内容一致时功能不受影响。
-
-**命令找不到**
-`~/.local/bin` 不在 `PATH` 里。加进 shell 配置，或用 `LLM_WIKI_BIN_TARGET` 换位置重装。
-
-**Codex 里 MCP 连不上、也没有任何报错**
-八成是传输框架不匹配（静默挂起是其典型表现）。确认注册的路径含 NDJSON 支持：
+**先看无敏感值状态矩阵**
 
 ```bash
-grep -c FRAMING "$(readlink -f ~/.local/bin/llm-wiki-mcp)"    # 应 >0
-bash tests/test-mcp-framing.sh                                # 应 10/10
+./install.sh --status
+llm-wiki-harness status --json
+./install.sh --check
 ```
 
-**Codex 不主动召回记忆**
-先确认 `SessionStart` hook 已放进当前 Codex 实际使用的 `hooks.json`，然后重启 Codex，
-在 `/hooks` 审查并信任它。Windows Desktop 与 WSL CLI 可能使用不同的 Codex home，
-不要只检查 WSL 的 `~/.codex`。`AGENTS.md` 召回块负责告诉 agent 何时做主题检索，
-但不能代替 hook 本身：
+状态含义：`absent`、`installed-unconfigured`、`configured`、
+`stale/wrong-link`、`unverifiable`。`--check` 只要求已安装/外部已接线的 harness 完整；
+缺失的可选 harness 不算失败。
+
+**OpenCode 当前路径存在错误软链**
+
+脚本会保留并返回非零，不自动 `rm` 或 `ln -sfn`。先人工确认：
 
 ```bash
-python3 -m json.tool ~/.codex/hooks.json >/dev/null           # WSL/CLI
-grep -c 'BEGIN llm-wiki-recall' ~/.codex/AGENTS.md            # 建议为 1
-# Windows Desktop: 检查 %CODEX_HOME%\hooks.json，并确认 commandWindows 指向正确 distro
+readlink ~/.config/opencode/plugins/llm-wiki-recall.js
+readlink -f ~/.config/opencode/plugins/llm-wiki-recall.js || true
 ```
 
-**跨机 pull 后 JSONL 有重复行**
-预期行为，`merge=union` 保留双方所有行。跑 `llm-wiki-dedupe-events` 按 id 去重。
+确认它确实不是要保留的用户文件后，再移动而不是删除：
 
-**`llm-wiki-remote-sync` 一直秒退**
-命中节流窗口。`--status` 看剩余时间，`--force` 忽略节流。
+```bash
+mv ~/.config/opencode/plugins/llm-wiki-recall.js \
+  ~/.config/opencode/plugins/llm-wiki-recall.js.bak-manual
+./install.sh
+./install.sh --configure-harnesses
+```
 
----
+旧 `~/.opencode/plugins/llm-wiki-recall.js` 只会被报告；清理与否由用户决定。
+
+**配置 malformed / 同名条目冲突**
+
+原文件保持不变，并生成 `*.bak-wikified-malformed-*` 或
+`*.bak-wikified-conflict-*` 快照。修复原文件或人工迁移同名配置后重跑；不要把快照
+当作自动回滚指令。
+
+**MCP 已配置但 harness 看不到**
+
+重启客户端，接受项目 trust，并用原生命令复核：
+
+```bash
+claude mcp get llm-wiki
+opencode mcp list
+grok mcp list --json
+codex mcp list
+```
+
+Grok hook 没有召回正文是预期行为；它只做探针。Cursor Cloud Agent 没有
+`sessionStart` 也是预期边界。
+
+**`llm-wiki-health` 报缺 `SCHEMA.md`**：运行 `llm-wiki-init --git`。
+
+**命令找不到**：把 `~/.local/bin` 加入 PATH，或使用绝对路径；检测器仍会检查已知私有 bin。
+
+**Codex MCP 静默挂起**：运行 `bash tests/test-mcp-framing.sh`，确认 server 同时支持 NDJSON。
+
+**跨机 pull 后 JSONL 重复**：运行 `llm-wiki-dedupe-events`；union merge 先保留双方追加是设计行为。
+
+**remote sync 一直秒退**：`llm-wiki-remote-sync --status` 查看节流，必要时 `--force`。
 
 ## 卸载
 
-`install.sh` 只创建软链、不复制文件，所以卸载就是删软链。**没有 `--uninstall` 模式**
-——删除操作交给你自己确认，比脚本代劳更安全。
+没有自动卸载模式：删除与配置回退都需要用户逐项确认。机制卸载不会删除私有
+`~/llm-wiki` 数据仓库。
 
 ```bash
-# 1. 删 CLI 软链
-for f in ~/wikified/bin/*; do rm -f ~/.local/bin/"$(basename "$f")"; done
-
-# 2. 删 OpenCode 插件软链
-rm -f ~/.opencode/plugins/llm-wiki-recall.js
-
-# 3. 删 skills 软链（主副本 + 各 Agent）
-for s in QuickNote SessionCapture WikiCompiler; do
-  rm -f ~/.agents/skills/"$s" \
-        ~/.claude/skills/"$s" \
-        ~/.config/opencode/skills/"$s" \
-        ~/.codex/skills/"$s"
+# 1. 受管 CLI（先确认仍指向本 repo）
+for f in ~/wikified/bin/*; do
+  target=~/.local/bin/"$(basename "$f")"
+  [[ -L "$target" && "$(readlink -f "$target")" == "$(readlink -f "$f")" ]] && rm -- "$target"
 done
 
-# 4. 注销 MCP
-codex mcp remove llm-wiki
-#    OpenCode 侧手工删掉 opencode.json 里的 mcp."llm-wiki" 块
+# 2. 当前 OpenCode 插件链接
+plugin=~/.config/opencode/plugins/llm-wiki-recall.js
+[[ -L "$plugin" && "$(readlink -f "$plugin")" == "$(readlink -f ~/wikified/plugins/llm-wiki-recall.js)" ]] && rm -- "$plugin"
 
-# 5. 撤掉 Codex 召回块
-#    手工删掉 ~/.codex/AGENTS.md 里 BEGIN/END llm-wiki-recall 之间的内容
-rm -f ~/.codex/prompts/llm-wiki-recall.md
+# 3. lowercase skills
+for skill in quick-note session-capture wiki-compiler; do
+  rm -f ~/.agents/skills/"$skill" ~/.claude/skills/"$skill" \
+    ~/.config/opencode/skills/"$skill" ~/.codex/skills/"$skill"
+done
 ```
 
-**你的记忆库 `~/llm-wiki` 不会被上述任何步骤删除**，那是你的数据。
-确实要删的话自己 `rm -rf`——先确认已推到远端。
-
-可选清理：`~/.config/llm-wiki/`（机器本地配置）、`~/.cache/llm-wiki-*`（节流戳与日志）。
-
----
+MCP 使用各客户端原生命令注销（例如 `claude mcp remove llm-wiki`、
+`grok mcp remove llm-wiki`、`codex mcp remove llm-wiki`，以本机 `--help` 为准）。
+OpenCode/Cursor 的同名结构以及 CLAUDE/AGENTS/hooks 中 BEGIN/END 受管块应人工删除，
+不要整文件删除。可选清理 `XDG_STATE_HOME/llm-wiki/harness/` 的非敏感探针状态和
+`~/.cache/llm-wiki-*`。
 
 ## FAQ
 
@@ -589,34 +675,32 @@ append-only 的 JSONL 走 `merge=union` 保留双方所有行，再按 event id 
 
 ## 测试
 
+完整门禁：
+
 ```bash
-bash tests/test-init.sh             # 引导能力，44 项
-bash tests/test-mcp-framing.sh      # MCP 双传输框架与失败传播，10 项
-bash tests/test-mirror-optional.sh  # 可选层不得拖垮核心路径，12 项
-bash tests/test-retrieval-eval.sh   # 离线检索质量与安全边界
-bash tests/test-event-lifecycle.sh  # 生效/失效/替代/跨项目/脱敏
-bash tests/test-remote-sync-stamp.sh # 只有完整成功同步才能写成功戳
-bash tests/test-graph-freshness.sh  # Graphify manifest 新鲜度
-bash tests/test-codex-hook-template.sh # SessionStart hook 模板与有界输出
+bash -n install.sh bin/llm-wiki-remote-sync .githooks/pre-commit tests/test-*.sh
+python3 -m py_compile <仓库中带 python3 shebang 的 llm-wiki 文件>
+node --check bin/llm-wiki-mcp
+node --check plugins/llm-wiki-recall.js
+for t in tests/test-*.sh; do timeout 120 bash "$t"; done
+bin/llm-wiki-secret-scan --all
 ```
 
-全部使用隔离 `HOME` 或临时目录，**不碰你的真实记忆库**。召回评测夹具由脚本
-临时生成，不包含用户数据，也不调用网络、模型或 embedding 服务。
+重点套件：
 
-后两个套件锁住的都是**静默失败**——这类缺陷不报错，只是悄悄不干活：
+| 测试 | 锁定内容 |
+|---|---|
+| `test-harness-integration.sh` | 私有 bin 检测、五端状态、Cursor/Grok `agent` 碰撞、显式覆盖身份门禁、installer strict/check、CLI 参数、JSONC 保真、幂等、备份、冲突、错误软链、失败隔离、skill/模板边界 |
+| `test-session-start-adapters.sh` | Claude/Codex/plain/Cursor/Grok 输出结构、critical-only、二次脱敏、2500 硬上限、fail-open |
+| `test-codex-hook-template.sh` | Linux 与 Windows→WSL hook 回归、信任标签、动态状态不常驻 |
+| `test-opencode-plugin.sh` | 首条 critical 摘要、JIT 召回、XDG 状态日志、默认无草稿、opt-in 脱敏 raw 草稿 |
+| `test-install-windows-codex-detection.sh` | WSL 对既有 Windows Codex home 的只读识别 |
+| `test-mcp-framing.sh` | NDJSON 与 Content-Length，CLI 失败传播 |
+| 其余 `test-*.sh` | init、事件、锁、同步、镜像、图谱、召回与安全边界 |
 
-- `test-mcp-framing.sh` 同时验证 NDJSON 与 `Content-Length` 两条路径。
-  只支持后者的 server 在 Codex 下会静默挂起；CLI 非零退出必须传播成
-  JSON-RPC error，不能包装成假成功 content。
-- `test-mirror-optional.sh` 验证未配镜像时核心写入仍成功、自定义
-  `LLM_WIKI_BIN_TARGET` 时派生页仍刷新、`LLM_WIKI_ROOT` 被尊重。
-  这三项都曾以「rc=0 但没干活」的形式存在过。
-- `test-remote-sync-stamp.sh` 锁住成功戳语义：pull/push/status、脏工作区、fetch、
-  dedupe 或 push 失败都不得伪装成一次完整成功同步。
-- `test-codex-hook-template.sh` 验证当前官方 hook schema 形状，并确保常驻上下文
-  有界、脱敏、带 canary，且不会把“下一步”变成自动任务。
-
----
+所有新集成测试使用临时 HOME、临时数据根和 stub harness executable；不会读取真实
+配置、认证状态或记忆。它们是模拟/合同测试，不是 Claude/OpenCode/Grok/Cursor/Codex
+真实登录会话 E2E，也不证明真实多机同步。
 
 ## 参与
 

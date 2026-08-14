@@ -1,107 +1,173 @@
 #!/usr/bin/env bash
-# install.sh — 把 llm-wiki 受管工具链链接到本机各 Agent 目录
+# install.sh — install Wikified mechanisms, then explicitly configure harnesses.
 #
-# 设计要点：
-#   - 幂等：重复运行结果一致，已正确的链接不动
-#   - 软链而非拷贝：repo 是唯一来源，pull 后立即生效，不需要重新 install
-#   - --check：只校验不改动，供 remote-sync / CI 当门禁用
-#   - 不覆盖非软链的既有文件：先备份，避免吞掉未纳管的本地修改
-#
-# 用法：
-#   ./install.sh              # 安装/修复链接
-#   ./install.sh --check      # 只校验（exit 1 = 有偏差）
-#   ./install.sh --dry-run    # 只打印将要做的事
+# Normal install creates only managed tool/plugin/skill links. It never rewrites
+# harness settings. Use --configure-harnesses for the safe, idempotent Claude,
+# OpenCode and Grok configuration path; use --status for the capability matrix.
 
 set -Eeuo pipefail
 umask 077
 
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 BIN_TARGET=${LLM_WIKI_BIN_TARGET:-"$HOME/.local/bin"}
-OPENCODE_PLUGIN_TARGET=${LLM_WIKI_OPENCODE_PLUGIN_TARGET:-"$HOME/.opencode/plugins"}
-
-# Skills 走「主副本 + 分发」：repo -> ~/.agents/skills（主副本）-> 各 Agent 目录。
-# 这样多个生态共享同一份 SKILL.md，不会各存一份导致分叉。
-# 只对本机实际存在的 Agent 目录分发，不存在的跳过（不当作偏差）。
+OPENCODE_PLUGIN_TARGET=${LLM_WIKI_OPENCODE_PLUGIN_TARGET:-"$HOME/.config/opencode/plugins"}
+OPENCODE_LEGACY_PLUGIN_TARGET=${LLM_WIKI_OPENCODE_LEGACY_PLUGIN_TARGET:-"$HOME/.opencode/plugins"}
 AGENT_SKILL_ROOT=${LLM_WIKI_AGENT_SKILL_ROOT:-"$HOME/.agents/skills"}
-# 空格分隔的分发目标；设为空字符串可完全关闭分发。
 SKILL_FANOUT=${LLM_WIKI_SKILL_FANOUT-"$HOME/.claude/skills $HOME/.config/opencode/skills $HOME/.codex/skills"}
 
 MODE=install
 DO_INIT=0
-case "${1:-}" in
-  --check)   MODE=check ;;
-  --dry-run) MODE=dryrun ;;
-  --init)    MODE=install; DO_INIT=1 ;;
-  "")        MODE=install ;;
-  -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
-  *) printf 'install.sh: 未知参数 %s\n' "$1" >&2; exit 2 ;;
-esac
+DO_CONFIGURE=0
+mode_seen=0
+usage() {
+  cat <<'EOF'
+Usage: ./install.sh [option]
+  (no option)              install managed links only
+  --init                   install links and initialize the memory repository
+  --configure-harnesses    install links, then configure installed Claude/OpenCode/Grok
+  --status                 print the non-secret five-harness capability matrix
+  --check                  verify links and installed-harness configuration
+  --dry-run                print link changes without writing
+EOF
+}
+for arg in "$@"; do
+  case "$arg" in
+    --init) DO_INIT=1 ;;
+    --configure-harnesses) DO_CONFIGURE=1 ;;
+    --status)
+      (( mode_seen == 0 )) || { printf 'install.sh: only one mode option is allowed\n' >&2; exit 2; }
+      MODE=status; mode_seen=1 ;;
+    --check)
+      (( mode_seen == 0 )) || { printf 'install.sh: only one mode option is allowed\n' >&2; exit 2; }
+      MODE=check; mode_seen=1 ;;
+    --dry-run)
+      (( mode_seen == 0 )) || { printf 'install.sh: only one mode option is allowed\n' >&2; exit 2; }
+      MODE=dryrun; mode_seen=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'install.sh: unknown option %s\n' "$arg" >&2; usage >&2; exit 2 ;;
+  esac
+done
+if [[ "$MODE" != install && ( $DO_INIT -eq 1 || $DO_CONFIGURE -eq 1 ) ]]; then
+  printf 'install.sh: --init/--configure-harnesses cannot be combined with %s\n' "$MODE" >&2
+  exit 2
+fi
+
+# Codex Desktop on Windows and Codex CLI inside WSL can use different homes.
+CODEX_HOME_DIRS=("${CODEX_HOME:-$HOME/.codex}")
+WINDOWS_CODEX_HOME=${LLM_WIKI_WINDOWS_CODEX_HOME:-}
+USER_HOME_FROM_PASSWD=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)
+if [[ -z "$WINDOWS_CODEX_HOME" \
+  && -n "${WSL_DISTRO_NAME:-}" \
+  && "$HOME" == "$USER_HOME_FROM_PASSWD" \
+  && -x /mnt/c/Windows/System32/cmd.exe \
+  && $(command -v wslpath 2>/dev/null) ]]; then
+  WIN_PROFILE=$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERPROFILE% 2>/dev/null | tr -d '\r' | head -n 1)
+  if [[ -n "$WIN_PROFILE" ]]; then
+    WINDOWS_CODEX_HOME="$(wslpath -u "$WIN_PROFILE")/.codex"
+  fi
+fi
+if [[ -n "$WINDOWS_CODEX_HOME" ]]; then
+  case "$WINDOWS_CODEX_HOME" in
+    [A-Za-z]:\\*) WINDOWS_CODEX_HOME=$(wslpath -u "$WINDOWS_CODEX_HOME") ;;
+  esac
+  [[ "$WINDOWS_CODEX_HOME" == "${CODEX_HOME_DIRS[0]}" ]] || CODEX_HOME_DIRS+=("$WINDOWS_CODEX_HOME")
+fi
+
+export LLM_WIKI_REPO="$REPO"
+export LLM_WIKI_BIN_TARGET="$BIN_TARGET"
+export LLM_WIKI_OPENCODE_PLUGIN_TARGET="$OPENCODE_PLUGIN_TARGET"
+export LLM_WIKI_OPENCODE_LEGACY_PLUGIN_TARGET="$OPENCODE_LEGACY_PLUGIN_TARGET"
+[[ -n "$WINDOWS_CODEX_HOME" ]] && export LLM_WIKI_WINDOWS_CODEX_HOME="$WINDOWS_CODEX_HOME"
+
+HARNESS="$REPO/bin/llm-wiki-harness"
+if [[ "$MODE" == status ]]; then
+  exec "$HARNESS" status
+fi
 
 DEVIATIONS=0
 CHANGES=0
 WARNINGS=0
-
-note()  { printf '  %s\n' "$*"; }
+note() { printf '  %s\n' "$*"; }
 deviate() { DEVIATIONS=$((DEVIATIONS + 1)); printf '  ✗ %s\n' "$*"; }
-# 不计入退出码：用于 repo 范围外、本机可能合理缺失的东西（如非 opencode 机器没有 AGENTS.md）
-warn()  { WARNINGS=$((WARNINGS + 1)); printf '  ⚠ %s\n' "$*"; }
+warn() { WARNINGS=$((WARNINGS + 1)); printf '  ⚠ %s\n' "$*"; }
 
-# link_one <源绝对路径> <目标绝对路径>
+# link_one SOURCE TARGET -- never replaces user-owned files or wrong symlinks.
 link_one() {
   local src=$1 dst=$2 cur
   if [[ ! -e "$src" ]]; then
-    deviate "源不存在: $src"
+    deviate "source missing: $src"
     return
   fi
-
   if [[ -L "$dst" ]]; then
     cur=$(readlink -f -- "$dst" || true)
     if [[ "$cur" == "$(readlink -f -- "$src")" ]]; then
-      return  # 已正确，静默
-    fi
-    if [[ "$MODE" == check ]]; then
-      deviate "链接指向他处: $dst -> $cur"
       return
     fi
-    [[ "$MODE" == dryrun ]] && { note "would relink $dst"; return; }
-    ln -sfn -- "$src" "$dst"
-    note "relinked $dst"
-    CHANGES=$((CHANGES + 1))
+    deviate "stale/wrong symlink left unchanged: $dst -> ${cur:-<broken>}"
+    note "review it, then move it manually before rerunning: mv -- '$dst' '$dst.bak-manual'"
     return
   fi
-
   if [[ -e "$dst" ]]; then
-    # 存在真实文件/目录：可能是未纳管的本地版本，先备份再替换
-    if [[ "$MODE" == check ]]; then
-      deviate "非软链占位（未纳管的本地副本）: $dst"
-      return
-    fi
-    [[ "$MODE" == dryrun ]] && { note "would backup+link $dst"; return; }
-    local bak="$dst.bak-preinstall-$(date +%Y%m%d-%H%M%S)"
-    mv -- "$dst" "$bak"
-    note "backed up $dst -> $(basename "$bak")"
-    ln -sfn -- "$src" "$dst"
-    note "linked $dst"
-    CHANGES=$((CHANGES + 1))
+    deviate "user-owned path left unchanged: $dst"
+    note "review it, then move it manually before rerunning"
     return
   fi
-
   if [[ "$MODE" == check ]]; then
-    deviate "缺失: $dst"
+    deviate "missing: $dst"
     return
   fi
-  [[ "$MODE" == dryrun ]] && { note "would link $dst"; return; }
-  ln -sfn -- "$src" "$dst"
+  if [[ "$MODE" == dryrun ]]; then
+    note "would link $dst"
+    return
+  fi
+  mkdir -p -- "$(dirname -- "$dst")"
+  ln -s -- "$src" "$dst"
   note "linked $dst"
   CHANGES=$((CHANGES + 1))
 }
 
-printf 'llm-wiki install (%s)\n' "$MODE"
+# Remove only legacy Skill symlinks whose lexical target is exactly this
+# repository's retired mixed-case source path. Broken managed links cannot be
+# resolved with readlink -f, so compare normalized link text without following
+# symlinks. Every other file, directory, or symlink is user-owned and is left
+# untouched with a safe-stop diagnosis.
+migrate_legacy_skill_link() {
+  local legacy_name=$1 dst raw actual expected
+  dst="$AGENT_SKILL_ROOT/$legacy_name"
+  expected=$(realpath -ms -- "$REPO/skills/$legacy_name")
+
+  if [[ -L "$dst" ]]; then
+    raw=$(readlink -- "$dst")
+    if [[ "$raw" == /* ]]; then
+      actual=$(realpath -ms -- "$raw")
+    else
+      actual=$(realpath -ms -- "$(dirname -- "$dst")/$raw")
+    fi
+    if [[ "$actual" == "$expected" ]]; then
+      if [[ "$MODE" == check ]]; then
+        deviate "legacy managed skill symlink requires migration: $dst -> $raw"
+      elif [[ "$MODE" == dryrun ]]; then
+        note "would remove legacy managed skill symlink $dst"
+      else
+        rm -- "$dst"
+        note "removed legacy managed skill symlink $dst"
+        CHANGES=$((CHANGES + 1))
+      fi
+      return
+    fi
+    deviate "legacy skill symlink is not managed by this repo and was left unchanged: $dst -> $raw"
+    return
+  fi
+  if [[ -e "$dst" ]]; then
+    deviate "user-owned legacy skill path left unchanged: $dst"
+  fi
+}
+
+printf 'Wikified install (%s)\n' "$MODE"
 printf '  repo: %s\n' "$REPO"
 
-# ---------- 1. CLI ----------
 printf '\n[1/5] CLI -> %s\n' "$BIN_TARGET"
-if [[ "$MODE" == install ]]; then mkdir -p "$BIN_TARGET"; fi
+[[ "$MODE" == install ]] && mkdir -p "$BIN_TARGET"
 shopt -s nullglob
 for src in "$REPO"/bin/*; do
   [[ -f "$src" ]] || continue
@@ -109,17 +175,23 @@ for src in "$REPO"/bin/*; do
   link_one "$src" "$BIN_TARGET/$(basename "$src")"
 done
 
-# ---------- 2. OpenCode 插件 ----------
-printf '\n[2/5] OpenCode plugins -> %s\n' "$OPENCODE_PLUGIN_TARGET"
-if [[ "$MODE" == install ]]; then mkdir -p "$OPENCODE_PLUGIN_TARGET"; fi
+printf '\n[2/5] OpenCode plugins (official global path) -> %s\n' "$OPENCODE_PLUGIN_TARGET"
+[[ "$MODE" == install ]] && mkdir -p "$OPENCODE_PLUGIN_TARGET"
 for src in "$REPO"/plugins/*.js; do
   [[ -f "$src" ]] || continue
   link_one "$src" "$OPENCODE_PLUGIN_TARGET/$(basename "$src")"
 done
+legacy="$OPENCODE_LEGACY_PLUGIN_TARGET/llm-wiki-recall.js"
+if [[ -e "$legacy" || -L "$legacy" ]]; then
+  warn "legacy OpenCode plugin path detected and left untouched: $legacy"
+  note "OpenCode's current global plugin path is $OPENCODE_PLUGIN_TARGET"
+fi
 
-# ---------- 3. Skills：repo -> 主副本 -> 各 Agent ----------
-printf '\n[3/5] Skills 主副本 -> %s\n' "$AGENT_SKILL_ROOT"
-if [[ "$MODE" == install ]]; then mkdir -p "$AGENT_SKILL_ROOT"; fi
+printf '\n[3/5] Skills primary copy -> %s\n' "$AGENT_SKILL_ROOT"
+[[ "$MODE" == install ]] && mkdir -p "$AGENT_SKILL_ROOT"
+for legacy_name in QuickNote SessionCapture WikiCompiler; do
+  migrate_legacy_skill_link "$legacy_name"
+done
 skill_names=()
 for src in "$REPO"/skills/*; do
   [[ -d "$src" ]] || continue
@@ -127,24 +199,24 @@ for src in "$REPO"/skills/*; do
   skill_names+=("$name")
   link_one "$src" "$AGENT_SKILL_ROOT/$name"
 done
-
 if [[ -z "${SKILL_FANOUT// /}" ]]; then
-  note "分发已关闭（LLM_WIKI_SKILL_FANOUT 为空）"
+  note "fanout disabled (LLM_WIKI_SKILL_FANOUT is empty); Grok still discovers ~/.agents/skills"
 else
   for dst_root in $SKILL_FANOUT; do
     if [[ ! -d "$dst_root" ]]; then
-      note "跳过 $dst_root（本机无此 Agent）"
+      note "skip $dst_root (harness directory absent)"
       continue
     fi
-    printf '  分发 -> %s\n' "$dst_root"
+    printf '  fanout -> %s\n' "$dst_root"
     for name in "${skill_names[@]}"; do
-      link_one "$AGENT_SKILL_ROOT/$name" "$dst_root/$name"
+      # Fan out from the published source, not through a possibly user-owned
+      # primary skill path that was preserved by the no-clobber guard.
+      link_one "$REPO/skills/$name" "$dst_root/$name"
     done
   done
 fi
 shopt -u nullglob
 
-# ---------- 4. git hooks ----------
 printf '\n[4/5] git hooks\n'
 if [[ -e "$REPO/.git" ]]; then
   want=.githooks
@@ -152,7 +224,7 @@ if [[ -e "$REPO/.git" ]]; then
   if [[ "$cur" == "$want" ]]; then
     :
   elif [[ "$MODE" == check ]]; then
-    deviate "core.hooksPath 未设为 $want（当前: ${cur:-<unset>}）"
+    deviate "core.hooksPath is not $want (current: ${cur:-<unset>})"
   elif [[ "$MODE" == dryrun ]]; then
     note "would set core.hooksPath=$want"
   else
@@ -162,129 +234,70 @@ if [[ -e "$REPO/.git" ]]; then
   fi
   [[ "$MODE" == install ]] && chmod 0755 "$REPO/.githooks/"* 2>/dev/null || true
 else
-  note "跳过（$REPO 还不是 git 仓库）"
+  note "skip (attachment/public archive has no Git metadata)"
 fi
 
-# ---------- 5. 范围外接线 ----------
-printf '\n[5/5] 范围外接线（本 repo 管不到，只报告）\n'
-AGENTS_MD=${LLM_WIKI_AGENTS_MD:-"$HOME/.config/opencode/AGENTS.md"}
-if [[ -f "$AGENTS_MD" ]]; then
-  if grep -q 'llm-wiki-remote-sync' "$AGENTS_MD"; then
-    note "AGENTS.md 已接线"
+printf '\n[5/5] Harness capability matrix\n'
+if (( DO_CONFIGURE )); then
+  if "$HARNESS" configure --harness claude --harness opencode --harness grok; then
+    note "explicit harness configuration completed"
   else
-    warn "AGENTS.md 未接线：$AGENTS_MD 里没有 llm-wiki-remote-sync"
-    note "  → 在「会话启动必做」代码块加一行，放在 llm-wiki-govern 之后、gh-watch 之前"
-    note "  → 不接线则同步永不触发（装了但不生效）"
+    deviate "harness configuration failed safely; see the exact conflict/recovery message above"
+  fi
+fi
+if [[ "$MODE" == check ]]; then
+  if ! "$HARNESS" status --strict; then
+    deviate "one or more installed harnesses are unconfigured, stale/wrong, or unverifiable"
   fi
 else
-  note "跳过（无 $AGENTS_MD，本机可能不用 opencode）"
-fi
-
-MCP_BIN="$BIN_TARGET/llm-wiki-mcp"
-if [[ -e "$MCP_BIN" ]]; then
-  mcp_registered=0
-  OPENCODE_JSON="${LLM_WIKI_OPENCODE_JSON:-$HOME/.config/opencode/opencode.json}"
-  CODEX_TOML="${LLM_WIKI_CODEX_TOML:-$HOME/.codex/config.toml}"
-  if [[ -f "$OPENCODE_JSON" ]] && grep -q 'llm-wiki' "$OPENCODE_JSON"; then
-    note "MCP 已在 opencode.json 注册"
-    mcp_registered=1
-  fi
-  if [[ -f "$CODEX_TOML" ]] && grep -q 'llm-wiki' "$CODEX_TOML"; then
-    note "MCP 已在 codex config.toml 注册"
-    mcp_registered=1
-  fi
-  if (( ! mcp_registered )); then
-    warn "MCP server 已安装但未在任何 Agent 注册：$MCP_BIN"
-    note "  → 注册后任意 MCP 客户端（Codex / Cursor / Claude Code / OpenCode）都能读写这套记忆"
-    note "  → Codex（官方 CLI，注意 -- 分隔符）:"
-    note "      codex mcp add llm-wiki -- $MCP_BIN"
-    note "  → OpenCode（opencode.json 的 mcp 段）:"
-    note "      \"llm-wiki\": { \"type\": \"local\", \"command\": [\"$MCP_BIN\"], \"enabled\": true }"
-  fi
-
-  # Codex 已支持 SessionStart hook，但 hooks.json / AGENTS.md / prompts 都可能
-  # 含用户自己的配置，因此只检测和打印安全合并指引，绝不整文件覆盖。
-  CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-  CODEX_HOOKS_JSON="${LLM_WIKI_CODEX_HOOKS_JSON:-$CODEX_HOME_DIR/hooks.json}"
-  if [[ -f "$CODEX_HOOKS_JSON" ]] \
-    && grep -q 'SessionStart' "$CODEX_HOOKS_JSON" \
-    && grep -q 'llm-wiki-enrich' "$CODEX_HOOKS_JSON"; then
-    note "Codex SessionStart hook 已接线"
-  else
-    warn "Codex 自动召回未接线：$CODEX_HOOKS_JSON 缺 LLM Wiki SessionStart hook"
-    note "  → 合并 $REPO/templates/codex/hooks.json（已有 hooks 时不要覆盖）"
-    note "  → Windows Desktop + WSL 使用模板里的 commandWindows；必要时加 -d <distro>"
-    note "  → 重启 Codex 后用 /hooks 审查并信任精确 hook 定义"
-  fi
-
-  CODEX_AGENTS_MD="${LLM_WIKI_CODEX_AGENTS_MD:-$CODEX_HOME_DIR/AGENTS.md}"
-  if [[ -d "$(dirname "$CODEX_AGENTS_MD")" ]]; then
-    if [[ -f "$CODEX_AGENTS_MD" ]] && grep -q 'BEGIN llm-wiki-recall' "$CODEX_AGENTS_MD"; then
-      note "Codex 召回块已接线"
-    else
-      warn "Codex 缺按需召回规则：$CODEX_AGENTS_MD 缺 llm-wiki-recall 块"
-      note "  → cat $REPO/templates/codex/AGENTS.recall.md >> $CODEX_AGENTS_MD"
-      note "  → cp $REPO/templates/codex/prompts/llm-wiki-recall.md $(dirname "$CODEX_AGENTS_MD")/prompts/"
-      note "  → hook 只注入极简卡片；这条规则负责按当前任务做定向召回"
-    fi
-  fi
+  "$HARNESS" status || warn "harness status could not be completed"
 fi
 
 PROFILE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/llm-wiki-sync/profile"
 if [[ -s "$PROFILE_FILE" ]]; then
-  note "profile: $(head -c 64 -- "$PROFILE_FILE" | tr -d '\n')"
+  note "sync profile configured"
 else
-  warn "未设 profile：$PROFILE_FILE 缺失，将回落到 hostname（日志/提交信息难读）"
-  note "  → mkdir -p \"\$(dirname \"$PROFILE_FILE\")\" && echo office > \"$PROFILE_FILE\""
+  warn "sync profile is unset; hostname fallback will be used"
+  note "optional: mkdir -p \"$(dirname "$PROFILE_FILE")\" && printf 'office\\n' > '$PROFILE_FILE'"
 fi
 
-# ---------- 结果 ----------
 printf '\n'
 if [[ "$MODE" == check ]]; then
   if (( DEVIATIONS )); then
-    printf '✗ check 失败：%s 处偏差。跑 ./install.sh 修复。\n' "$DEVIATIONS"
+    printf '✗ check failed: %s deviation(s). No user-owned path was replaced.\n' "$DEVIATIONS"
     exit 1
   fi
-  printf '✓ check 通过：工具链链接与 repo 一致。\n'
-  (( WARNINGS )) && printf '  ⚠ 但有 %s 处范围外接线待补（见 [5/5]）。\n' "$WARNINGS"
+  printf '✓ check passed: managed links and installed harnesses are configured.\n'
   exit 0
 fi
-
 if (( DEVIATIONS )); then
-  printf '✗ 完成但有 %s 处问题，见上。\n' "$DEVIATIONS"
+  printf '✗ completed with %s safe-stop issue(s); no conflicting path was overwritten.\n' "$DEVIATIONS"
   exit 1
 fi
+printf '✓ completed (changes=%s).\n' "$CHANGES"
 
-printf '✓ 完成（改动 %s 处）。\n' "$CHANGES"
-
-# --init 必须跑在软链之后：此前 llm-wiki-init 还不在 BIN_TARGET 里。
-# 这里调 repo 内的原件而非软链，避免依赖 PATH 是否已包含 BIN_TARGET。
 if (( DO_INIT )); then
-  printf '\n[init] 初始化数据库\n'
-  if [[ -x "$REPO/bin/llm-wiki-init" ]]; then
-    "$REPO/bin/llm-wiki-init" --git 2>&1 | sed 's/^/  /'
-  else
-    deviate "缺 $REPO/bin/llm-wiki-init，无法初始化数据库"
-  fi
+  printf '\n[init] initialize memory repository\n'
+  "$REPO/bin/llm-wiki-init" --git 2>&1 | sed 's/^/  /'
 fi
 
 if [[ "$MODE" == install ]]; then
   case ":$PATH:" in
     *":$BIN_TARGET:"*) ;;
-    *) printf '\n注意：%s 不在 PATH 中，需加入 shell 配置。\n' "$BIN_TARGET" ;;
+    *) printf '\nNote: %s is not in PATH; add it to the shell configuration.\n' "$BIN_TARGET" ;;
   esac
-  printf '\n下一步：\n'
-  if (( DO_INIT )); then
-    printf '  1) 重启 opencode 让 recall 插件生效\n'
-    printf '  2) llm-wiki-health --json  确认库健康\n'
-  else
-    printf '  1) llm-wiki-init --git  初始化数据库（未初始化则主命令会失败）\n'
-    printf '  2) 重启 opencode 让 recall 插件生效\n'
+  printf '\nNext steps:\n'
+  next_step=1
+  if (( ! DO_INIT )); then
+    printf '  %s) llm-wiki-init --git\n' "$next_step"
+    next_step=$((next_step + 1))
   fi
-  printf '  3) llm-wiki-remote-sync --status  查看同步节流状态\n'
-  if (( WARNINGS )); then
-    printf '  4) 补上 %s 处范围外接线（见 [5/5]，不补则同步不会自动触发）\n' "$WARNINGS"
+  if (( ! DO_CONFIGURE )); then
+    printf '  %s) ./install.sh --configure-harnesses\n' "$next_step"
+    next_step=$((next_step + 1))
   fi
+  printf '  %s) ./install.sh --status\n' "$next_step"
+  next_step=$((next_step + 1))
+  printf '  %s) restart/trust the applicable harness, then verify with its native MCP/hooks UI\n' "$next_step"
 fi
-
 exit 0

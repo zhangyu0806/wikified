@@ -16,6 +16,23 @@ from pathlib import Path
 WIKI_ROOT = Path(os.environ.get("LLM_WIKI_ROOT", Path.home() / "llm-wiki")).expanduser()
 NOTES_DIR = WIKI_ROOT / "raw" / "notes"
 
+SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,'\"]+(?:\s+[a-z0-9._~+/=-]{8,})?"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)([\"']?(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*)([\"']?)[^\s,'\"&]+([\"']?)"), r"\1\2[REDACTED]\3"),
+    (re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|password|passwd|pwd)=)[^\s&#]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{16,}"), "Bearer [REDACTED]"),
+    (re.compile(r"\b(sk-[a-zA-Z0-9_-]{16,})\b"), "[REDACTED_OPENAI_KEY]"),
+    (re.compile(r"\b(gh[pousr]_[a-zA-Z0-9_]{20,})\b"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"\b(xox[baprs]-[a-zA-Z0-9-]{20,})\b"), "[REDACTED_SLACK_TOKEN]"),
+    (re.compile(r"\b(eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})\b"), "[REDACTED_JWT]"),
+]
+
+
+def redact(text: str) -> str:
+    for pattern, replacement in SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
 
 def _resolve_refresh() -> str:
     """定位 llm-wiki-refresh。
@@ -108,9 +125,12 @@ def main() -> int:
     if not text:
         print("error: note content is required", file=sys.stderr)
         return 2
+    # 标题、文件名和正文必须源自同一份已脱敏文本；只在写正文时脱敏会把
+    # prompt 第一行里的 token 泄漏进 YAML title、Markdown heading 和文件名。
+    text = redact(text)
 
     now = datetime.now()
-    title = args.title.strip() if args.title else text.splitlines()[0].strip()[:60]
+    title = redact(args.title.strip()) if args.title else text.splitlines()[0].strip()[:60]
     title = title or "Quick note"
     filename = f"{now.strftime('%Y-%m-%d-%H%M')}-{slugify(title, 'quick-note')}.md"
     NOTES_DIR.mkdir(parents=True, exist_ok=True)

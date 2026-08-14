@@ -54,7 +54,19 @@ run "$REPO/bin/llm-wiki-refresh" >/dev/null 2>&1 || true
 run env LLM_WIKI_MIRROR=/proc/definitely-not-writable "$REPO/bin/llm-wiki-refresh" >/dev/null 2>&1 && rc=0 || rc=$?
 [[ "$rc" -ne 0 ]] && ok "真故障: 仍非 0 退出（rc=$rc）" || bad "真故障: 被静默吞掉了"
 
-# ---------- 4. 路径解析：写死 ~/.local/bin 会导致静默不刷新 ----------
+# ---------- 4. refresh 不得依赖调用方 PATH 才能找到同仓 sibling ----------
+# Windows 通过 `wsl.exe -e /absolute/path` 直调时不加载 login shell，PATH 通常
+# 不含 ~/.local/bin。refresh 必须从自身真实路径解析 obsidian-sync。
+PATHLESS_VAULT="$WORK/pathless-vault"
+mkdir -p "$PATHLESS_VAULT"
+out=$(env HOME="$HOME_DIR" LLM_WIKI_ROOT="$HOME_DIR/llm-wiki" \
+    LLM_WIKI_MIRROR="$PATHLESS_VAULT" PATH=/usr/bin:/bin \
+    "$REPO/bin/llm-wiki-refresh" 2>&1) && rc=0 || rc=$?
+[[ "$rc" -eq 0 ]] && ok "精简 PATH: refresh 能解析 sibling 命令" || bad "精简 PATH: refresh rc=$rc ($out)"
+[[ -f "$PATHLESS_VAULT/SCHEMA.md" ]] \
+  && ok "精简 PATH: 镜像真的同步" || bad "精简 PATH: 镜像未同步"
+
+# ---------- 5. 路径解析：写死 ~/.local/bin 会导致静默不刷新 ----------
 # llm-wiki-note 曾把 refresh 路径写死成 ~/.local/bin/llm-wiki-refresh，
 # 自定义 LLM_WIKI_BIN_TARGET 时该路径不存在 -> 笔记落盘但派生页永不更新，
 # 且 rc=0 无任何提示。这是静默的部分失败，比报错更难发现。
@@ -69,7 +81,7 @@ env HOME="$CUSTOM_HOME" LLM_WIKI_BIN_TARGET="$CUSTOM_HOME/custom-bin" \
 [[ -f "$CUSTOM_HOME/llm-wiki/Today.md" ]] \
   && ok "自定义 BIN_TARGET: 派生页真的刷新了" || bad "自定义 BIN_TARGET: 派生页未刷新（静默失败）"
 
-# ---------- 5. LLM_WIKI_ROOT 必须被尊重 ----------
+# ---------- 6. LLM_WIKI_ROOT 必须被尊重 ----------
 # llm-wiki-note 曾无视 LLM_WIKI_ROOT，把笔记写进默认库 —— 写错仓库且不报错。
 ALT_HOME="$WORK/halt"
 mkdir -p "$ALT_HOME"
@@ -82,7 +94,7 @@ env HOME="$ALT_HOME" LLM_WIKI_ROOT="$ALT_HOME/alt-root" \
 [[ -z "$(ls -A "$ALT_HOME/llm-wiki/raw/notes" 2>/dev/null)" ]] \
   && ok "LLM_WIKI_ROOT: 未误写进默认库" || bad "LLM_WIKI_ROOT: 误写进了默认库"
 
-# ---------- 6. --no-sync 不受影响 ----------
+# ---------- 7. --no-sync 不受影响 ----------
 run "$REPO/bin/llm-wiki-refresh" --no-sync >/dev/null 2>&1 && rc=0 || rc=$?
 [[ "$rc" -eq 0 ]] && ok "--no-sync rc=0" || bad "--no-sync rc=$rc"
 

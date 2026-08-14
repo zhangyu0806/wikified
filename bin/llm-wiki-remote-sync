@@ -15,7 +15,7 @@
 # 用法：
 #   llm-wiki-remote-sync              # 节流同步（会话启动用，通常秒退）
 #   llm-wiki-remote-sync --pull       # 只拉不推（不受节流，不写成功戳）
-#   llm-wiki-remote-sync --push       # 只推不拉（SessionCapture 后用；同上）
+#   llm-wiki-remote-sync --push       # 只推不拉（明确保存后用；同上）
 #   llm-wiki-remote-sync --force      # 忽略节流
 #
 # 成功戳只在「完整 sync 且无阶段被跳过」时写入。脏工作区导致 merge/push 被跳过
@@ -26,6 +26,7 @@
 set -Eeuo pipefail
 umask 077
 
+SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 ROOT=${LLM_WIKI_ROOT:-"$HOME/llm-wiki"}
 THROTTLE_SECONDS=${LLM_WIKI_SYNC_THROTTLE:-10800}   # 3h
 CACHE_DIR=${LLM_WIKI_SYNC_CACHE_DIR:-"${XDG_CACHE_HOME:-$HOME/.cache}/llm-wiki-sync"}
@@ -80,6 +81,16 @@ cleanup() { [[ -n "$STAMP_TMP" && -e "$STAMP_TMP" ]] && rm -f -- "$STAMP_TMP" ||
 trap cleanup EXIT
 
 run_git() { timeout "$GIT_TIMEOUT" git -C "$ROOT" "$@"; }
+
+resolve_tool() {
+  local name=$1 candidate
+  for candidate in \
+    "${LLM_WIKI_BIN_TARGET:+$LLM_WIKI_BIN_TARGET/$name}" \
+    "$SELF_DIR/$name"; do
+    [[ -n "$candidate" && -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  command -v "$name" 2>/dev/null || return 1
+}
 
 stamp_age() {
   [[ -f "$STAMP" ]] || { echo -1; return; }
@@ -136,6 +147,12 @@ fi
 phase_start preflight
 [[ -d "$ROOT/.git" ]] || fatal "$ROOT 不是 git 仓库，请先完成初始化"
 command -v git >/dev/null 2>&1 || fatal "git 不可用"
+CURRENT_BRANCH=$(run_git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+[[ -n "$CURRENT_BRANCH" ]] || fatal "当前为 detached HEAD；拒绝猜测同步目标"
+[[ "$CURRENT_BRANCH" == "$BRANCH" ]] || fatal "当前分支是 $CURRENT_BRANCH，期望 $BRANCH；拒绝跨分支同步"
+UPSTREAM=$(run_git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+[[ -n "$UPSTREAM" ]] || fatal "当前分支缺少 upstream；请先配置 $REMOTE/$BRANCH"
+[[ "$UPSTREAM" == "$REMOTE/$BRANCH" ]] || fatal "upstream 是 $UPSTREAM，期望 $REMOTE/$BRANCH"
 
 # 未完成的 merge/rebase/cherry-pick：必须 fatal 中止，绝不能当成普通脏工作区。
 # 若走脏工作区分支，脚本会 rc=0 并写成功戳，导致节流窗口内静默不同步，
@@ -192,7 +209,8 @@ if ((DRY_RUN)); then
   exit 0
 fi
 
-DEDUPE="$ROOT/bin/llm-wiki-dedupe-events"
+DEDUPE=$(resolve_tool llm-wiki-dedupe-events || true)
+ALLOW_DEDUPE=1
 
 # ---------- 阶段：拉取 ----------
 if [[ "$MODE" == sync || "$MODE" == pull ]]; then
@@ -206,6 +224,7 @@ if [[ "$MODE" == sync || "$MODE" == pull ]]; then
     log_line "工作区有未提交改动，跳过 merge（保留现场，不做任何丢弃）"
     printf 'llm-wiki-remote-sync: 工作区有未提交改动，已跳过 merge。请先提交或暂存后重跑。\n' >&2
     SYNC_INCOMPLETE=1
+    ALLOW_DEDUPE=0
   else
     behind=$(run_git rev-list --count "HEAD..$REMOTE/$BRANCH" 2>/dev/null || echo 0)
     if [[ "$behind" != 0 ]]; then
@@ -222,7 +241,9 @@ if [[ "$MODE" == sync || "$MODE" == pull ]]; then
 
   # union merge 会产生重复行，必须去重
   phase_start dedupe
-  if [[ -x "$DEDUPE" ]]; then
+  if ((ALLOW_DEDUPE == 0)); then
+    log_line "工作区原本不干净，跳过 dedupe，避免改写或提交用户未提交内容"
+  elif [[ -n "$DEDUPE" && -x "$DEDUPE" ]]; then
     "$DEDUPE" --root "$ROOT" >>"$LOG" 2>&1 || fatal "dedupe 失败"
     if [[ -n "$(run_git status --porcelain -- memory/events raw/inbox/corrections.jsonl 2>/dev/null)" ]]; then
       run_git add -- memory/events raw/inbox/corrections.jsonl 2>/dev/null || true
@@ -233,7 +254,7 @@ if [[ "$MODE" == sync || "$MODE" == pull ]]; then
       log_line "已提交 dedupe 结果"
     fi
   else
-    log_line "警告：$DEDUPE 不可执行，跳过去重"
+    fatal "找不到 llm-wiki-dedupe-events；不能安全完成 union merge 收敛"
   fi
   phase_success
 fi
@@ -251,6 +272,12 @@ if [[ "$MODE" == sync || "$MODE" == push ]]; then
       log_line "push: noop（无本地新提交）"
     else
       run_git push "$REMOTE" "$BRANCH" >>"$LOG" 2>&1 || fatal "push 失败（可能上游有新提交，下次同步会先 merge）"
+      # push 返回 0 后重新 fetch 并逐字节核对 OID，防代理/远端竞态或错误
+      # refspec 让脚本在实际上未把当前 HEAD 发布成功时仍写成功戳。
+      local_oid=$(run_git rev-parse HEAD)
+      run_git fetch "$REMOTE" "$BRANCH" --quiet || fatal "push 后远端校验 fetch 失败"
+      remote_oid=$(run_git rev-parse "$REMOTE/$BRANCH" 2>/dev/null || true)
+      [[ "$remote_oid" == "$local_oid" ]] || fatal "push 后远端 OID 与本地 HEAD 不一致"
       log_line "pushed $ahead 个 commit"
     fi
   fi

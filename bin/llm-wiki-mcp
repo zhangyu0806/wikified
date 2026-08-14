@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-// llm-wiki-mcp — LLM Wiki 记忆库的 MCP server（T11）。
+// llm-wiki-mcp — Wikified 记忆系统的 MCP server（兼容命令名保留）。
 // 薄封装现有 llm-wiki-* CLI，把记忆读写暴露给任意 MCP 客户端
 // (OpenCode/Claude Code/Cursor)，逻辑全在 CLI 里，本文件只做 JSON-RPC 转接。
 // 纯 Node + 手写 JSON-RPC over stdio，零外部依赖（对齐本机 scraper-fallback-mcp 风格）。
@@ -31,6 +31,8 @@ const EVENT = resolveCli('llm-wiki-event');
 const HEALTH = resolveCli('llm-wiki-health');
 const GRAPHIFY = resolveCli('graphify');
 const GRAPH_JSON = path.join(ROOT, 'graphify-out', 'graph.json');
+const READABLE_WIKI_ROOT = path.join(ROOT, 'wiki');
+const MAX_PAGE_BYTES = 256 * 1024;
 
 const run = (file, args, timeoutMs = 8000) =>
   new Promise((resolve) => {
@@ -49,7 +51,7 @@ const runRequired = async (file, args, timeoutMs = 8000) => {
 const tools = [
   {
     name: 'search_pages',
-    description: 'Search LLM Wiki memory by natural-language query. Returns top relevant wiki pages and memory events, ranked by llm-wiki-enrich.',
+    description: 'Search Wikified memory by natural-language query. Returns top relevant wiki pages and memory events, ranked by llm-wiki-enrich.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -63,10 +65,10 @@ const tools = [
   },
   {
     name: 'read_page',
-    description: 'Read a single wiki page or context file by path relative to the LLM Wiki root (e.g. wiki/context/CRITICAL_FACTS.md). Path-traversal is rejected.',
+    description: 'Read one Markdown page below wiki/ by path relative to the Wikified data root (e.g. wiki/context/CRITICAL_FACTS.md). Other repository files, traversal, symlinks escaping wiki/, and oversized pages are rejected.',
     inputSchema: {
       type: 'object',
-      properties: { path: { type: 'string', description: 'Path relative to LLM Wiki root.' } },
+      properties: { path: { type: 'string', description: 'Path relative to the Wikified data root.' } },
       required: ['path'],
     },
   },
@@ -125,16 +127,24 @@ async function dispatch(name, args) {
     return await runRequired(ENRICH, a);
   }
   if (name === 'read_page') {
-    // 防目录穿越 + 防 symlink 逃逸：用 realpathSync 解析真实路径后必须仍在 ROOT 内，
-    // 否则 wiki 内的符号链接可指向 ~/secure-notes 等外部敏感文件造成泄漏。
+    // MCP 的读权限只覆盖人工审校后的 wiki Markdown。仅限制在数据仓根目录仍会
+    // 暴露 .git/config、同步日志或未来加入的私有运行状态；目录穿越检查并不等于
+    // 最小权限。realpath 同时防止 wiki 内符号链接逃逸。
     const rel = String(args.path || '');
     const abs = path.resolve(ROOT, rel);
+    const normalized = rel.replaceAll('\\', '/');
+    if (!normalized.startsWith('wiki/') || !normalized.endsWith('.md')) {
+      throw new Error('read_page only permits wiki/**/*.md');
+    }
     if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) throw new Error(`not a file: ${rel}`);
-    const realRoot = fs.realpathSync(ROOT);
+    if (!fs.existsSync(READABLE_WIKI_ROOT)) throw new Error('wiki directory does not exist');
+    const realRoot = fs.realpathSync(READABLE_WIKI_ROOT);
     const realAbs = fs.realpathSync(abs);
     if (realAbs !== realRoot && !realAbs.startsWith(realRoot + path.sep)) {
-      throw new Error('path escapes wiki root');
+      throw new Error('path escapes readable wiki root');
     }
+    const size = fs.statSync(realAbs).size;
+    if (size > MAX_PAGE_BYTES) throw new Error(`page exceeds ${MAX_PAGE_BYTES} byte limit`);
     return fs.readFileSync(realAbs, 'utf8');
   }
   if (name === 'find_related') {
@@ -280,7 +290,7 @@ function handleMessage(message) {
     sendResult(message.id, {
       protocolVersion: '2024-11-05',
       capabilities: { tools: {} },
-      serverInfo: { name: 'llm-wiki', version: '0.1.0' },
+      serverInfo: { name: 'wikified', version: '0.1.0' },
     });
     return;
   }

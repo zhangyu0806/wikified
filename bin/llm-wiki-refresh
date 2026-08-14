@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Refresh derived LLM Wiki pages, then sync the Obsidian mirror.
+"""Refresh derived Wikified pages, then sync the Obsidian mirror.
 
 Generated surfaces:
 - Today.md
 - wiki/dashboards/projects.md
 - wiki/dashboards/health.md
 
-This command is intended to run after every WikiCompiler ingest so the
+This command is intended to run after every human-approved wiki ingest so the
 Obsidian mirror is always current without a separate manual sync step.
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import re
 import subprocess
 import sys
@@ -33,6 +34,24 @@ SENSITIVE_TERMS = {
 NON_COMPILABLE_QUALITY_GATES = {"partial_excerpt_only", "failed_no_transcript_or_full_article"}
 NON_COMPILABLE_STATUSES = {"needs_full_text", "deferred"}
 NEXT_ACTION_RE = re.compile(r"(后续|下一步|待办|TODO|Next)", re.IGNORECASE)
+
+
+def resolve_obsidian_sync() -> str:
+    """Resolve the sibling sync command without depending on the caller's PATH."""
+    name = "llm-wiki-obsidian-sync"
+    candidates = [Path(__file__).resolve().parent]
+    env_bin = os.environ.get("LLM_WIKI_BIN_TARGET")
+    if env_bin:
+        candidates.append(Path(env_bin).expanduser())
+    candidates.append(Path.home() / ".local" / "bin")
+    for directory in candidates:
+        candidate = directory / name
+        if candidate.exists():
+            return str(candidate)
+    return name
+
+
+OBSIDIAN_SYNC_COMMAND = resolve_obsidian_sync()
 
 
 @dataclass(frozen=True)
@@ -352,13 +371,13 @@ def write_health(root: Path, pages: list[Page], raw_files: list[Path], now: dt.d
             sensitive.append(f"- `{rel}`：疑似关键词 {', '.join(found)}（仅提示，不展开内容）")
 
     content = f"""---
-title: LLM Wiki 健康检查
+title: Wikified 健康检查
 created: {today.isoformat()}
 updated: {today.isoformat()}
 tags: [dashboard, health, llm-wiki]
 ---
 
-# LLM Wiki 健康检查
+# Wikified 健康检查
 
 由 `llm-wiki-refresh` 自动生成。生成时间：{now.strftime('%Y-%m-%d %H:%M:%S %Z')}
 
@@ -396,7 +415,7 @@ def run_sync(root: Path) -> None:
     本命令，若在此抛错，未配置镜像的用户连记笔记都做不了。
     """
     result = subprocess.run(
-        ["llm-wiki-obsidian-sync", "--source", str(root)],
+        [OBSIDIAN_SYNC_COMMAND, "--source", str(root)],
         capture_output=True,
         text=True,
     )
@@ -413,8 +432,8 @@ def run_sync(root: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Refresh derived LLM Wiki pages and sync Obsidian mirror.")
-    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="LLM Wiki root directory")
+    parser = argparse.ArgumentParser(description="Refresh derived Wikified pages and sync Obsidian mirror.")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="Wikified data root directory")
     parser.add_argument("--no-sync", action="store_true", help="Generate derived pages without running llm-wiki-obsidian-sync")
     return parser.parse_args()
 
@@ -423,7 +442,7 @@ def main() -> None:
     args = parse_args()
     root = args.root.expanduser().resolve()
     if not (root / "SCHEMA.md").exists():
-        fail(f"not an LLM Wiki root, missing SCHEMA.md: {root}")
+        fail(f"not a Wikified data root, missing SCHEMA.md: {root}")
 
     now = dt.datetime.now().astimezone()
     pages = [parse_page(root, path) for path in markdown_files(root / "wiki")]

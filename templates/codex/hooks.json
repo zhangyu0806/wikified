@@ -1,5 +1,5 @@
 {
-  "description": "Inject a bounded, redacted LLM Wiki digest when Codex starts, resumes, clears, or compacts a session.",
+  "description": "Inject bounded, redacted Wikified critical facts when Codex starts, resumes, clears, or compacts a session.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,11 +7,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/.local/bin/llm-wiki-enrich\" --session-start --max-chars 3500",
-            "commandWindows": "wsl.exe -- sh -lc 'exec \"$HOME/.local/bin/llm-wiki-enrich\" --session-start --max-chars 3500'",
+            "command": "\"$HOME/.local/bin/llm-wiki-session-start\" --format codex --max-chars 2500",
+            "commandWindows": "wsl.exe -- sh -lc 'exec \"$HOME/.local/bin/llm-wiki-session-start\" --format codex --max-chars 2500'",
             "timeout": 10,
-            "statusMessage": "Loading bounded LLM Wiki context",
-            "additionalContextLimit": 1600
+            "statusMessage": "Loading stable Wikified context",
+            "additionalContextLimit": 2500
           }
         ]
       }

@@ -209,7 +209,7 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Record a typed LLM Wiki memory event.")
+    parser = argparse.ArgumentParser(description="Record a typed Wikified memory event.")
     parser.add_argument("summary", nargs="?", help="Short event summary. If omitted, stdin is used.")
     parser.add_argument("--type", default="fact", choices=sorted(EVENT_TYPES), help="Typed event category.")
     parser.add_argument("--project", help="Stable project identifier. Defaults to current directory name.")

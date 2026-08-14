@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "\"$HOME/.local/bin/llm-wiki-session-start\" --format cursor --max-chars 2500",
+        "timeout": 10
+      }
+    ]
+  }
+}

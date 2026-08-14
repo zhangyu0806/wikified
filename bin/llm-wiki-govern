@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# llm-wiki-govern — 节流 + 文件锁 的 LLM Wiki 周期治理器
+# llm-wiki-govern — 节流 + 文件锁的 Wikified 周期治理器
 # 仿 omo-refresh：会话启动时调用，7 天内已跑过则秒退，绝不阻塞会话。
 # WSL2 cron 未必常驻，故用「会话启动节流」而非 crontab。
 #
