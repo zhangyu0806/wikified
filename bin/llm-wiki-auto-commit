@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+# llm-wiki-auto-commit — 把 ~/llm-wiki 的记忆改动自动提交（密钥扫描作硬门禁）
+#
+# 存在理由：llm-wiki-remote-sync 刻意不自动提交（「提交需显式意图」），因此
+# 纯靠它做不到无人值守上传——改动会一直卡在本地。本脚本承担那份「显式意图」，
+# 但只在通过密钥扫描后才提交，把风险约束回可接受范围。
+#
+# 设计沿用 llm-wiki-remote-sync 的约定：
+#   - 非阻塞 flock：多处并发触发只有一个真干活，其余瞬退
+#   - phase 门禁：任一阶段失败即 fatal 中止，保留现场
+#   - 绝不 reset --hard / checkout -f / clean，未知改动一律保留
+#
+# 与 remote-sync 的关键差异：本脚本会写 commit，因此额外约束
+#   - 只暂存白名单路径（记忆数据），绝不 git add -A
+#   - 暂存后跑 llm-wiki-secret-scan --staged；不通过则全部 unstage 并 rc=1
+#   - 扫描器缺失即 fatal，绝不「跳过扫描继续提交」
+#   - 已有暂存内容时中止（那是人工进行中的提交，不抢方向盘）
+#
+# 用法：
+#   llm-wiki-auto-commit              # 扫描并提交（不推送）
+#   llm-wiki-auto-commit --push       # 提交后只推送（兼容/单机模式）
+#   llm-wiki-auto-commit --sync       # 提交后做完整双向同步（多机推荐）
+#   llm-wiki-auto-commit --status     # 只读状态
+#   llm-wiki-auto-commit --dry-run    # 打印将要提交什么，不写入
+#
+# 退出码：0 成功或无事可做；1 密钥门禁拦截或阶段失败；2 参数错误
+
+set -Eeuo pipefail
+umask 077
+
+SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+ROOT=${LLM_WIKI_ROOT:-"$HOME/llm-wiki"}
+CACHE_DIR=${LLM_WIKI_SYNC_CACHE_DIR:-"${XDG_CACHE_HOME:-$HOME/.cache}/llm-wiki-sync"}
+LOCK="$CACHE_DIR/auto-commit.lock"
+LOG="$CACHE_DIR/auto-commit.log"
+GIT_TIMEOUT=${LLM_WIKI_SYNC_GIT_TIMEOUT:-120}
+BRANCH=${LLM_WIKI_SYNC_BRANCH:-main}
+CURRENT_PHASE=initialization
+
+# 自动提交的路径白名单。只覆盖「机器生成或已审阅的记忆数据」。
+# 刻意不含 .secret-allowlist —— 放宽扫描门禁必须是人工显式行为。
+# 刻意不含 Today.md 等派生物：它们被 .gitignore 排除（可再生，各机自己生成）。
+declare -a AUTO_PATHS=(
+  memory/events
+  raw/sessions
+  raw/notes
+  raw/inbox
+  wiki
+)
+
+MODE=commit
+DRY_RUN=0
+
+while (($#)); do
+  case $1 in
+    --push)    MODE=push ;;
+    --sync)    MODE=sync ;;
+    --status)  MODE=status ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    *) printf 'llm-wiki-auto-commit: 未知参数 %s\n' "$1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+mkdir -p "$CACHE_DIR"
+chmod 700 "$CACHE_DIR"
+
+log_line()      { printf '%s\n' "$*" >>"$LOG"; }
+phase_start()   { CURRENT_PHASE=$1; log_line "[$(date -Is)] PHASE START: $CURRENT_PHASE"; }
+phase_success() { log_line "[$(date -Is)] PHASE SUCCESS: $CURRENT_PHASE"; }
+
+fatal() {
+  log_line "[$(date -Is)] PHASE FAILURE: $CURRENT_PHASE: $1"
+  printf 'llm-wiki-auto-commit: %s（日志见 %s）\n' "$1" "$LOG" >&2
+  exit 1
+}
+
+on_error() {
+  log_line "[$(date -Is)] PHASE FAILURE: $CURRENT_PHASE: unexpected rc=$1 line=$2"
+  printf 'llm-wiki-auto-commit: 阶段 %s 意外失败（rc=%s，日志见 %s）\n' "$CURRENT_PHASE" "$1" "$LOG" >&2
+  exit 1
+}
+trap 'on_error $? $LINENO' ERR
+
+run_git() { timeout "$GIT_TIMEOUT" git -C "$ROOT" "$@"; }
+
+resolve_tool() {
+  local name=$1 candidate
+  for candidate in \
+    "${LLM_WIKI_BIN_TARGET:+$LLM_WIKI_BIN_TARGET/$name}" \
+    "$SELF_DIR/$name"; do
+    [[ -n "$candidate" && -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  command -v "$name" 2>/dev/null || return 1
+}
+
+detect_profile() {
+  if [[ -n "${LLM_WIKI_PROFILE:-}" ]]; then printf '%s' "$LLM_WIKI_PROFILE"; return; fi
+  if [[ -f "$CACHE_DIR/profile" ]]; then
+    local p; IFS= read -r p <"$CACHE_DIR/profile" 2>/dev/null || p=""
+    [[ -n "$p" ]] && { printf '%s' "$p"; return; }
+  fi
+  printf '%s' "$(hostname -s 2>/dev/null || echo unknown)"
+}
+PROFILE=$(detect_profile)
+
+# git add 对不存在的 pathspec 会 fatal，而白名单里的目录在新装机器上可能还没建
+# （raw/notes 等按需创建）。只保留「磁盘上存在」或「git 仍跟踪着」的路径——
+# 后者覆盖整个目录被删除、需要提交这个删除的场景。
+#
+# 同时跳过被 .gitignore 整体排除的路径：显式 git add 一个被忽略的 pathspec 也会
+# fatal。派生物（Today.md 等）本就不该自动提交，静默跳过而不是失败。
+existing_auto_paths() {
+  local p
+  for p in "${AUTO_PATHS[@]}"; do
+    run_git check-ignore -q -- "$p" 2>/dev/null && continue
+    if [[ -e "$ROOT/$p" ]] || [[ -n "$(run_git ls-files -- "$p" 2>/dev/null)" ]]; then
+      printf '%s\n' "$p"
+    fi
+  done
+}
+
+tracked_auto_paths() {
+  local p
+  for p in "${AUTO_PATHS[@]}"; do
+    [[ -n "$(run_git ls-files -- "$p" 2>/dev/null)" ]] && printf '%s\n' "$p"
+  done
+}
+
+# 列出白名单内待提交的路径（porcelain -z，安全处理特殊文件名）
+pending_paths() {
+  local -a scope
+  mapfile -t scope < <(existing_auto_paths)
+  ((${#scope[@]})) || return 0
+  run_git status --porcelain -z --untracked-files=all -- "${scope[@]}" 2>/dev/null \
+    | tr '\0' '\n' | sed -e 's/^...//' | grep -v '^$' || true
+}
+
+# ---------- status：只读 ----------
+if [[ "$MODE" == status ]]; then
+  printf 'root:      %s\n' "$ROOT"
+  printf 'profile:   %s\n' "$PROFILE"
+  printf 'whitelist: %s\n' "${AUTO_PATHS[*]}"
+  if [[ -d "$ROOT/.git" ]]; then
+    printf 'branch:    %s\n' "$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+    staged=$(git -C "$ROOT" diff --cached --name-only 2>/dev/null | wc -l)
+    printf 'staged:    %s 个文件\n' "$staged"
+    mapfile -t pend < <(pending_paths)
+    printf 'pending:   %s 个白名单内文件\n' "${#pend[@]}"
+    ((${#pend[@]})) && printf '  - %s\n' "${pend[@]}"
+    outside=$(git -C "$ROOT" status --porcelain --untracked-files=all 2>/dev/null | wc -l)
+    printf 'total dirty: %s 个文件（含白名单外，不会被自动提交）\n' "$outside"
+  else
+    printf 'git:       未初始化\n'
+  fi
+  scanner=$(resolve_tool llm-wiki-secret-scan || true)
+  printf 'scanner:   %s\n' "${scanner:-<缺失，自动提交将拒绝运行>}"
+  exit 0
+fi
+
+# ---------- 前置检查 ----------
+phase_start preflight
+[[ -d "$ROOT/.git" ]] || fatal "$ROOT 不是 git 仓库，请先完成初始化"
+command -v git >/dev/null 2>&1 || fatal "git 不可用"
+
+CURRENT_BRANCH=$(run_git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+[[ -n "$CURRENT_BRANCH" ]] || fatal "当前为 detached HEAD；拒绝自动提交"
+[[ "$CURRENT_BRANCH" == "$BRANCH" ]] || fatal "当前分支是 $CURRENT_BRANCH，期望 $BRANCH；拒绝跨分支自动提交"
+
+# 未完成的 merge/rebase/cherry-pick：绝不能在这种状态下自动提交
+GIT_DIR_ABS=$(run_git rev-parse --absolute-git-dir 2>/dev/null || echo "$ROOT/.git")
+unresolved=$(run_git ls-files --unmerged 2>/dev/null | wc -l)
+if [[ -e "$GIT_DIR_ABS/MERGE_HEAD" ]] || ((unresolved > 0)); then
+  fatal "存在未完成的 merge（$unresolved 个未解决路径）；拒绝自动提交。请先人工解决。"
+fi
+[[ -e "$GIT_DIR_ABS/CHERRY_PICK_HEAD" ]] && fatal "存在未完成的 cherry-pick；拒绝自动提交。"
+if [[ -d "$GIT_DIR_ABS/rebase-merge" || -d "$GIT_DIR_ABS/rebase-apply" ]]; then
+  fatal "存在未完成的 rebase；拒绝自动提交。"
+fi
+
+# 已有暂存内容 = 人正在手工组织一个提交。不抢方向盘。
+if [[ -n "$(run_git diff --cached --name-only 2>/dev/null)" ]]; then
+  fatal "已有暂存内容（疑似人工提交进行中）；拒绝自动提交，避免把你的暂存混进自动 commit。"
+fi
+
+# 扫描器必须存在。缺失即中止 —— 绝不「跳过扫描继续提交」。
+SCANNER=$(resolve_tool llm-wiki-secret-scan || true)
+[[ -n "$SCANNER" ]] || fatal "找不到 llm-wiki-secret-scan；密钥门禁不可用，拒绝自动提交。"
+phase_success
+
+# ---------- 收集待提交内容 ----------
+phase_start collect
+mapfile -t PENDING < <(pending_paths)
+if ((${#PENDING[@]} == 0)); then
+  log_line "collect: noop（白名单内无改动）"
+  phase_success
+  log_line "[$(date -Is)] === run noop ==="
+  # 无新提交也可能有历史提交待推或远端更新待拉，交给同步阶段判断
+  if [[ "$MODE" != push && "$MODE" != sync ]]; then
+    exit 0
+  fi
+else
+  log_line "collect: ${#PENDING[@]} 个文件"
+  printf '%s\n' "${PENDING[@]}" >>"$LOG"
+  phase_success
+fi
+
+# ---------- dry-run 出口 ----------
+if ((DRY_RUN)); then
+  printf '[dry-run] profile=%s branch=%s\n' "$PROFILE" "$BRANCH"
+  if ((${#PENDING[@]})); then
+    printf '[dry-run] 将暂存 %d 个白名单内文件：\n' "${#PENDING[@]}"
+    printf '  %s\n' "${PENDING[@]}"
+    printf '[dry-run] 将跑密钥扫描：%s --root %s --staged\n' "$SCANNER" "$ROOT"
+    printf '[dry-run] 扫描通过则 commit；不通过则 unstage 全部并 rc=1\n'
+  else
+    printf '[dry-run] 白名单内无改动，不会产生新 commit\n'
+  fi
+  [[ "$MODE" == push ]] && printf '[dry-run] 随后调用 llm-wiki-remote-sync --push\n'
+  [[ "$MODE" == sync ]] && printf '[dry-run] 随后调用 llm-wiki-remote-sync --force 做完整双向同步\n'
+  exit 0
+fi
+
+# ---------- 非阻塞锁 ----------
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+
+# ---------- 暂存 + 密钥门禁 + 提交 ----------
+if ((${#PENDING[@]})); then
+  phase_start stage
+  mapfile -t STAGE_SCOPE < <(existing_auto_paths)
+  ((${#STAGE_SCOPE[@]})) || fatal "白名单路径均不存在，无法暂存"
+  # 两段式暂存，始终限定在白名单内，绝不 git add -A：
+  #   1) `add -u` 只处理已经跟踪的修改/删除；即使父目录后来被 gitignore 也安全。
+  #   2) `ls-files --others --exclude-standard` 精确列出未忽略的新文件，再逐个 add。
+  # 直接 `git add <目录>` 会在目录同时含 tracked 与 ignored 文件时整体报错。
+  mapfile -t TRACKED_SCOPE < <(tracked_auto_paths)
+  if ((${#TRACKED_SCOPE[@]})); then
+    if ! run_git add -u -- "${TRACKED_SCOPE[@]}" >>"$LOG" 2>&1; then
+      run_git reset -q HEAD -- "${TRACKED_SCOPE[@]}" >>"$LOG" 2>&1 || true
+      fatal "暂存已跟踪文件失败（已撤销本次暂存，工作区文件未变）"
+    fi
+  fi
+  untracked_output=$(run_git ls-files --others --exclude-standard -- "${STAGE_SCOPE[@]}" 2>>"$LOG") || {
+    run_git reset -q HEAD -- "${STAGE_SCOPE[@]}" >>"$LOG" 2>&1 || true
+    fatal "枚举白名单内新文件失败（已撤销本次暂存，工作区文件未变）"
+  }
+  UNTRACKED=()
+  if [[ -n "$untracked_output" ]]; then
+    mapfile -t UNTRACKED <<<"$untracked_output"
+    if ! run_git add -- "${UNTRACKED[@]}" >>"$LOG" 2>&1; then
+      run_git reset -q HEAD -- "${STAGE_SCOPE[@]}" >>"$LOG" 2>&1 || true
+      fatal "暂存白名单内新文件失败（已撤销本次暂存，工作区文件未变）"
+    fi
+  fi
+  staged_count=$(run_git diff --cached --name-only | wc -l)
+  if ((staged_count == 0)); then
+    log_line "stage: 暂存后无内容（可能被 gitignore 覆盖），结束"
+    phase_success
+    exit 0
+  fi
+  log_line "staged $staged_count 个文件"
+  phase_success
+
+  # 门禁：扫描已暂存内容。这是自动提交的唯一安全屏障，失败必须回退暂存区。
+  phase_start secret-gate
+  if ! "$SCANNER" --root "$ROOT" --staged >>"$LOG" 2>&1; then
+    run_git reset -q HEAD -- "${STAGE_SCOPE[@]}" >>"$LOG" 2>&1 || true
+    log_line "secret-gate: 拦截，已 unstage（工作区文件保持原样，未丢弃）"
+    printf 'llm-wiki-auto-commit: 密钥扫描发现疑似凭据，已中止提交并撤销暂存。\n' >&2
+    printf '  工作区文件未被修改或丢弃。详情见 %s\n' "$LOG" >&2
+    printf '  处理：真凭据移到 ~/secure-notes/ 并改写正文；确认无害则把 fingerprint 加进 .secret-allowlist\n' >&2
+    exit 1
+  fi
+  log_line "secret-gate: clean"
+  phase_success
+
+  phase_start commit
+  msg="chore(memory): auto-commit $(date +%F) [$PROFILE]"
+  run_git -c "user.name=$(git -C "$ROOT" config user.name)" \
+          -c "user.email=$(git -C "$ROOT" config user.email)" \
+          commit -m "$msg" >>"$LOG" 2>&1 \
+    || fatal "提交失败"
+  log_line "committed: $msg"
+  printf 'llm-wiki-auto-commit: 已提交 %s 个文件（%s）\n' "$staged_count" "$msg"
+  phase_success
+fi
+
+# ---------- 可选推送 / 完整同步 ----------
+# --push 保留给明确只想上传的兼容场景；多机无人值守必须用 --sync：本地自动
+# commit 后先 fetch/merge/dedupe 再 push，避免两台机器各自提交后出现 non-fast-forward。
+if [[ "$MODE" == push || "$MODE" == sync ]]; then
+  phase_start "$MODE"
+  SYNC=$(resolve_tool llm-wiki-remote-sync || true)
+  [[ -n "$SYNC" ]] || fatal "找不到 llm-wiki-remote-sync；无法完成 $MODE"
+  # 释放锁再调，避免与 remote-sync 自身的锁语义纠缠
+  exec 9>&-
+  if [[ "$MODE" == sync ]]; then
+    "$SYNC" --force || fatal "完整同步失败（详情见 remote-sync 日志）"
+    log_line "sync: 委托 remote-sync --force 完成"
+  else
+    "$SYNC" --push || fatal "推送失败（详情见 remote-sync 日志）"
+    log_line "push: 委托 remote-sync --push 完成"
+  fi
+  phase_success
+fi
+
+log_line "[$(date -Is)] === run complete ==="

@@ -1,0 +1,39 @@
+# Wikified 每日自动同步 —— systemd user service
+#
+# 由 llm-wiki-auto-commit.timer 触发。install.sh 会把 @BIN_TARGET@ 替换成
+# 实际 CLI 安装路径后写入 ~/.config/systemd/user/。
+#
+# 安全边界：
+#   - auto-commit 只暂存记忆数据白名单路径，绝不 git add -A
+#   - 提交前强制跑 llm-wiki-secret-scan --staged；不通过则中止并撤销暂存
+#   - 扫描器缺失时脚本 fatal，不会「跳过扫描继续提交」
+#   - 失败不重试、不回滚，保留现场等人处理；下次 timer 周期自然重试
+#
+# 手动触发一次：systemctl --user start llm-wiki-auto-commit.service
+# 看日志：      journalctl --user -u llm-wiki-auto-commit.service -n 50
+
+[Unit]
+Description=Wikified 每日记忆自动提交并双向同步
+Documentation=https://github.com/zhangyu0806/wikified
+# 网络不通时 sync 会失败，但 commit 仍有价值，故不设 Requires
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@BIN_TARGET@/llm-wiki-auto-commit --sync
+
+# 单次运行上限。git 操作已有 120s 各自超时，此处兜底防挂死。
+TimeoutStartSec=600
+
+# 每台机器可选的本地环境文件。公开模板不预设任何人的代理端口。
+# 需要代理时创建 ~/.config/wikified/auto-sync.env，例如：
+#   http_proxy=http://127.0.0.1:7897
+#   https_proxy=http://127.0.0.1:7897
+EnvironmentFile=-%h/.config/wikified/auto-sync.env
+
+# 收紧权限：只需要读写 llm-wiki 数据仓和 cache，不需要别的
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

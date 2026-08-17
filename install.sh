@@ -166,7 +166,7 @@ migrate_legacy_skill_link() {
 printf 'Wikified install (%s)\n' "$MODE"
 printf '  repo: %s\n' "$REPO"
 
-printf '\n[1/5] CLI -> %s\n' "$BIN_TARGET"
+printf '\n[1/6] CLI -> %s\n' "$BIN_TARGET"
 [[ "$MODE" == install ]] && mkdir -p "$BIN_TARGET"
 shopt -s nullglob
 for src in "$REPO"/bin/*; do
@@ -175,7 +175,7 @@ for src in "$REPO"/bin/*; do
   link_one "$src" "$BIN_TARGET/$(basename "$src")"
 done
 
-printf '\n[2/5] OpenCode plugins (official global path) -> %s\n' "$OPENCODE_PLUGIN_TARGET"
+printf '\n[2/6] OpenCode plugins (official global path) -> %s\n' "$OPENCODE_PLUGIN_TARGET"
 [[ "$MODE" == install ]] && mkdir -p "$OPENCODE_PLUGIN_TARGET"
 for src in "$REPO"/plugins/*.js; do
   [[ -f "$src" ]] || continue
@@ -187,7 +187,7 @@ if [[ -e "$legacy" || -L "$legacy" ]]; then
   note "OpenCode's current global plugin path is $OPENCODE_PLUGIN_TARGET"
 fi
 
-printf '\n[3/5] Skills primary copy -> %s\n' "$AGENT_SKILL_ROOT"
+printf '\n[3/6] Skills primary copy -> %s\n' "$AGENT_SKILL_ROOT"
 [[ "$MODE" == install ]] && mkdir -p "$AGENT_SKILL_ROOT"
 for legacy_name in QuickNote SessionCapture WikiCompiler; do
   migrate_legacy_skill_link "$legacy_name"
@@ -217,7 +217,7 @@ else
 fi
 shopt -u nullglob
 
-printf '\n[4/5] git hooks\n'
+printf '\n[4/6] git hooks\n'
 if [[ -e "$REPO/.git" ]]; then
   want=.githooks
   cur=$(git -C "$REPO" config --get core.hooksPath 2>/dev/null || true)
@@ -237,7 +237,51 @@ else
   note "skip (attachment/public archive has no Git metadata)"
 fi
 
-printf '\n[5/5] Harness capability matrix\n'
+printf '\n[5/6] Daily auto-sync timer (opt-in)\n'
+# 自动提交会写 git commit，所以默认不启用：需要一个显式开关文件。
+# 这条边界是刻意的 —— 自动提交绕过了「提交需显式意图」，必须由人明确打开。
+SYSTEMD_USER_DIR=${LLM_WIKI_SYSTEMD_USER_DIR:-"$HOME/.config/systemd/user"}
+AUTO_COMMIT_SWITCH=${LLM_WIKI_AUTO_COMMIT_SWITCH:-"$HOME/.config/wikified/auto-commit.enabled"}
+if [[ ! -d "$REPO/templates/systemd" ]]; then
+  note "skip (no systemd templates in this archive)"
+elif ! command -v systemctl >/dev/null 2>&1; then
+  note "skip (systemctl unavailable; see docs/AUTO_SYNC.md for cron fallback)"
+elif [[ ! -f "$AUTO_COMMIT_SWITCH" ]] || [[ "$(tr -d '[:space:]' <"$AUTO_COMMIT_SWITCH")" != enabled ]]; then
+  note "disabled by default; to enable run:"
+  note "  mkdir -p $(dirname "$AUTO_COMMIT_SWITCH") && echo enabled > $AUTO_COMMIT_SWITCH"
+  note "  then re-run ./install.sh   (details: docs/AUTO_SYNC.md)"
+else
+  for unit in llm-wiki-auto-commit.service llm-wiki-auto-commit.timer; do
+    src="$REPO/templates/systemd/$unit"
+    dst="$SYSTEMD_USER_DIR/$unit"
+    [[ -f "$src" ]] || continue
+    # @BIN_TARGET@ 占位符替换成实际 CLI 路径，因此是生成文件而非 symlink
+    rendered=$(sed "s|@BIN_TARGET@|$BIN_TARGET|g" "$src")
+    if [[ -f "$dst" ]] && [[ "$(cat "$dst")" == "$rendered" ]]; then
+      continue
+    elif [[ "$MODE" == check ]]; then
+      deviate "systemd unit out of date or missing: $dst"
+    elif [[ "$MODE" == dryrun ]]; then
+      note "would write $dst"
+    else
+      mkdir -p "$SYSTEMD_USER_DIR"
+      printf '%s\n' "$rendered" >"$dst"
+      chmod 0644 "$dst"
+      note "wrote $dst"
+      CHANGES=$((CHANGES + 1))
+    fi
+  done
+  if [[ "$MODE" == install ]]; then
+    systemctl --user daemon-reload 2>/dev/null || true
+    if systemctl --user enable --now llm-wiki-auto-commit.timer 2>/dev/null; then
+      note "timer enabled: $(systemctl --user list-timers --all llm-wiki-auto-commit.timer 2>/dev/null | sed -n '2p' | tr -s ' ' | cut -d' ' -f1-3)"
+    else
+      deviate "could not enable timer; check: systemctl --user status llm-wiki-auto-commit.timer"
+    fi
+  fi
+fi
+
+printf '\n[6/6] Harness capability matrix\n'
 if (( DO_CONFIGURE )); then
   if "$HARNESS" configure --harness claude --harness opencode --harness grok; then
     note "explicit harness configuration completed"
