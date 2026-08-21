@@ -155,8 +155,9 @@ llm-wiki-event --type bug      "secret-scan 的词边界在 db_password 上失�
 llm-wiki-correct "以后结论用中文" --kind preference
 
 # 召回
-llm-wiki-enrich --session-start        # 关键事实 + 活跃项目 + 未闭环事项
-llm-wiki-enrich --query "secret-scan"  # 针对具体主题的定向召回
+llm-wiki-enrich --session-start           # 关键事实 + 活跃项目 + 未闭环事项
+llm-wiki-enrich --query "secret-scan"     # 定向召回，保留 next-action（用户主动拉取）
+llm-wiki-enrich --query "secret-scan" --ambient  # 自动召回用：只留状态，剥离 next-action
 
 # 离线、无用户数据地量化召回质量与安全边界
 llm-wiki-eval --json
@@ -194,7 +195,7 @@ llm-wiki-promote-notes --json
 
 | 命令 | 用途 |
 |---|---|
-| `llm-wiki-enrich` | critical 会话卡或主题定向召回 |
+| `llm-wiki-enrich` | critical 会话卡或主题定向召回；`--ambient` 剥离 next-action 只留状态 |
 | `llm-wiki-eval` | 离线 Recall@5/MRR 与安全不变式评测 |
 | `llm-wiki-health` | 陈旧页、孤儿页、断链、未复核 raw 等体检 |
 | `llm-wiki-promote-notes` | 只读晋升建议，不自动写 `wiki/` |
@@ -340,6 +341,11 @@ MCP 通过 `claude mcp add --scope user llm-wiki -- <absolute-command>` 添加�
 并在全局 `AGENTS.md` 合并规则。插件会在每个 session 的第一条消息注入一次 critical
 摘要，并对每条用户 prompt 做最多 2000 字符的主题召回；两者都标记为不可信证据。
 
+自动的逐条召回走 `enrich --query <text> --ambient`：`--ambient` 会剥离召回内容里的
+「下一步 / next / todo / 待办」及已完成（✅ / [x] / ~~）行，只注入**状态**，不注入可
+执行意图——防止召回上下文被 Agent 当成待办队列执行（自动化召回不该带 next-action，
+只有用户显式 `enrich --query <项目名>`、不带 `--ambient` 时才带出下一步）。
+
 `LLM_WIKI_OPENCODE_AUTO_DRAFT=1` 才允许 compact 前写脱敏草稿到
 `raw/inbox/auto-drafts/`。默认关闭；开启后也不会写 `wiki/`。插件状态日志只写入
 `XDG_STATE_HOME/llm-wiki/harness/`，不记录 prompt 正文。
@@ -441,6 +447,10 @@ cp templates/shared/mcp.project.json .mcp.json
 `SCHEMA.md` 是给 agent 看的操作契约，不是给人看的说明书。它规定什么该进 `raw/`、
 什么该编译进 `wiki/`、页面怎么命名、链接怎么维护。`llm-wiki-init` 会放一份模板，
 你应该按自己的习惯改它。
+
+数据流的拓扑（三条注入路径、边谓词、排除项、每层 token 预算）见
+[`docs/MEMORY_PIPELINE.md`](docs/MEMORY_PIPELINE.md) 及配套的
+[`docs/MEMORY_PIPELINE.mmd`](docs/MEMORY_PIPELINE.mmd) 图。
 
 ---
 
