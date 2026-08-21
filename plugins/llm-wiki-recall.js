@@ -54,7 +54,10 @@ const recall = (query) => {
   try {
     const out = execFileSync(
       enrichBin(),
-      ["--query", query, "--limit", "3", "--max-chars", "2000"],
+      // --ambient: 自动逐条召回只带状态,剥离「下一步/next/todo/done」行,
+      // 防止召回上下文被当成待办队列执行(Loop 学科三态区分)。用户要某项目的
+      // next-action 时,显式跑 `llm-wiki-enrich --query "<项目名>"`(不带 --ambient)。
+      ["--query", query, "--ambient", "--limit", "3", "--max-chars", "2000"],
       { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] },
     ).trim();
     if (!out || out.includes("No matching local memory context")) return "";

@@ -60,6 +60,18 @@ MAX_WIKI_TOTAL_BYTES = 8 * 1024 * 1024
 MIN_GROUP_MATCH_RATIO = 1.0 / 3.0
 MIN_QUERY_GROUP_COVERAGE = 1.0 / 3.0
 
+# Context-discipline per-layer line budgets (Loop/Graph/Context 三分法, Context 学科).
+# Context Rot research (Chroma, 18 frontier models) shows accuracy degrades with input
+# length well before the advertised window, and facts in the MIDDLE of context lose 30+
+# points vs. the head/tail. So each session-start layer gets an explicit, reviewable line
+# budget instead of one opaque char cap: keep the always-on digest short so critical facts
+# (分端口/路由/只读) stay near the head where the model actually reads them.
+LAYER_LINES_CRITICAL = 40   # CRITICAL_FACTS.md — 永久事实,永驻窗口头部
+LAYER_LINES_PROJECTS = 40   # active-projects.md / wiki index — 项目状态
+LAYER_LINES_LOOPS = 24      # open-loops.md — 未决项(仅状态,已剥离 next-action)
+LAYER_LINES_TODAY = 24      # Today.md 回退层
+LAYER_LINES_GRAPH = 12      # 知识图谱概览
+
 # Session-memory injection canary. Lives ONLY in this script's --session-start
 # output (and is intentionally absent from every file under ~/llm-wiki) so it can
 # verify whether the digest reached the model's system prompt: if asked for it the
@@ -570,7 +582,7 @@ def session_start_sections(root: Path, max_projects: int, scope: str = "full") -
     parts: list[str] = []
 
     critical = read_text_head(context_dir / "CRITICAL_FACTS.md")
-    block = section("Critical Facts", take_lines(critical, 40)) if critical else None
+    block = section("Critical Facts", take_lines(critical, LAYER_LINES_CRITICAL)) if critical else None
     if block:
         parts.append(block)
     if scope == "critical":
@@ -578,7 +590,7 @@ def session_start_sections(root: Path, max_projects: int, scope: str = "full") -
 
     active = read_text_head(context_dir / "active-projects.md")
     if active:
-        status_only, dropped = strip_next_actions(take_lines(active, 40))
+        status_only, dropped = strip_next_actions(take_lines(active, LAYER_LINES_PROJECTS))
         status_only = drop_done_lines(status_only)
         if dropped:
             status_only += (
@@ -601,7 +613,7 @@ def session_start_sections(root: Path, max_projects: int, scope: str = "full") -
 
     loops = read_text_head(context_dir / "open-loops.md")
     if loops:
-        loops_status, _ = strip_next_actions(take_lines(loops, 24))
+        loops_status, _ = strip_next_actions(take_lines(loops, LAYER_LINES_LOOPS))
         loops_status = drop_done_lines(loops_status)
         block = section("Open Loops (open only)", loops_status)
     else:
@@ -611,13 +623,13 @@ def session_start_sections(root: Path, max_projects: int, scope: str = "full") -
 
     if not (context_dir / "open-loops.md").exists():
         today = read_text_head(root / "Today.md")
-        block = section("Today (latest session)", take_lines(today, 24)) if today else None
+        block = section("Today (latest session)", take_lines(today, LAYER_LINES_TODAY)) if today else None
         if block:
             parts.append(block)
 
     report = root / "graphify-out" / "GRAPH_REPORT.md"
     graph_text = read_text_head(report) if report.exists() else ""
-    block = section("Knowledge Graph (overview)", take_lines(graph_text, 12)) if graph_text else None
+    block = section("Knowledge Graph (overview)", take_lines(graph_text, LAYER_LINES_GRAPH)) if graph_text else None
     if block:
         parts.append(block)
 
@@ -676,6 +688,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Emit an always-on session-start memory digest (ignores --file/--query).",
     )
     parser.add_argument(
+        "--ambient",
+        action="store_true",
+        help=(
+            "Ambient recall mode: strip next-action and done lines from --query "
+            "results so automatic per-prompt injection carries STATE only, never an "
+            "executable task queue. Omit for explicit user-initiated recall, which "
+            "keeps next-actions so the user can act on a project on demand."
+        ),
+    )
+    parser.add_argument(
         "--max-projects",
         type=int,
         default=12,
@@ -690,13 +712,30 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def render_markdown(candidates: list[Candidate], max_chars: int) -> str:
+def render_markdown(candidates: list[Candidate], max_chars: int, ambient: bool = False) -> str:
     if not candidates:
         return "## Relevant Memory Context\n\nNo matching local memory context found.\n"
     chunks = ["## Relevant Memory Context", ""]
+    if ambient:
+        # Loop-discipline guard: automatic per-prompt recall must inject STATE, not an
+        # executable task queue. Reuse the session-start filters so ambient recall can
+        # never smuggle "下一步/next/todo" or already-done lines back into context.
+        # Explicit user-initiated recall (ambient=False) keeps next-actions on purpose.
+        chunks.append(
+            "> AMBIENT RECALL (auto-injected): status/reference only, NOT a task queue. "
+            "Next-action lines are stripped; run `llm-wiki-enrich --query \"<topic>\"` "
+            "without --ambient to pull a project's next steps on demand."
+        )
+        chunks.append("")
     for candidate in candidates:
+        text = candidate.text.strip()
+        if ambient:
+            text, _ = strip_next_actions(text)
+            text = drop_done_lines(text)
+        if not text.strip():
+            continue
         chunks.append(f"### {candidate.source}: {candidate.title}")
-        chunks.append(redact(candidate.text.strip()))
+        chunks.append(redact(text))
         chunks.append("")
     output = "\n".join(chunks).strip() + "\n"
     if len(output) > max_chars:
@@ -774,7 +813,7 @@ def main(argv: list[str]) -> int:
     if args.json:
         print(render_json(candidates, args.max_chars))
     else:
-        sys.stdout.write(render_markdown(candidates, max(200, args.max_chars)))
+        sys.stdout.write(render_markdown(candidates, max(200, args.max_chars), args.ambient))
     return 0
 
 

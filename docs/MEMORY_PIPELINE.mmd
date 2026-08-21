@@ -1,0 +1,67 @@
+%% Wikified 记忆管线拓扑图 (Graph 学科 — Loop/Graph/Context 三分法)
+%% 渲染: mmdc -i docs/MEMORY_PIPELINE.mmd -o docs/MEMORY_PIPELINE.png
+%%   或粘贴到 https://mermaid.live
+%%
+%% 读法:
+%%   - 节点 = 一个状态/工作单元;边 = 数据流;边上的谓词 = 注入时的过滤规则。
+%%   - 三态标签: [FACT] 永久只读事实 | [STATE] 当前状态只读 | [ACTIONABLE] 仅显式 --query 才带出的下一步。
+%%   - 「什么被排除 (excluded by construction)」用红色边标注 —— 这是 Context 学科最易漏的一环。
+
+flowchart TD
+    %% ---------- 源材料层 (Write: 存到窗口外) ----------
+    subgraph WRITE["Write 层 — 磁盘,不在上下文窗口"]
+        RAW["raw/ 源材料<br/>(sessions / notes / inbox)"]
+        AUTODRAFT["raw/inbox/auto-drafts/<br/>compact 前落盘,未经人审"]
+        WIKI["wiki/ 编译知识<br/>(离线人工编译, 非运行时压缩)"]
+        EVENTS["memory/events/*.jsonl<br/>typed event (fact/decision/bug...)"]
+        CTX["wiki/context/<br/>CRITICAL_FACTS · active-projects · open-loops"]
+    end
+
+    %% ---------- 编译 (Compress: 人审闸门) ----------
+    RAW -->|"人工编译 (Compress)<br/>信噪比闸门"| WIKI
+    WIKI -->|"提取 typed event"| EVENTS
+    AUTODRAFT -.->|"复盘时人工取舍<br/>[排除] 绝不自动进 wiki"| RAW
+
+    %% ---------- 检索 / 组装 (Select) ----------
+    subgraph SELECT["Select 层 — llm-wiki-enrich"]
+        ENRICH["llm-wiki-enrich"]
+        SESSIONSTART["--session-start<br/>(session-start binary 包一层)"]
+        QUERY["--query &lt;topic&gt;<br/>ambient / explicit 两种模式"]
+    end
+
+    CTX --> SESSIONSTART
+    EVENTS --> QUERY
+    WIKI --> QUERY
+    ENRICH --- SESSIONSTART
+    ENRICH --- QUERY
+
+    %% ---------- 边谓词: 注入时的过滤规则 ----------
+    SESSIONSTART -->|"strip_next_actions()<br/>drop_done_lines()<br/>scope=critical<br/>[排除] 下一步/✅ 行"| INJ_DIGEST
+    QUERY -->|"ambient: strip+drop<br/>[STATE] 只带状态"| INJ_RECALL
+    QUERY -->|"explicit: 保留下一步<br/>[ACTIONABLE] 用户主动拉取"| USER_PULL
+
+    %% ---------- 注入点 (recall.js 多点注入) ----------
+    subgraph INJECT["注入层 — llm-wiki-recall.js (OpenCode plugin)"]
+        INJ_DIGEST["chat.message #1<br/>session-start digest<br/>injected=true 只一次"]
+        INJ_RECALL["chat.message #2<br/>just-in-time 语义召回<br/>每条 prompt 都跑"]
+    end
+
+    INJ_DIGEST -->|"RECALL_NOTICE<br/>untrusted, not a task queue<br/>(framing guard)"| MODEL
+    INJ_RECALL -->|"RECALL_NOTICE<br/>+ 三态标签"| MODEL
+    USER_PULL -->|"用户显式请求时"| MODEL
+
+    MODEL["模型上下文窗口<br/>(Context 层 — 每层 token 预算)"]
+
+    %% ---------- Loop: compact 回写 ----------
+    MODEL -.->|"experimental.session.compacting<br/>opt-in 才落盘"| AUTODRAFT
+
+    %% ---------- 排除项 (Context 学科: what is NOT in context) ----------
+    SECRETS["🔒 ~/secure-notes/<br/>token/key/password"]
+    SECRETS -.->|"[排除] redact() 双层脱敏<br/>绝不进上下文/日志/wiki"| MODEL
+
+    classDef excluded stroke:#c0392b,stroke-width:2px,color:#c0392b;
+    classDef fact stroke:#27ae60,stroke-width:2px;
+    classDef state stroke:#2980b9,stroke-width:2px;
+    class SECRETS,AUTODRAFT excluded;
+    class CTX,INJ_DIGEST fact;
+    class INJ_RECALL state;
