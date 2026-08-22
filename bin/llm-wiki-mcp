@@ -19,17 +19,26 @@ const ROOT = process.env.LLM_WIKI_ROOT || path.join(HOME, 'llm-wiki');
 // 优先用与本文件同目录的兄弟 CLI：MCP server 自身通常就在 BIN 里，
 // 这样即使 env 没设、安装位置又非默认，也能自洽解析。
 const SELF_DIR = __dirname;
+// 惰性解析 + 每次调用复验：常驻 MCP 进程可能在启动后遭遇 CLI 目录搬迁
+// （如工具链从数据仓拆到独立仓），启动时一次性算死的路径会让进程永久 ENOENT
+// 且无法自愈。故缓存命中也要确认文件仍在，失效即重走 SELF_DIR → BIN → PATH。
+const cliCache = new Map();
 const resolveCli = (name) => {
+  const cached = cliCache.get(name);
+  if (cached) {
+    try { if (fs.existsSync(cached)) return cached; } catch { /* ignore */ }
+    cliCache.delete(name);  // 路径已失效，重新解析
+  }
   for (const dir of [SELF_DIR, BIN]) {
     const p = path.join(dir, name);
-    try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }
+    try { if (fs.existsSync(p)) { cliCache.set(name, p); return p; } } catch { /* ignore */ }
   }
   return name;  // 交给 PATH 兜底
 };
-const ENRICH = resolveCli('llm-wiki-enrich');
-const EVENT = resolveCli('llm-wiki-event');
-const HEALTH = resolveCli('llm-wiki-health');
-const GRAPHIFY = resolveCli('graphify');
+const ENRICH = () => resolveCli('llm-wiki-enrich');
+const EVENT = () => resolveCli('llm-wiki-event');
+const HEALTH = () => resolveCli('llm-wiki-health');
+const GRAPHIFY = () => resolveCli('graphify');
 const GRAPH_JSON = path.join(ROOT, 'graphify-out', 'graph.json');
 const READABLE_WIKI_ROOT = path.join(ROOT, 'wiki');
 const MAX_PAGE_BYTES = 256 * 1024;
@@ -124,7 +133,7 @@ async function dispatch(name, args) {
   if (name === 'search_pages') {
     const a = ['--query', String(args.query || ''), '--limit', String(args.limit || 5), '--max-chars', String(args.maxChars || 2000)];
     if (args.project) a.push('--project', String(args.project));
-    return await runRequired(ENRICH, a);
+    return await runRequired(ENRICH(), a);
   }
   if (name === 'read_page') {
     // MCP 的读权限只覆盖人工审校后的 wiki Markdown。仅限制在数据仓根目录仍会
@@ -149,10 +158,10 @@ async function dispatch(name, args) {
   }
   if (name === 'find_related') {
     if (fs.existsSync(GRAPH_JSON)) {
-      const r = await run(GRAPHIFY, ['query', String(args.topic || ''), '--graph', GRAPH_JSON, '--budget', String(args.budget || 1500)]);
+      const r = await run(GRAPHIFY(), ['query', String(args.topic || ''), '--graph', GRAPH_JSON, '--budget', String(args.budget || 1500)]);
       if (r.ok && r.text) return r.text;
     }
-    return await runRequired(ENRICH, ['--query', String(args.topic || ''), '--limit', '5', '--max-chars', '2000']);
+    return await runRequired(ENRICH(), ['--query', String(args.topic || ''), '--limit', '5', '--max-chars', '2000']);
   }
   if (name === 'list_recent_raw') {
     const limit = Number(args.limit || 15);
@@ -192,10 +201,10 @@ async function dispatch(name, args) {
       a.push('--supersedes', normalized);
     }
     a.push(summary);
-    return await runRequired(EVENT, a);
+    return await runRequired(EVENT(), a);
   }
   if (name === 'lint') {
-    return await runRequired(HEALTH, ['--json']);
+    return await runRequired(HEALTH(), ['--json']);
   }
   throw new Error(`Unknown tool: ${name}`);
 }
