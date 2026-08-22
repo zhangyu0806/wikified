@@ -117,6 +117,21 @@ def collect_promote_suggestions(root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def raw_title(text: str, frontmatter: dict[str, str], fallback: str) -> str:
+    """人类可读标题：frontmatter title > 首个 markdown 一级标题 > 文件名。
+
+    文件名是 slug（如 2026-05-23-bilibili-bv1gglr6geer-...），复盘时无法据此判断
+    内容价值，所以必须给出真标题。
+    """
+    if frontmatter.get("title"):
+        return frontmatter["title"].strip().strip('"').strip("'")
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip()[:120]
+    return fallback
+
+
 def collect_uncompiled_raw(root: Path) -> list[dict[str, Any]]:
     """raw/ 里还没编译进 wiki 的源材料（frontmatter status 未标 compiled/promoted/archived）。"""
     raw_dir = root / "raw"
@@ -132,15 +147,15 @@ def collect_uncompiled_raw(root: Path) -> list[dict[str, Any]]:
         if rel.startswith("inbox/"):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        status = ""
+        frontmatter: dict[str, str] = {}
         if text.startswith("---\n"):
             end = text.find("\n---\n", 4)
             if end != -1:
                 for line in text[4:end].splitlines():
-                    if line.lower().startswith("status:"):
-                        status = line.split(":", 1)[1].strip().strip('"').lower()
-                        break
-        if status in done:
+                    if ":" in line:
+                        key, value = line.split(":", 1)
+                        frontmatter[key.strip().lower()] = value.strip()
+        if frontmatter.get("status", "").strip().strip('"').lower() in done:
             continue
         try:
             mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
@@ -149,6 +164,7 @@ def collect_uncompiled_raw(root: Path) -> list[dict[str, Any]]:
         out.append(
             {
                 "path": rel,
+                "title": raw_title(text, frontmatter, path.stem),
                 "category": rel.split("/", 1)[0],
                 "age_days": days_since(mtime),
             }
@@ -331,7 +347,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append("")
         lines.append("最久未动的前 10 个：")
         for r in raw[:10]:
-            lines.append(f"- ({fmt_age(r['age_days'])}) `{r['path']}`")
+            lines.append(f"- ({fmt_age(r['age_days'])}) {r.get('title', '')}")
+            lines.append(f"    `{r['path']}`")
         if len(raw) > 10:
             lines.append(f"- …还有 {len(raw) - 10} 个")
     lines.append("")
