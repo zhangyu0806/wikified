@@ -9,8 +9,9 @@ fcntl-locked. Never edits wiki/ or AGENTS.md itself — promotion stays human-ga
 
 用法：
   llm-wiki-correct "用户纠正/偏好原文" [--kind correction|preference]
-  llm-wiki-correct --list                 列出 pending 队列供人审
-  llm-wiki-correct --resolve <id>          标记某条已晋升（从 pending 移除）
+  llm-wiki-correct --list                       列出 pending 队列供人审
+  llm-wiki-correct --resolve <id>               标记已晋升（从 pending 移除，留档）
+  llm-wiki-correct --resolve <id> --status rejected   看过决定不要（同样留档）
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import os
 import re
 import sys
 import uuid
@@ -27,7 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_ROOT = Path.home() / "llm-wiki"
+# 与 enrich/review 等命令口径一致：优先读 LLM_WIKI_ROOT，避免测试或多库场景误写默认库。
+DEFAULT_ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path.home() / "llm-wiki"))).expanduser()
 SCHEMA_VERSION = "llm-wiki-correction/v1"
 
 # 复用 llm-wiki-event 同款脱敏，保证两条入口的密钥防护口径一致。
@@ -116,21 +119,24 @@ def cmd_list(root: Path) -> int:
     return 0
 
 
-def cmd_resolve(root: Path, target_id: str) -> int:
+def cmd_resolve(root: Path, target_id: str, status: str = "promoted") -> int:
+    # promoted = 已晋升（编译进 CRITICAL_FACTS/AGENTS.md）；rejected = 看过决定不要。
+    # 两者都从 pending 移除，但保留原行（不删），status 记录去向，供复盘审计。
     path = queue_path(root)
     with queue_lock(root):
         rows = read_all(path)
         found = False
         for r in rows:
             if r.get("id") == target_id and r.get("status") == "pending":
-                r["status"] = "promoted"
+                r["status"] = status
                 r["resolved_at"] = datetime.now(timezone.utc).isoformat()
                 found = True
         if not found:
             print(f"未找到 pending 项: {target_id}", file=sys.stderr)
             return 1
         write_rows_unlocked(path, rows)
-    print(f"已标记晋升: {target_id}")
+    verb = "晋升" if status == "promoted" else "拒绝"
+    print(f"已标记{verb}: {target_id}")
     return 0
 
 
@@ -159,7 +165,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("text", nargs="?", help="纠正/偏好原文；省略则从 stdin 读")
     parser.add_argument("--kind", choices=["correction", "preference"], default="correction")
     parser.add_argument("--list", action="store_true", help="列出 pending 队列")
-    parser.add_argument("--resolve", metavar="ID", help="标记某条已晋升")
+    parser.add_argument("--resolve", metavar="ID", help="标记某条已处理（从 pending 移除）")
+    parser.add_argument(
+        "--status",
+        choices=["promoted", "rejected"],
+        default="promoted",
+        help="--resolve 的去向：promoted 已晋升（默认）/ rejected 看过决定不要",
+    )
     parser.add_argument("--root", default=str(DEFAULT_ROOT))
     args = parser.parse_args(argv)
     root = Path(args.root)
@@ -167,7 +179,7 @@ def main(argv: list[str]) -> int:
     if args.list:
         return cmd_list(root)
     if args.resolve:
-        return cmd_resolve(root, args.resolve)
+        return cmd_resolve(root, args.resolve, args.status)
     text = args.text or sys.stdin.read()
     return cmd_add(root, text, args.kind)
 

@@ -167,13 +167,44 @@ llm-wiki-health --json
 
 # 看哪些 quick note 值得晋升进 wiki（只读建议，不自动改）
 llm-wiki-promote-notes --json
+
+# 复盘：一个入口看清「该审什么、堆了多久」（只读只建议）
+llm-wiki-review                 # 人类可读清单，并更新 last-review 时间戳
+llm-wiki-review --peek          # 只看不计入一次正式复盘
 ```
 
 每个命令都有 `--help`。
 
-**典型工作流**：平时用 `note` / `event` / `correct` 随手记；定期跑 `promote-notes`
-看建议，人工决定哪些值得编译进 `wiki/`；任务开始前用 `enrich` 召回。
-晋升永远经人审——这是信噪比的来源。
+**典型工作流**：平时用 `note` / `event` / `correct` 随手记；任务开始前用 `enrich` 召回；
+**定期（约每周）跑一次 `llm-wiki-review`**，它把四路待审——用户纠正、晋升建议、未编译
+raw、过期候选——聚合成一份清单，人工决定每项如何处置。晋升永远经人审——这是信噪比的来源。
+
+### 复盘（review）：给人看的入口
+
+捕获（capture）只是半个循环，复盘（review）才让它变成可用知识——这是 GTD/Zettelkasten
+等所有个人知识系统共同的失败点：只写不审，库就沦为坟场。Wikified 的机制齐全（capture →
+candidate → audit → **approve** → index → retrieve → expire），但 approve 这一环必须是人做。
+`llm-wiki-review` 就是那个低摩擦入口，它**只读、只建议，从不自动改** wiki/events/corrections：
+
+```bash
+llm-wiki-review          # 打印复盘清单：4 个板块，每项给一个动作动词
+```
+
+清单四板块，按优先级：
+
+1. **待处理的纠正/偏好** — `corrections.jsonl` 里 pending 的项。你纠正过 AI 或表达过偏好，
+   但还没进 `CRITICAL_FACTS`/`AGENTS.md`，AI 可能还在犯。处置：
+   - `llm-wiki-correct --resolve <id>` — 已晋升（你已手动编译进规则）
+   - `llm-wiki-correct --resolve <id> --status rejected` — 看过决定不要
+   - 两者都从 pending 移除但**留档**，供审计。
+2. **晋升建议** — `promote-notes` 对 quick-note / auto-draft 的分类打分。
+3. **未编译的源材料** — `raw/` 里还没编译进 `wiki/`、也没标 `status: compiled` 的文件。
+4. **Event 堆积与过期候选** — 按月统计 event；列出已过 ≥2 个半衰期（置信衰减到 1/4 以下）
+   的陈旧项，建议复核去留。过期不删：把 `lifecycle` 手动改 `deprecated` 或用新事实
+   `--supersedes` 取代，旧的留档。
+
+复盘节奏对标 GTD 周复盘：`review` 跑完会更新 `wiki/dashboards/.last-review` 时间戳，
+下次开头显示「距上次复盘 N 天」，超过 7 天醒目提示——**不依赖你记日历**，随时能看。
 
 ---
 
@@ -199,6 +230,7 @@ llm-wiki-promote-notes --json
 | `llm-wiki-eval` | 离线 Recall@5/MRR 与安全不变式评测 |
 | `llm-wiki-health` | 陈旧页、孤儿页、断链、未复核 raw 等体检 |
 | `llm-wiki-promote-notes` | 只读晋升建议，不自动写 `wiki/` |
+| `llm-wiki-review` | 复盘入口：聚合待审纠正/晋升建议/未编译 raw/过期候选，只读只建议 |
 
 **安装、集成与外部接口**
 

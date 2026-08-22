@@ -4,7 +4,7 @@
 # WSL2 cron 未必常驻，故用「会话启动节流」而非 crontab。
 #
 # 用法：
-#   llm-wiki-govern           节流命中则静默秒退；过期则跑 health + promote-notes
+#   llm-wiki-govern           节流命中则静默秒退；过期则跑 health + promote-notes + review 快照
 #   llm-wiki-govern --force    忽略节流强制跑
 #   llm-wiki-govern --status   只看距上次治理多久
 #
@@ -19,6 +19,7 @@ STAMP="$CACHE_DIR/last-run"
 LOCK="$CACHE_DIR/lock"
 HEALTH_OUT="$ROOT/wiki/dashboards/health-weekly.json"
 PROMOTE_OUT="$ROOT/raw/inbox/promote-suggestions.json"
+REVIEW_OUT="$ROOT/wiki/dashboards/review-weekly.json"
 
 command -v llm-wiki-health >/dev/null 2>&1 || exit 0
 [ -d "$ROOT" ] || exit 0
@@ -63,6 +64,11 @@ fi
 rc=0
 timeout 120 llm-wiki-health --json >"$HEALTH_OUT" 2>/dev/null || rc=$?
 timeout 120 llm-wiki-promote-notes --json >"$PROMOTE_OUT" 2>/dev/null || rc=$?
+# review 依赖 promote-suggestions.json，故在其后生成。--peek 不更新 last-review 时间戳：
+# 自动刷新快照 ≠ 人真的复盘了，「距上次复盘」必须只由人跑 llm-wiki-review 触发。
+if command -v llm-wiki-review >/dev/null 2>&1; then
+  timeout 120 llm-wiki-review --json --peek >"$REVIEW_OUT" 2>/dev/null || rc=$?
+fi
 
 # 只有成功才写时间戳；失败不写，下个窗口重试
 [ "$rc" -eq 0 ] && echo "$now" >"$STAMP"
