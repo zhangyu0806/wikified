@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import json
 import re
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -87,6 +88,32 @@ def markdown_files(path: Path) -> list[Path]:
         for item in path.rglob("*.md")
         if item.is_file() and "graphify-out" not in item.relative_to(path).parts
     )
+
+
+def git_ignored(root: Path, paths: list[Path]) -> set[Path]:
+    """返回 paths 中被 git 忽略的子集。
+
+    以 .gitignore 为唯一事实来源，避免在本脚本里硬编码排除名单
+    （如 raw/inbox/auto-drafts/）后与 .gitignore 各自漂移。
+    一次批量调用 check-ignore --stdin，不按文件逐个 fork。
+    退出码语义：0=有命中，1=无命中（非错误），其余（如 128 非 git 仓库）
+    视为无法判定，此时返回空集合退化为不过滤，宁可多报也不漏报。
+    """
+    if not paths or not (root / ".git").exists():
+        return set()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--stdin"],
+            input="\n".join(str(p) for p in paths),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if proc.returncode not in (0, 1):
+        return set()
+    return {Path(line) for line in proc.stdout.splitlines() if line.strip()}
 
 
 def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -261,7 +288,11 @@ def graph_freshness(root: Path) -> tuple[str, list[str]]:
 def check(root: Path, stale_days: int) -> HealthReport:
     today = dt.datetime.now().astimezone().date()
     pages = [parse_page(root, path) for path in markdown_files(root / "wiki")]
+    # git 忽略的 raw 文件（如 raw/inbox/auto-drafts/）不是待编译源材料：
+    # 它们不跨机同步、按机器自生成，计入"可能未编译"只会淹没真实待办。
     raw_files = markdown_files(root / "raw")
+    ignored_raw = git_ignored(root, raw_files)
+    raw_files = [item for item in raw_files if item not in ignored_raw]
 
     stale_pages: list[str] = []
     for page in pages:
