@@ -29,6 +29,7 @@
 - [私有数据问题如何回流公有机制仓](#私有数据问题如何回流公有机制仓)
 - [安装](#安装)
 - [五分钟上手](#五分钟上手)
+- [本机 Web Cockpit](#本机-web-cockpit)
 - [命令清单](#命令清单)
 - [五个 Harness 的支持边界](#五个-harness-的支持边界)
 - [接进 Codex](#接进-codex)
@@ -205,6 +206,25 @@ llm-wiki-review          # 打印复盘清单：4 个板块，每项给一个动
 
 复盘节奏对标 GTD 周复盘：`review` 跑完会更新 `wiki/dashboards/.last-review` 时间戳，
 下次开头显示「距上次复盘 N 天」，超过 7 天醒目提示——**不依赖你记日历**，随时能看。
+
+---
+
+## 本机 Web Cockpit
+
+[Wikified Cockpit](https://github.com/zhangyu0806/wikified-cockpit) 是本项目的官方本机 Web
+界面，把复盘审批、GTD 和 Markdown 阅读放进浏览器，同时继续以 `llm-wiki-*` CLI 和
+普通文件为唯一事实源。
+
+```bash
+git clone https://github.com/zhangyu0806/wikified-cockpit ~/wikified-cockpit
+cd ~/wikified-cockpit
+./install-service.sh
+```
+
+安装后打开 `http://localhost:4177`。Cockpit 代码和 Wikified 机制一起以 MIT 许可证开源；
+它只监听 `127.0.0.1`，读取你本机的 `~/llm-wiki`，不会把私有 `wiki/`、`raw/` 或
+`memory/` 内容放进公开仓库。数据库不在默认位置时，用
+`LLM_WIKI_ROOT=/你的/路径 ./install-service.sh` 显式指定。
 
 ---
 
