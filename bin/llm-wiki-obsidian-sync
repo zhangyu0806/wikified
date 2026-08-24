@@ -149,6 +149,7 @@ def write_index(target_root: Path, source_root: Path, dry_run: bool) -> None:
     ) or "- 暂无 article 记录"
     today_link = "- [[Today|Today 今日沉淀]]" if (source_root / "Today.md").exists() else ""
     dashboard_links = """
+- [[wiki/dashboards/review|复盘清单]]
 - [[wiki/dashboards/projects|项目仪表盘]]
 - [[wiki/dashboards/health|健康检查]]
 """.strip()
@@ -194,7 +195,7 @@ def write_index(target_root: Path, source_root: Path, dry_run: bool) -> None:
 llm-wiki-refresh
 ```
 
-它会生成 `Today.md`、项目仪表盘、健康检查，并自动同步到 Obsidian。只需要单纯重建镜像时，才直接运行 `llm-wiki-obsidian-sync`。
+它会生成 `Today.md`、项目仪表盘、健康检查、复盘清单，并自动同步到 Obsidian。只需要单纯重建镜像时，才直接运行 `llm-wiki-obsidian-sync`。
 
 然后在 Obsidian 中把 `{target_root}` 作为 vault 打开，或用命令打开入口页：
 

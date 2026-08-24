@@ -17,6 +17,12 @@ Today.md
 wiki/dashboards/health-weekly.json
 raw/inbox/promote-suggestions.json
 
+# llm-wiki-refresh / llm-wiki-review 生成的仪表盘（含生成时间戳或各机
+# 不同的 raw/review 清单），各机自建，不跨机同步。
+wiki/dashboards/health.md
+wiki/dashboards/review.md
+wiki/dashboards/review-weekly.json
+
 # ---------- 2. 机器本地运行态 ----------
 # events 的派生反向索引，键含本机绝对路径，可由 events 重建
 memory/touched-files.json

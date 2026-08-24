@@ -6,3 +6,5 @@
 __pycache__/
 *.pyc
 *.lock
+graphify-out/
+.graphify_incremental_auth.json

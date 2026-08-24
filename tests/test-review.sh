@@ -49,6 +49,11 @@ assert not any("done.md" in p for p in paths), "compiled raw wrongly counted"
 ' <<<"$OUT"
 printf 'PASS  review 聚合：corrections/events/expire/uncompiled-raw 分类正确\n'
 
+MD=$(env LLM_WIKI_ROOT="$ROOT" python3 "$REVIEW" --peek --root "$ROOT")
+grep -q '\[\[raw/notes/uncompiled|uncompiled\]\]' <<<"$MD" \
+  || { printf 'FAIL: review Markdown 应把已镜像 raw note 渲染成 Obsidian wikilink\n'; exit 1; }
+printf 'PASS  review Markdown: 已镜像 raw 路径可在 Obsidian 中点击\n'
+
 # --- 2. --peek 不写时间戳，正式跑写时间戳 ---
 STAMP="$ROOT/wiki/dashboards/.last-review"
 [ ! -f "$STAMP" ] || { printf 'FAIL: --peek 不应写时间戳\n'; exit 1; }

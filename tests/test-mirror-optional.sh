@@ -44,10 +44,19 @@ out=$(run env -u LLM_WIKI_MIRROR "$REPO/bin/llm-wiki-refresh" 2>&1) && rc=0 || r
 VAULT="$WORK/vault"
 mkdir -p "$HOME_DIR/.config/llm-wiki" "$VAULT"
 printf 'LLM_WIKI_MIRROR=%s\n' "$VAULT" > "$HOME_DIR/.config/llm-wiki/config.env"
+mkdir -p "$HOME_DIR/llm-wiki/raw/inbox/auto-drafts"
+printf '# ignored auto draft\n' > "$HOME_DIR/llm-wiki/raw/inbox/auto-drafts/ignored.md"
 
 run "$REPO/bin/llm-wiki-refresh" >/dev/null 2>&1 || true
 [[ -f "$VAULT/SCHEMA.md" ]] && ok "配了镜像: 真的同步了 SCHEMA.md" || bad "配了镜像: 未同步"
 [[ -d "$VAULT/wiki" ]] && ok "配了镜像: 真的同步了 wiki/" || bad "配了镜像: 缺 wiki/"
+[[ -f "$VAULT/wiki/dashboards/review.md" ]] \
+  && ok "配了镜像: 同步了复盘清单" || bad "配了镜像: 缺复盘清单"
+grep -q 'wiki/dashboards/review' "$VAULT/LLM Wiki Mirror.md" \
+  && ok "配了镜像: 入口页链接复盘清单" || bad "配了镜像: 入口页缺复盘链接"
+grep -q 'raw/inbox/auto-drafts' "$VAULT/wiki/dashboards/health.md" \
+  && bad "配了镜像: health 误把 ignored auto-drafts 当待编译 raw" \
+  || ok "配了镜像: health 遵从 gitignore 排除 auto-drafts"
 
 # ---------- 3. 真故障不得被吞 ----------
 # 指向一个必然写不进去的路径，obsidian-sync 应真失败且 refresh 要传播出去

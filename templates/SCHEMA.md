@@ -216,7 +216,7 @@ tags: [tag1, tag2]
 
 1. **写入 raw note**：存入 `raw/notes/YYYY-MM-DD-HHMM-{slug}.md`，保持原始含义，不要过度改写。
 2. **只给出编译建议**：长期事实、配置、踩坑、偏好可标记为待复核候选，但不得立即写入 `wiki/`；临时想法或待办只保存在 `raw/notes/`。
-3. **刷新派生页并同步 Obsidian**：运行 `llm-wiki-refresh`，让 note 出现在 `Today.md` 与镜像目录的 `raw/notes/`，同时更新项目仪表盘和健康检查。刷新不是晋升。
+3. **刷新派生页并同步 Obsidian**：运行 `llm-wiki-refresh`，让 note 出现在 `Today.md` 与镜像目录的 `raw/notes/`，同时更新项目仪表盘、健康检查和复盘清单。刷新不是晋升。
 4. **定期复盘 notes 队列**：运行 `llm-wiki-promote-notes` 查看哪些 quick note 值得晋升到 `wiki/` 页面。该命令默认只读 dry-run，不自动修改长期知识库。
 
 Note 文件格式：
@@ -313,7 +313,8 @@ llm-wiki-refresh
 1. 生成/更新 `Today.md`：今日新增记录、今日更新页面、今日踩坑、今日决策、待复盘事项。
 2. 生成/更新 `wiki/dashboards/projects.md`：按 `active / paused / completed` 汇总项目状态。
 3. 生成/更新 `wiki/dashboards/health.md`：检查 30 天未更新页面、active 项目下一步、未编译 raw、断链和工具页敏感关键词。
-4. 自动调用 `llm-wiki-obsidian-sync`，同步到 `LLM_WIKI_MIRROR` 指定的镜像目录（未设置时跳过）。
+4. 生成/更新 `wiki/dashboards/review.md`：把 `llm-wiki-review --peek` 的只读复盘清单落成 Obsidian 可点击页面，不更新 `.last-review`。
+5. 自动调用 `llm-wiki-obsidian-sync`，同步到 `LLM_WIKI_MIRROR` 指定的镜像目录（未设置时跳过）。
 
 只有在调试生成结果、不想同步 Obsidian 时，才使用：
 

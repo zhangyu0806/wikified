@@ -237,7 +237,7 @@ cd ~/wikified-cockpit
 | `llm-wiki-note` | 记零散事实/命令/坑到 `raw/notes/` |
 | `llm-wiki-event` | 记 append-only typed event |
 | `llm-wiki-correct` | 记录纠正与偏好，进入待人审队列 |
-| `llm-wiki-refresh` | 重建 Today、仪表盘与可选镜像；刷新不等于 wiki 晋升 |
+| `llm-wiki-refresh` | 重建 Today、项目/健康/复盘仪表盘与可选镜像；刷新不等于 wiki 晋升 |
 | `llm-wiki-govern` | 带节流的周期治理 |
 | `llm-wiki-dedupe-events` | 按 event id 去重 JSONL |
 | `llm-wiki-secret-scan` | 凭据扫描与 pre-commit 门禁 |

@@ -283,6 +283,29 @@ def fmt_age(days: float | None) -> str:
     return f"{int(days)}天前"
 
 
+def memory_rel_path(value: Any) -> str | None:
+    text = str(value or "").replace("\\", "/")
+    for marker in ("raw/", "wiki/"):
+        idx = text.find(marker)
+        if idx != -1:
+            return text[idx:]
+    return None
+
+
+def obsidian_link(value: Any, *, raw_relative: bool = False) -> str:
+    rel = memory_rel_path(value)
+    if rel is None and raw_relative:
+        rel = "raw/" + str(value or "").lstrip("/")
+    if rel is None:
+        return f"`{value}`"
+    rel = rel.strip()
+    mirrored = rel.startswith(("wiki/", "raw/notes/", "raw/sessions/", "raw/articles/"))
+    if not mirrored or not rel.endswith(".md"):
+        return f"`{value}`"
+    target = rel[:-3]
+    return f"[[{target}|{Path(rel).stem}]]"
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     lines: list[str] = []
     last = report["last_review_days_ago"]
@@ -330,7 +353,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"- [{conf}] {r.get('title', '(无标题)')} "
                 f"→ `{r.get('suggested_target', '?')}` ({src})"
             )
-            lines.append(f"    - {r.get('note', '')}")
+            lines.append(f"    - {obsidian_link(r.get('note', ''))}")
     lines.append("")
 
     # 3. 未编译 raw
@@ -348,7 +371,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append("最久未动的前 10 个：")
         for r in raw[:10]:
             lines.append(f"- ({fmt_age(r['age_days'])}) {r.get('title', '')}")
-            lines.append(f"    `{r['path']}`")
+            lines.append(f"    {obsidian_link(r['path'], raw_relative=True)}")
         if len(raw) > 10:
             lines.append(f"- …还有 {len(raw) - 10} 个")
     lines.append("")

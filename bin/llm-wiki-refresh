@@ -5,6 +5,7 @@ Generated surfaces:
 - Today.md
 - wiki/dashboards/projects.md
 - wiki/dashboards/health.md
+- wiki/dashboards/review.md
 
 This command is intended to run after every human-approved wiki ingest so the
 Obsidian mirror is always current without a separate manual sync step.
@@ -36,9 +37,8 @@ NON_COMPILABLE_STATUSES = {"needs_full_text", "deferred"}
 NEXT_ACTION_RE = re.compile(r"(后续|下一步|待办|TODO|Next)", re.IGNORECASE)
 
 
-def resolve_obsidian_sync() -> str:
-    """Resolve the sibling sync command without depending on the caller's PATH."""
-    name = "llm-wiki-obsidian-sync"
+def resolve_sibling_command(name: str) -> str:
+    """Resolve a sibling command without depending on the caller's PATH."""
     candidates = [Path(__file__).resolve().parent]
     env_bin = os.environ.get("LLM_WIKI_BIN_TARGET")
     if env_bin:
@@ -51,7 +51,8 @@ def resolve_obsidian_sync() -> str:
     return name
 
 
-OBSIDIAN_SYNC_COMMAND = resolve_obsidian_sync()
+OBSIDIAN_SYNC_COMMAND = resolve_sibling_command("llm-wiki-obsidian-sync")
+REVIEW_COMMAND = resolve_sibling_command("llm-wiki-review")
 
 
 @dataclass(frozen=True)
@@ -132,7 +133,47 @@ def first_heading(text: str) -> str:
 def markdown_files(path: Path) -> list[Path]:
     if not path.exists():
         return []
-    return sorted(item for item in path.rglob("*.md") if item.is_file())
+    return sorted(
+        item
+        for item in path.rglob("*.md")
+        if item.is_file() and "graphify-out" not in item.relative_to(path).parts
+    )
+
+
+def git_ignored(root: Path, paths: list[Path]) -> set[Path]:
+    """Return the subset of paths ignored by git.
+
+    The ignore rules are the contract for machine-local drafts such as
+    raw/inbox/auto-drafts/. If this probe is unavailable, fall back to reporting
+    more rather than silently hiding a real review item.
+    """
+    if not paths or not (root / ".git").exists():
+        return set()
+    rels: list[str] = []
+    for path in paths:
+        try:
+            rels.append(path.relative_to(root).as_posix())
+        except ValueError:
+            rels.append(path.as_posix())
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--stdin"],
+            input="\n".join(rels),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if proc.returncode not in (0, 1):
+        return set()
+    return {root / line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+
+def reviewable_raw_files(root: Path) -> list[Path]:
+    raw_files = markdown_files(root / "raw")
+    ignored = git_ignored(root, raw_files)
+    return [path for path in raw_files if path not in ignored]
 
 
 def date_from_name(path: Path) -> str:
@@ -249,6 +290,7 @@ def bullet_list(items: object) -> str:
 def write_projects_dashboard(root: Path, project_pages: list[Page], now: dt.datetime) -> None:
     dashboard = root / "wiki" / "dashboards" / "projects.md"
     dashboard.parent.mkdir(parents=True, exist_ok=True)
+    today = now.date().isoformat()
 
     groups = {"active": [], "paused": [], "completed": [], "unknown": []}
     for page in project_pages:
@@ -264,18 +306,29 @@ def write_projects_dashboard(root: Path, project_pages: list[Page], now: dt.date
         table = "\n".join(rows) if rows else "| — | — | — |"
         sections.append(f"## {title}\n\n| 项目 | 更新 | 下一步 |\n|---|---|---|\n{table}")
 
-    content = f"""---
-title: 项目仪表盘
-created: {now.date().isoformat()}
-updated: {now.date().isoformat()}
-tags: [dashboard, projects, llm-wiki]
----
-
-# 项目仪表盘
+    body = f"""# 项目仪表盘
 
 按 `active / paused / completed` 汇总 `wiki/projects/` 页面。由 `llm-wiki-refresh` 自动生成。
 
 {chr(10).join(sections)}
+"""
+
+    created = today
+    if dashboard.exists():
+        existing_text = read_text(dashboard)
+        existing_meta, existing_body = split_frontmatter(existing_text)
+        created = existing_meta.get("created", today)
+        if existing_body.strip() == body.strip():
+            return
+
+    content = f"""---
+title: 项目仪表盘
+created: {created}
+updated: {today}
+tags: [dashboard, projects, llm-wiki]
+---
+
+{body}
 """
     dashboard.write_text(content, encoding="utf-8")
 
@@ -352,7 +405,7 @@ def write_health(root: Path, pages: list[Page], raw_files: list[Path], now: dt.d
         if rel not in refs:
             uncompiled.append(f"- `{rel}`")
 
-    slugs = {page.path.stem for page in pages} | {"SCHEMA", "Today", "LLM Wiki Mirror", "projects", "health"}
+    slugs = {page.path.stem for page in pages} | {"SCHEMA", "Today", "LLM Wiki Mirror", "projects", "health", "review"}
     broken = []
     for page in pages:
         if page.rel.as_posix() == "wiki/dashboards/health.md":
@@ -408,6 +461,31 @@ tags: [dashboard, health, llm-wiki]
     dashboard.write_text(content, encoding="utf-8")
 
 
+def write_review_dashboard(root: Path, now: dt.datetime) -> None:
+    dashboard = root / "wiki" / "dashboards" / "review.md"
+    dashboard.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [REVIEW_COMMAND, "--root", str(root), "--peek"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(result.stderr or result.stdout or "", end="", file=sys.stderr)
+        raise SystemExit(result.returncode)
+
+    today = now.date()
+    content = f"""---
+title: Wikified 复盘清单
+created: {today.isoformat()}
+updated: {today.isoformat()}
+tags: [dashboard, review, llm-wiki]
+---
+
+{result.stdout.rstrip()}
+"""
+    dashboard.write_text(content, encoding="utf-8")
+
+
 def run_sync(root: Path) -> None:
     """把库镜像到 Obsidian vault。镜像未配置时跳过，不视为失败。
 
@@ -447,7 +525,7 @@ def main() -> None:
     now = dt.datetime.now().astimezone()
     pages = [parse_page(root, path) for path in markdown_files(root / "wiki")]
     project_pages = [page for page in pages if page.rel.parts[:2] == ("wiki", "projects")]
-    raw_files = markdown_files(root / "raw")
+    raw_files = reviewable_raw_files(root)
 
     write_today(root, pages, raw_files, now)
     pages = [parse_page(root, path) for path in markdown_files(root / "wiki")]
@@ -455,6 +533,7 @@ def main() -> None:
     write_projects_dashboard(root, project_pages, now)
     pages = [parse_page(root, path) for path in markdown_files(root / "wiki")]
     write_health(root, pages, raw_files, now)
+    write_review_dashboard(root, now)
 
     if not args.no_sync:
         run_sync(root)
@@ -463,6 +542,7 @@ def main() -> None:
     print(f"today={root / 'Today.md'}")
     print(f"projects_dashboard={root / 'wiki' / 'dashboards' / 'projects.md'}")
     print(f"health_dashboard={root / 'wiki' / 'dashboards' / 'health.md'}")
+    print(f"review_dashboard={root / 'wiki' / 'dashboards' / 'review.md'}")
     print(f"synced={not args.no_sync}")
 
 
