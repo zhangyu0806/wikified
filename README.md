@@ -464,14 +464,18 @@ cp templates/shared/mcp.project.json .mcp.json
 
 `llm-wiki-mcp` 是零依赖的 Node 脚本，薄封装上面的 CLI：
 
-| tool | 作用 |
-|---|---|
-| `search_pages` | 按自然语言查询检索记忆，可用 `project` 做项目隔离 |
-| `read_page` | 按相对路径读某一页 |
-| `find_related` | 经 Graphify 图谱找相关概念（需 `graphify`） |
-| `list_recent_raw` | 列出待编译的原始材料 |
-| `record_event` | 记 typed event，支持有效期与同项目 `supersedes` |
-| `lint` | 跑健康检查 |
+| tool | 作用 | MCP 副作用合同 |
+|---|---|---|
+| `search_pages` | 按自然语言查询检索记忆，可用 `project` 做项目隔离 | read-only、idempotent、local |
+| `read_page` | 按相对路径读某一页 | read-only、idempotent、local |
+| `find_related` | 经 Graphify 图谱找相关概念（需 `graphify`） | read-only、idempotent、local |
+| `list_recent_raw` | 列出待编译的原始材料 | read-only、idempotent、local |
+| `record_event` | 追加 typed event，支持有效期与同项目 `supersedes` | write、non-destructive、non-idempotent、local |
+| `lint` | 跑健康检查 | read-only、idempotent、local |
+
+`tools/list` 会为每个工具返回标准 `readOnlyHint`、`destructiveHint`、
+`idempotentHint` 和 `openWorldHint`。这些 annotation 是给 MCP 客户端的行为提示，
+不是权限或安全边界；路径限制、输入校验和凭据扫描仍由运行时机制强制执行。
 
 **传输层同时支持两种框架**：换行分隔 JSON（NDJSON，MCP stdio 规范，Codex 只认这个）
 与 LSP 风格 `Content-Length` 帧。按入向首个非空字节自动判定，出向镜像入向。

@@ -43,6 +43,23 @@ const GRAPH_JSON = path.join(ROOT, 'graphify-out', 'graph.json');
 const READABLE_WIKI_ROOT = path.join(ROOT, 'wiki');
 const MAX_PAGE_BYTES = 256 * 1024;
 
+// MCP annotations are client-facing hints, not an authorization boundary.
+// Keep the two actual behavior classes centralized so a new tool cannot quietly
+// inherit a misleading default. Runtime path checks and CLI validation remain
+// authoritative even when a client ignores these hints.
+const READ_ONLY_ANNOTATIONS = Object.freeze({
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+});
+const APPEND_ONLY_ANNOTATIONS = Object.freeze({
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+});
+
 const run = (file, args, timeoutMs = 8000) =>
   new Promise((resolve) => {
     execFile(file, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
@@ -61,6 +78,7 @@ const tools = [
   {
     name: 'search_pages',
     description: 'Search Wikified memory by natural-language query. Returns top relevant wiki pages and memory events, ranked by llm-wiki-enrich.',
+    annotations: { title: 'Search Wikified memory', ...READ_ONLY_ANNOTATIONS },
     inputSchema: {
       type: 'object',
       properties: {
@@ -75,6 +93,7 @@ const tools = [
   {
     name: 'read_page',
     description: 'Read one Markdown page below wiki/ by path relative to the Wikified data root (e.g. wiki/context/CRITICAL_FACTS.md). Other repository files, traversal, symlinks escaping wiki/, and oversized pages are rejected.',
+    annotations: { title: 'Read a reviewed wiki page', ...READ_ONLY_ANNOTATIONS },
     inputSchema: {
       type: 'object',
       properties: { path: { type: 'string', description: 'Path relative to the Wikified data root.' } },
@@ -84,6 +103,7 @@ const tools = [
   {
     name: 'find_related',
     description: 'Find related concepts/pages for a topic via the Graphify knowledge graph (BFS traversal). Falls back to search_pages if the graph is absent.',
+    annotations: { title: 'Find related memory', ...READ_ONLY_ANNOTATIONS },
     inputSchema: {
       type: 'object',
       properties: {
@@ -96,6 +116,7 @@ const tools = [
   {
     name: 'list_recent_raw',
     description: 'List recent raw source materials (sessions, notes, inbox) awaiting compilation into the wiki.',
+    annotations: { title: 'List recent raw material', ...READ_ONLY_ANNOTATIONS },
     inputSchema: {
       type: 'object',
       properties: { limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Max entries (default 15).' } },
@@ -104,6 +125,7 @@ const tools = [
   {
     name: 'record_event',
     description: 'Record a typed memory event (fact/decision/bug/preference/etc.) into memory/events. Secrets are auto-redacted by the underlying CLI.',
+    annotations: { title: 'Append a typed memory event', ...APPEND_ONLY_ANNOTATIONS },
     inputSchema: {
       type: 'object',
       properties: {
@@ -125,6 +147,7 @@ const tools = [
   {
     name: 'lint',
     description: 'Run llm-wiki-health to report wiki structural issues (stale pages, orphans, broken links) as JSON.',
+    annotations: { title: 'Inspect Wikified health', ...READ_ONLY_ANNOTATIONS },
     inputSchema: { type: 'object', properties: {} },
   },
 ];

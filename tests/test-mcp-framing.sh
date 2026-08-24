@@ -119,6 +119,28 @@ check_framing() {
     bad "$label: tools/list 工具数为 $n，期望 6"
   fi
 
+  if grep '"id":2' <<<"$res" | node -e '
+    let raw = "";
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      const response = JSON.parse(raw.trim());
+      const tools = response.result.tools;
+      const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+      const required = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"];
+      if (!tools.every((tool) => tool.annotations && required.every((key) => typeof tool.annotations[key] === "boolean"))) process.exit(1);
+      for (const name of ["search_pages", "read_page", "find_related", "list_recent_raw", "lint"]) {
+        const a = byName[name]?.annotations;
+        if (!a || a.readOnlyHint !== true || a.destructiveHint !== false || a.idempotentHint !== true || a.openWorldHint !== false) process.exit(1);
+      }
+      const write = byName.record_event?.annotations;
+      if (!write || write.readOnlyHint !== false || write.destructiveHint !== false || write.idempotentHint !== false || write.openWorldHint !== false) process.exit(1);
+    });
+  '; then
+    ok "$label: 六个工具的 MCP annotations 与实际副作用一致"
+  else
+    bad "$label: MCP annotations 缺失或与工具副作用不一致"
+  fi
+
   if grep '"id":3' <<<"$res" | grep -q 'STUB-OK'; then
     ok "$label: tools/call 到达同目录 CLI"
   else
