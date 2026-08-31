@@ -41,12 +41,33 @@ set -eu
 } >> "$HOME/harness-calls.log"
 state="$HOME/.stub-claude-mcp"
 if [ "${1:-} ${2:-} ${3:-}" = "mcp get llm-wiki" ]; then
-  if [ -s "$state" ]; then printf 'llm-wiki command=%s\n' "$(cat "$state")"; exit 0; fi
+  if [ -s "$state" ]; then
+    python3 - "$state" <<'PY_CLAUDE_GET'
+import pathlib, sys
+parts = pathlib.Path(sys.argv[1]).read_text().rstrip('\n').split('\t')
+print('llm-wiki:')
+print(f'  Command: {parts[0]}')
+print(f"  Args: {' '.join(parts[1:])}")
+print('  Environment:')
+PY_CLAUDE_GET
+    exit 0
+  fi
   printf 'server not found\n' >&2
   exit 1
 fi
 if [ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-} ${6:-}" = "mcp add --scope user llm-wiki --" ]; then
-  printf '%s\n' "${7:-}" > "$state"
+  shift 6
+  if [ "${LLM_WIKI_STUB_FAIL_PROFILE_ADD:-0}" = 1 ] && [ "${1:-}" = "/usr/bin/env" ]; then
+    exit 7
+  fi
+  printf '%s' "${1:-}" > "$state"
+  shift || true
+  for arg in "$@"; do printf '\t%s' "$arg" >> "$state"; done
+  printf '\n' >> "$state"
+  exit 0
+fi
+if [ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-}" = "mcp remove llm-wiki -s user" ]; then
+  rm -f "$state"
   exit 0
 fi
 exit 2
@@ -62,9 +83,16 @@ set -eu
 state="$HOME/.stub-grok-mcp"
 if [ "${1:-} ${2:-} ${3:-}" = "mcp list --json" ]; then
   if [ -s "$state" ]; then
-    python3 - "$(cat "$state")" <<'PY_GROK_JSON'
-import json, sys
-print(json.dumps({'servers': {'llm-wiki': {'command': [sys.argv[1]]}}}))
+    python3 - "$state" <<'PY_GROK_JSON'
+import json, pathlib, sys
+parts = pathlib.Path(sys.argv[1]).read_text().rstrip('\n').split('\t')
+print(json.dumps({'servers': {'llm-wiki': {
+    'command': parts[0],
+    'args': parts[1:],
+    'enabled': True,
+    'name': 'llm-wiki',
+    'scope': 'user',
+}}}))
 PY_GROK_JSON
   else
     printf '{"servers":{}}\n'
@@ -72,7 +100,15 @@ PY_GROK_JSON
   exit 0
 fi
 if [ "${1:-} ${2:-} ${3:-} ${4:-}" = "mcp add llm-wiki --" ]; then
-  printf '%s\n' "${5:-}" > "$state"
+  shift 4
+  printf '%s' "${1:-}" > "$state"
+  shift || true
+  for arg in "$@"; do printf '\t%s' "$arg" >> "$state"; done
+  printf '\n' >> "$state"
+  exit 0
+fi
+if [ "${1:-} ${2:-} ${3:-}" = "mcp remove llm-wiki" ]; then
+  rm -f "$state"
   exit 0
 fi
 exit 2
@@ -140,7 +176,11 @@ if [ "${1:-} ${2:-} ${3:-}" = "mcp get llm-wiki" ]; then
   exit 1
 fi
 if [ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-} ${6:-}" = "mcp add --scope user llm-wiki --" ]; then
-  printf '%s\n' "${7:-}" > "$state"
+  shift 6
+  printf '%s' "${1:-}" > "$state"
+  shift || true
+  for arg in "$@"; do printf '\t%s' "$arg" >> "$state"; done
+  printf '\n' >> "$state"
   exit 0
 fi
 exit 2
@@ -295,8 +335,8 @@ printf '# user Grok rules\n' > "$BH/.grok/AGENTS.md"
 
 install_env "$BH" "$BB" "$B/state" "$B/cache" "$B/skills" "$REPO/install.sh" --configure-harnesses > "$B/first.out" 2> "$B/first.err"
 EXPECTED_MCP="$BB/llm-wiki-mcp"
-printf -v EXPECTED_CLAUDE 'claude\t[mcp]\t[add]\t[--scope]\t[user]\t[llm-wiki]\t[--]\t[%s]' "$EXPECTED_MCP"
-printf -v EXPECTED_GROK 'grok\t[mcp]\t[add]\t[llm-wiki]\t[--]\t[%s]' "$EXPECTED_MCP"
+printf -v EXPECTED_CLAUDE 'claude\t[mcp]\t[add]\t[--scope]\t[user]\t[llm-wiki]\t[--]\t[/usr/bin/env]\t[LLM_WIKI_AGENT_PROFILE=claude]\t[LLM_WIKI_DOMAIN=work]\t[%s]' "$EXPECTED_MCP"
+printf -v EXPECTED_GROK 'grok\t[mcp]\t[add]\t[llm-wiki]\t[--]\t[/usr/bin/env]\t[LLM_WIKI_AGENT_PROFILE=grok]\t[LLM_WIKI_DOMAIN=work]\t[%s]' "$EXPECTED_MCP"
 grep -Fxq "$EXPECTED_CLAUDE" "$BH/harness-calls.log" \
   || fail 'Claude MCP add argv differs from approved user-scope shape'
 grep -Fxq "$EXPECTED_GROK" "$BH/harness-calls.log" \
@@ -318,11 +358,38 @@ home=pathlib.Path(sys.argv[1]); managed=pathlib.Path(sys.argv[2])
 claude=json.loads((home/'.claude/settings.json').read_text())
 cmd=claude['hooks']['SessionStart'][0]['hooks'][0]['command']
 assert str(managed/'llm-wiki-session-start') in cmd and '--format claude' in cmd and '--max-chars 2500' in cmd
+assert '/usr/bin/env' in cmd and 'LLM_WIKI_AGENT_PROFILE=claude' in cmd and 'LLM_WIKI_DOMAIN=work' in cmd
 grok=json.loads((home/'.grok/hooks/llm-wiki.json').read_text())
 cmd=grok['hooks']['SessionStart'][0]['hooks'][0]['command']
 assert str(managed/'llm-wiki-session-start') in cmd and '--format grok-probe' in cmd
+assert '/usr/bin/env' in cmd and 'LLM_WIKI_AGENT_PROFILE=grok' in cmd and 'LLM_WIKI_DOMAIN=work' in cmd
 PY_DYNAMIC_HOOKS
 pass 'generated hooks use the actual managed bin target, not a hard-coded home path'
+
+python3 - "$REPO/bin/llm-wiki-harness" "$BH/.config/opencode/opencode.jsonc" "$EXPECTED_MCP" <<'PY_OPENCODE_PROFILE'
+import runpy,sys
+scope=runpy.run_path(sys.argv[1])
+obj=scope['parse_jsonc'](open(sys.argv[2], encoding='utf-8').read()).value
+command=obj['mcp']['llm-wiki']['command']
+assert command == [
+    '/usr/bin/env',
+    'LLM_WIKI_AGENT_PROFILE=opencode',
+    'LLM_WIKI_DOMAIN=work',
+    'LLM_WIKI_TARGET_AGENTS=codex,opencode',
+    sys.argv[3],
+], command
+assert scope['profiled_mcp_command']('codex', sys.argv[3]) == [
+    '/usr/bin/env',
+    'LLM_WIKI_AGENT_PROFILE=codex',
+    'LLM_WIKI_DOMAIN=work',
+    'LLM_WIKI_TARGET_AGENTS=codex,opencode',
+    sys.argv[3],
+]
+matches=scope['managed_fragment_matches']
+assert matches('LLM_WIKI_AGENT_PROFILE=codex ', 'LLM_WIKI_AGENT_PROFILE=codex')
+assert not matches('LLM_WIKI_AGENT_PROFILE=codex-other ', 'LLM_WIKI_AGENT_PROFILE=codex')
+PY_OPENCODE_PROFILE
+pass 'Codex/OpenCode MCP commands fix work profiles and shared promotion targets outside model input'
 
 for skill in quick-note session-capture wiki-compiler; do
   [[ -L "$B/skills/$skill" ]] || fail "missing lowercase skill link: $skill"
@@ -368,6 +435,204 @@ grep -Fq 'configuration complete: changes=0, failures=0' "$B/second.out" || fail
 install_env "$BH" "$BB" "$B/state" "$B/cache" "$B/skills" "$REPO/install.sh" --check >/dev/null
 pass 'second configuration is byte-stable, backup-stable and does not repeat MCP add'
 
+# B2. Exact configs emitted by the previous release migrate to fixed profiles.
+#     Every native/file mutation is recoverable and the upgraded state is
+#     idempotent. Near-matches remain covered by the conflict case below.
+B2="$WORK/legacy-profile-upgrade"; B2H="$B2/home"; B2B="$B2/managed bin"
+mkdir -p "$B2H/.claude" "$B2H/.config/opencode" "$B2H/.grok/hooks"
+make_stubs "$B2H"
+install_env "$B2H" "$B2B" "$B2/state" "$B2/cache" "$B2/skills" "$REPO/install.sh" >/dev/null
+LEGACY_MCP="$B2B/llm-wiki-mcp"
+LEGACY_ADAPTER="$B2B/llm-wiki-session-start"
+printf '%s\n' "$LEGACY_MCP" > "$B2H/.stub-claude-mcp"
+printf '%s\n' "$LEGACY_MCP" > "$B2H/.stub-grok-mcp"
+cat > "$B2H/.claude/settings.json" <<EOF_LEGACY_CLAUDE
+{
+  "permissions": {"allow": ["Read"]},
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|clear|compact)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'$LEGACY_ADAPTER' --format claude --max-chars 2500",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF_LEGACY_CLAUDE
+cat > "$B2H/.config/opencode/opencode.jsonc" <<EOF_LEGACY_OPENCODE
+{
+  // unrelated user material must remain byte-near and semantically intact
+  "theme": "legacy-user-theme",
+  "mcp": {
+    "other": {"type": "local", "command": ["true"]},
+    "llm-wiki": {
+      "type": "local",
+      "command": ["$LEGACY_MCP"],
+      "enabled": true,
+      "timeout": 5000
+    },
+  },
+}
+EOF_LEGACY_OPENCODE
+cat > "$B2H/.grok/hooks/llm-wiki.json" <<EOF_LEGACY_GROK
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'$LEGACY_ADAPTER' --format grok-probe --max-chars 2500",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF_LEGACY_GROK
+claude_legacy_hash=$(sha "$B2H/.claude/settings.json")
+opencode_legacy_hash=$(sha "$B2H/.config/opencode/opencode.jsonc")
+grok_legacy_hash=$(sha "$B2H/.grok/hooks/llm-wiki.json")
+
+install_env "$B2H" "$B2B" "$B2/state" "$B2/cache" "$B2/skills" \
+  "$B2B/llm-wiki-harness" configure \
+  --harness claude --harness opencode --harness grok > "$B2/upgrade.out" 2> "$B2/upgrade.err"
+
+python3 - "$REPO/bin/llm-wiki-harness" "$B2H" "$B2B" <<'PY_LEGACY_UPGRADE'
+import json, pathlib, runpy, sys
+scope = runpy.run_path(sys.argv[1])
+home = pathlib.Path(sys.argv[2])
+managed = pathlib.Path(sys.argv[3])
+expected = str(managed / 'llm-wiki-mcp')
+adapter = str(managed / 'llm-wiki-session-start')
+
+claude = json.loads((home / '.claude/settings.json').read_text())
+claude_command = claude['hooks']['SessionStart'][0]['hooks'][0]['command']
+assert adapter in claude_command
+assert 'LLM_WIKI_AGENT_PROFILE=claude' in claude_command
+assert 'LLM_WIKI_DOMAIN=work' in claude_command
+assert claude['permissions'] == {'allow': ['Read']}
+
+opencode_text = (home / '.config/opencode/opencode.jsonc').read_text()
+opencode = scope['parse_jsonc'](opencode_text).value
+assert '// unrelated user material must remain' in opencode_text
+assert opencode['theme'] == 'legacy-user-theme'
+assert opencode['mcp']['other'] == {'type': 'local', 'command': ['true']}
+assert opencode['mcp']['llm-wiki']['command'] == scope['profiled_mcp_command']('opencode', expected)
+
+grok = json.loads((home / '.grok/hooks/llm-wiki.json').read_text())
+grok_command = grok['hooks']['SessionStart'][0]['hooks'][0]['command']
+assert adapter in grok_command
+assert 'LLM_WIKI_AGENT_PROFILE=grok' in grok_command
+assert 'LLM_WIKI_DOMAIN=work' in grok_command
+
+for state_name, profile in (('.stub-claude-mcp', 'claude'), ('.stub-grok-mcp', 'grok')):
+    parts = (home / state_name).read_text().rstrip('\n').split('\t')
+    assert parts == scope['profiled_mcp_command'](profile, expected), (profile, parts)
+
+# Codex's previous cross-OS hook is recognized only as one exact managed
+# shape; its unprofiled commandWindows member cannot satisfy current status.
+template = scope['template_json'](pathlib.Path(sys.argv[1]).parents[1] / 'templates/codex/hooks.json')
+current = scope['set_nested_hook_command'](template['hooks']['SessionStart'][0], 'codex', 'codex')
+legacy = scope['legacy_hook_groups'](current, 'codex')
+assert len(legacy) == 2
+assert all('LLM_WIKI_' not in item['hooks'][0]['command'] for item in legacy)
+assert all('LLM_WIKI_' not in item['hooks'][0]['commandWindows'] for item in legacy)
+assert not scope['managed_hooks_match'](
+    legacy[0],
+    ('llm-wiki-session-start', '--format codex', '2500', *scope['profile_environment']('codex')),
+)
+PY_LEGACY_UPGRADE
+pass 'exact legacy MCP and SessionStart shapes upgrade to fixed profiles without losing unrelated content'
+
+for spec in \
+  "$B2H/.claude/settings.json:$claude_legacy_hash" \
+  "$B2H/.config/opencode/opencode.jsonc:$opencode_legacy_hash" \
+  "$B2H/.grok/hooks/llm-wiki.json:$grok_legacy_hash"; do
+  current=${spec%%:*}; wanted=${spec#*:}
+  backup=$(find "$(dirname "$current")" -maxdepth 1 \
+    -name "$(basename "$current").bak-wikified-before-merge-*" -print -quit)
+  [[ -n "$backup" && $(sha "$backup") == "$wanted" ]] \
+    || fail "legacy file migration backup missing/mismatched: $current"
+done
+recovery_count=$(find "$B2/state/llm-wiki/harness/backups" -type f -name '*-mcp-legacy-*.json' | wc -l | tr -d ' ')
+[[ "$recovery_count" -eq 2 ]] || fail 'native legacy MCP migrations did not create exactly two recovery records'
+python3 - "$B2/state/llm-wiki/harness/backups" "$LEGACY_MCP" <<'PY_NATIVE_RECOVERY'
+import json, pathlib, sys
+items = list(pathlib.Path(sys.argv[1]).glob('*-mcp-legacy-*.json'))
+assert {json.loads(path.read_text())['harness'] for path in items} == {'claude', 'grok'}
+for path in items:
+    data = json.loads(path.read_text())
+    assert data['schema_version'] == 'llm-wiki-harness-recovery/v1'
+    assert data['name'] == 'llm-wiki'
+    assert data['command'] == [sys.argv[2]]
+PY_NATIVE_RECOVERY
+grep -Fxq $'claude\t[mcp]\t[remove]\t[llm-wiki]\t[-s]\t[user]' "$B2H/harness-calls.log" \
+  || fail 'Claude legacy MCP was not removed with the exact user-scope argv'
+grep -Fxq $'grok\t[mcp]\t[remove]\t[llm-wiki]' "$B2H/harness-calls.log" \
+  || fail 'Grok legacy MCP was not removed with the exact argv'
+pass 'legacy migrations create byte backups and native recovery records before replacement'
+
+B2_FILES=(
+  "$B2H/.claude/settings.json" "$B2H/.claude/CLAUDE.md"
+  "$B2H/.config/opencode/opencode.jsonc" "$B2H/.config/opencode/AGENTS.md"
+  "$B2H/.grok/hooks/llm-wiki.json" "$B2H/.grok/AGENTS.md"
+)
+b2_hashes_before=$(for f in "${B2_FILES[@]}"; do sha "$f"; done)
+b2_backups_before=$(count_backups "$B2H")
+b2_calls_before=$(sha "$B2H/harness-calls.log")
+install_env "$B2H" "$B2B" "$B2/state" "$B2/cache" "$B2/skills" \
+  "$B2B/llm-wiki-harness" configure \
+  --harness claude --harness opencode --harness grok > "$B2/second.out" 2> "$B2/second.err"
+b2_hashes_after=$(for f in "${B2_FILES[@]}"; do sha "$f"; done)
+[[ "$b2_hashes_before" == "$b2_hashes_after" ]] || fail 'second legacy-upgrade run changed managed/user files'
+[[ "$b2_backups_before" == $(count_backups "$B2H") ]] || fail 'second legacy-upgrade run created file backups'
+[[ "$recovery_count" -eq $(find "$B2/state/llm-wiki/harness/backups" -type f -name '*-mcp-legacy-*.json' | wc -l | tr -d ' ') ]] \
+  || fail 'second legacy-upgrade run created native recovery records'
+[[ "$b2_calls_before" != $(sha "$B2H/harness-calls.log") ]] \
+  || fail 'second legacy-upgrade run did not perform read-only native verification'
+[[ $(grep -Fc $'claude\t[mcp]\t[remove]' "$B2H/harness-calls.log") -eq 1 ]] \
+  || fail 'Claude native legacy migration repeated'
+[[ $(grep -Fc $'grok\t[mcp]\t[remove]' "$B2H/harness-calls.log") -eq 1 ]] \
+  || fail 'Grok native legacy migration repeated'
+grep -Fq 'configuration complete: changes=0, failures=0' "$B2/second.out" \
+  || fail 'second legacy-upgrade configuration was not a no-op'
+pass 'legacy-to-profile migration is byte/backup stable and native mutation is not repeated'
+
+# B3. A failed profiled native add rolls back to the exact legacy command.
+B3="$WORK/legacy-profile-rollback"; B3H="$B3/home"; B3B="$B3/bin"
+mkdir -p "$B3H"
+make_stubs "$B3H"
+install_env "$B3H" "$B3B" "$B3/state" "$B3/cache" "$B3/skills" "$REPO/install.sh" >/dev/null
+printf '%s\n' "$B3B/llm-wiki-mcp" > "$B3H/.stub-claude-mcp"
+set +e
+install_env "$B3H" "$B3B" "$B3/state" "$B3/cache" "$B3/skills" \
+  env LLM_WIKI_STUB_FAIL_PROFILE_ADD=1 \
+  "$B3B/llm-wiki-harness" configure --harness claude > "$B3/out" 2> "$B3/err"
+rc=$?
+set -e
+[[ $rc -eq 1 ]] || fail 'failed profiled native replacement did not fail closed'
+[[ $(cat "$B3H/.stub-claude-mcp") == "$B3B/llm-wiki-mcp" ]] \
+  || fail 'failed profiled native replacement did not restore the legacy command'
+[[ ! -e "$B3H/.claude/settings.json" && ! -e "$B3H/.claude/CLAUDE.md" ]] \
+  || fail 'file configuration ran after native legacy migration failure'
+[[ $(grep -Fc $'claude\t[mcp]\t[remove]' "$B3H/harness-calls.log") -eq 2 ]] \
+  || fail 'native rollback did not make the expected remove/cleanup attempts'
+[[ $(grep -Fc $'claude\t[mcp]\t[add]' "$B3H/harness-calls.log") -eq 2 ]] \
+  || fail 'native rollback did not attempt profiled replacement then legacy restore'
+[[ $(find "$B3/state/llm-wiki/harness/backups" -type f -name 'claude-mcp-legacy-*.json' | wc -l | tr -d ' ') -eq 1 ]] \
+  || fail 'failed native migration did not retain one recovery record'
+grep -Fq 'legacy command restored' "$B3/err" \
+  || fail 'failed native migration did not report successful rollback'
+pass 'failed profiled native migration restores legacy state and blocks later file mutations'
+
 # C. Malformed JSONC is unchanged, snapshotted and reported unverifiable.
 C="$WORK/malformed"; CH="$C/home"; CB="$C/bin"; mkdir -p "$CH/.opencode/bin" "$CH/.config/opencode"
 printf '#!/bin/sh\nexit 0\n' > "$CH/.opencode/bin/opencode"; chmod 0755 "$CH/.opencode/bin/opencode"
@@ -389,8 +654,8 @@ pass 'malformed JSONC fails closed, remains byte-identical and gets a recovery s
 D="$WORK/conflict"; DH="$D/home"; DB="$D/bin"; mkdir -p "$DH/.opencode/bin" "$DH/.config/opencode"
 printf '#!/bin/sh\nexit 0\n' > "$DH/.opencode/bin/opencode"; chmod 0755 "$DH/.opencode/bin/opencode"
 install_env "$DH" "$DB" "$D/state" "$D/cache" "$D/skills" "$REPO/install.sh" >/dev/null
-cat > "$DH/.config/opencode/opencode.json" <<'EOF_CONFLICT_JSON'
-{"mcp":{"llm-wiki":{"type":"local","command":["/user/owned/llm-wiki-mcp"],"enabled":true}},"theme":"keep"}
+cat > "$DH/.config/opencode/opencode.json" <<EOF_CONFLICT_JSON
+{"mcp":{"llm-wiki":{"type":"local","command":["$DB/llm-wiki-mcp"],"enabled":true,"timeout":5000,"owner":"user"}},"theme":"keep"}
 EOF_CONFLICT_JSON
 conflict_hash=$(sha "$DH/.config/opencode/opencode.json")
 set +e
@@ -413,9 +678,16 @@ set -eu
 state="$HOME/.stub-grok-mcp"
 if [ "${1:-} ${2:-} ${3:-}" = "mcp list --json" ]; then
   if [ -s "$state" ]; then
-    python3 - "$(cat "$state")" <<'PY_GROK_ONLY_JSON'
-import json,sys
-print(json.dumps({'servers':{'llm-wiki':{'command':[sys.argv[1]]}}}))
+    python3 - "$state" <<'PY_GROK_ONLY_JSON'
+import json, pathlib, sys
+parts = pathlib.Path(sys.argv[1]).read_text().rstrip('\n').split('\t')
+print(json.dumps({'servers': {'llm-wiki': {
+    'command': parts[0],
+    'args': parts[1:],
+    'enabled': True,
+    'name': 'llm-wiki',
+    'scope': 'user',
+}}}))
 PY_GROK_ONLY_JSON
   else
     printf '{"servers":{}}\n'
@@ -423,7 +695,11 @@ PY_GROK_ONLY_JSON
   exit 0
 fi
 if [ "${1:-} ${2:-} ${3:-} ${4:-}" = "mcp add llm-wiki --" ]; then
-  printf '%s\n' "${5:-}" > "$state"
+  shift 4
+  printf '%s' "${1:-}" > "$state"
+  shift || true
+  for arg in "$@"; do printf '\t%s' "$arg" >> "$state"; done
+  printf '\n' >> "$state"
   exit 0
 fi
 exit 2
@@ -681,10 +957,32 @@ python3 - "$REPO/templates/shared/mcp.project.json" <<'PY_SHARED_MCP'
 import json,sys
 obj=json.load(open(sys.argv[1], encoding='utf-8'))
 entry=obj['mcpServers']['llm-wiki']
-assert entry['command']=='sh'
-assert entry['args'][0]=='-lc'
-assert 'llm-wiki-mcp' in entry['args'][1]
+assert entry['command']=='/usr/bin/env'
+assert entry['args'][0]=='LLM_WIKI_AGENT_PROFILE=coding'
+assert entry['args'][1]=='LLM_WIKI_DOMAIN=work'
+assert entry['args'][2:4]==['/bin/sh', '-lc']
+assert 'llm-wiki-mcp' in entry['args'][4]
 PY_SHARED_MCP
+python3 - "$REPO" <<'PY_PROFILED_TEMPLATES'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+cases = {
+    'claude/settings.hooks.json': ('claude', 'hooks'),
+    'codex/hooks.json': ('codex', 'hooks'),
+    'cursor/hooks.json': ('cursor', 'hooks'),
+    'cursor/mcp.json': ('cursor', 'mcp'),
+    'grok/hooks.json': ('grok', 'hooks'),
+}
+for relative, (profile, _kind) in cases.items():
+    text=(root/'templates'/relative).read_text(encoding='utf-8')
+    assert f'LLM_WIKI_AGENT_PROFILE={profile}' in text, relative
+    assert 'LLM_WIKI_DOMAIN=work' in text, relative
+opencode=(root/'templates/opencode/opencode.mcp.jsonc').read_text(encoding='utf-8')
+assert '"/usr/bin/env"' in opencode
+assert 'LLM_WIKI_AGENT_PROFILE=opencode' in opencode
+assert 'LLM_WIKI_DOMAIN=work' in opencode
+assert 'LLM_WIKI_TARGET_AGENTS=codex,opencode' in opencode
+PY_PROFILED_TEMPLATES
 grep -Fqi 'untrusted evidence' "$REPO/templates/claude/CLAUDE.recall.md" || fail 'Claude trust boundary missing'
 grep -Fqi 'experimental memory' "$REPO/templates/grok/AGENTS.recall.md" || fail 'Grok native-memory boundary missing'
 grep -Fqi 'Cloud Agents' "$REPO/templates/cursor/AGENTS.recall.md" || fail 'Cursor Cloud/local boundary missing'

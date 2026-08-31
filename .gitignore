@@ -1,3 +1,49 @@
+# ============================================================
+# Wikified — 跨机同步排除清单
+# 分三类：可再生派生物 / 机器本地运行态 / 未经人审的敏感暂存
+# 修改前请读 templates/SYNC.md「三层模型」一节
+# ============================================================
+
+# ---------- 1. 可再生派生物（各机自己生成，不进 git）----------
+# graphify 图谱产物：4.6M，AST 重建无 API 成本
+graphify-out/
+wiki/graphify-out/
+.graphify_incremental_auth.json
+
+# llm-wiki-refresh 生成的每日入口页（每机每天都会重写，必冲突）
+Today.md
+
+# llm-wiki-govern 生成的治理报告（各机按自己节流窗口生成）
+wiki/dashboards/health-weekly.json
+raw/inbox/promote-suggestions.json
+
+# llm-wiki-refresh / llm-wiki-review 生成的仪表盘（含生成时间戳 + 各机
+# 不同的 uncompiled_raw 清单，跟踪它会导致：每次治理都脏 → remote-sync
+# 坚持「提交需显式意图」拒绝自动提交 → 同步永久卡住。与上面的
+# health-weekly.json 对齐，改为各机自建。用 llm-wiki-refresh 重新生成。
+wiki/dashboards/health.md
+wiki/dashboards/review.md
+wiki/dashboards/review-weekly.json
+
+# ---------- 2. 机器本地运行态 ----------
+# events 的派生反向索引，键含本机绝对路径，可由 events 重建
+memory/touched-files.json
+
+# 锁文件
+*.lock
+.corrections.lock
+memory/.memory.lock
+
+# Cockpit 写 open-loops 前的自动备份（运行时产物）
+wiki/context/.open-loops.bak
+
+# ---------- 3. 未经人审的敏感暂存 ----------
+# compact 前自动落盘的原始 prompt 片段，含未脱敏凭据（历史上出现过
+# Groq key / X cookie / OpenAI key）。属于「未经人审，不是 wiki 内容」，
+# 人审后应晋升进 raw/notes 或 wiki，不跨机同步。
+raw/inbox/auto-drafts/
+
+# ---------- 常规噪音 ----------
 .DS_Store
 *.swp
 *~
@@ -5,6 +51,3 @@
 *.bak-*
 __pycache__/
 *.pyc
-*.lock
-graphify-out/
-.graphify_incremental_auth.json

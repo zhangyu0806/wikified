@@ -24,6 +24,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,9 @@ REVIEW_CADENCE_DAYS = 7
 # event expire 候选的默认判据：已过 N 个半衰期（confidence 衰减到 < 1/2^N）。
 # 保守取 2 个半衰期——衰减到原值 1/4 以下，基本已不影响召回排序，适合复核去留。
 DEFAULT_EXPIRE_HALFLIVES = 2.0
+EVENT_SCHEMA_V3 = "llm-wiki-memory-event/v3"
+ACTOR_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,127}$")
+TARGET_AGENT_RE = re.compile(r"^(?:\*|[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,127})$")
 
 
 def now_utc() -> datetime:
@@ -85,7 +89,182 @@ def read_json(path: Path) -> Any:
         return None
 
 
-# ---------- 四路聚合 ----------
+def normalized_supersedes_ids(row: dict[str, Any]) -> list[str]:
+    raw = row.get("supersedes", [])
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return list(dict.fromkeys(item for item in raw if isinstance(item, str) and item))
+
+
+def has_valid_governance_transition(row: dict[str, Any]) -> bool:
+    actor = row.get("actor")
+    if (
+        not isinstance(actor, dict)
+        or set(actor) != {"type", "id"}
+        or actor.get("type") not in {"human", "ai", "system"}
+        or not isinstance(actor.get("id"), str)
+        or not ACTOR_ID_RE.fullmatch(actor["id"])
+    ):
+        return False
+    actor_type = actor["type"]
+    status = row.get("review_status", row.get("review_state"))
+    epistemic = row.get("epistemic_status")
+    if status not in {"pending", "approved", "rejected"} or epistemic not in {
+        "source-record",
+        "human-stated",
+        "ai-proposed",
+        "human-confirmed",
+        "externally-verified",
+        "disputed",
+        "legacy-imported",
+    }:
+        return False
+    if epistemic in {"human-stated", "human-confirmed"} and actor_type != "human":
+        return False
+    if status == "pending":
+        return actor_type == "ai" and epistemic == "ai-proposed"
+    if actor_type == "ai" or epistemic == "ai-proposed":
+        return False
+    if status == "rejected":
+        return actor_type == "human" and epistemic == "disputed"
+    if epistemic == "disputed":
+        return False
+    return status == "approved" and epistemic in {
+        "source-record",
+        "human-stated",
+        "human-confirmed",
+        "externally-verified",
+        "legacy-imported",
+    }
+
+
+def is_effective_terminal_revision(row: dict[str, Any]) -> bool:
+    event_id = row.get("id")
+    if not isinstance(event_id, str) or not re.fullmatch(r"[0-9a-f]{16}", event_id):
+        return False
+    if row.get("schema_version") != EVENT_SCHEMA_V3:
+        return False
+    if row.get("memory_id") != f"event:{event_id}":
+        return False
+    if "review_status" not in row or "review_state" in row or "target_profiles" in row:
+        return False
+    if row.get("lifecycle", "active") != "active":
+        return False
+    if not has_valid_governance_transition(row):
+        return False
+    status = row.get("review_status", row.get("review_state"))
+    if status not in {"approved", "rejected"}:
+        return False
+    if not isinstance(row.get("project"), str) or not row["project"].strip():
+        return False
+    if row.get("domain") not in {"work", "personal"}:
+        return False
+    if row.get("sensitivity") not in {"public", "internal", "confidential", "restricted"}:
+        return False
+    targets = row.get("target_agents")
+    if (
+        not isinstance(targets, list)
+        or not targets
+        or not all(isinstance(target, str) and TARGET_AGENT_RE.fullmatch(target) for target in targets)
+        or len(targets) != len(set(targets))
+    ):
+        return False
+    supersedes = row.get("supersedes", [])
+    if not isinstance(supersedes, list) or not all(
+        isinstance(item, str) and re.fullmatch(r"[0-9a-f]{16}", item)
+        for item in supersedes
+    ):
+        return False
+    valid_from = parse_time(row.get("valid_from") or row.get("timestamp"))
+    return valid_from is not None and valid_from <= now_utc()
+
+
+def terminally_superseded_ids(events_by_id: dict[str, dict[str, Any]]) -> set[str]:
+    closed: set[str] = set()
+    for row in events_by_id.values():
+        if not is_effective_terminal_revision(row):
+            continue
+        row_project = str(row.get("project") or "").strip()
+        row_domain = str(row.get("domain") or "").strip().lower()
+        for target_id in normalized_supersedes_ids(row):
+            target = events_by_id.get(target_id)
+            if target is None:
+                continue
+            target_project = str(target.get("project") or "").strip()
+            target_domain = str(target.get("domain") or "").strip().lower()
+            if target_project == row_project and target_domain == row_domain:
+                closed.add(target_id)
+    return closed
+
+
+def is_pending_ai_proposal(row: dict[str, Any]) -> bool:
+    event_id = row.get("id")
+    if not isinstance(event_id, str) or not re.fullmatch(r"[0-9a-f]{16}", event_id):
+        return False
+    if row.get("schema_version") != EVENT_SCHEMA_V3:
+        return False
+    if row.get("memory_id") != f"event:{event_id}":
+        return False
+    if "review_status" not in row or "review_state" in row or "target_profiles" in row:
+        return False
+    if row.get("lifecycle", "active") != "active":
+        return False
+    if row.get("review_status", row.get("review_state")) != "pending":
+        return False
+    actor = row.get("actor")
+    if (
+        not isinstance(actor, dict)
+        or set(actor) != {"type", "id"}
+        or actor.get("type") != "ai"
+        or not isinstance(actor.get("id"), str)
+        or not ACTOR_ID_RE.fullmatch(actor["id"])
+    ):
+        return False
+    if row.get("epistemic_status") != "ai-proposed":
+        return False
+    if not isinstance(row.get("project"), str) or not row["project"].strip():
+        return False
+    if row.get("domain") not in {"work", "personal"}:
+        return False
+    if row.get("sensitivity") not in {"public", "internal", "confidential", "restricted"}:
+        return False
+    targets = row.get("target_agents")
+    if not (
+        isinstance(targets, list)
+        and bool(targets)
+        and all(isinstance(target, str) and TARGET_AGENT_RE.fullmatch(target) for target in targets)
+        and len(targets) == len(set(targets))
+    ):
+        return False
+    supersedes = row.get("supersedes", [])
+    return isinstance(supersedes, list) and all(
+        isinstance(item, str) and re.fullmatch(r"[0-9a-f]{16}", item)
+        for item in supersedes
+    )
+
+
+def supersedes_target_summary(
+    event_id: str, events_by_id: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    target = events_by_id.get(event_id)
+    if target is None:
+        return {"id": event_id, "found": False, "summary": "(target event not found)"}
+    return {
+        "id": event_id,
+        "found": True,
+        "type": target.get("type", "event"),
+        "project": target.get("project"),
+        "summary": str(target.get("summary", ""))[:160],
+        "review_status": target.get("review_status", target.get("review_state", "approved")),
+        "lifecycle": target.get("lifecycle", "active"),
+        "domain": target.get("domain", "work"),
+        "sensitivity": target.get("sensitivity", "internal"),
+    }
+
+
+# ---------- 五路聚合 ----------
 
 def collect_corrections(root: Path) -> list[dict[str, Any]]:
     """pending 的用户纠正/偏好——最高优先级：这是你纠正过 AI、但可能还没生效的东西。"""
@@ -115,6 +294,65 @@ def collect_promote_suggestions(root: Path) -> list[dict[str, Any]]:
     rows = [r for r in data if isinstance(r, dict)]
     rows.sort(key=lambda x: order.get(str(x.get("confidence", "low")), 3))
     return rows
+
+
+def collect_pending_proposals(root: Path) -> list[dict[str, Any]]:
+    """Unsuperseded AI claims waiting for an explicit human decision."""
+    events_dir = root / "memory" / "events"
+    if not events_dir.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    events_by_id: dict[str, dict[str, Any]] = {}
+    duplicate_ids: set[str] = set()
+    for path in sorted(events_dir.glob("*.jsonl")):
+        for row in read_jsonl(path):
+            rows.append(row)
+            event_id = row.get("id")
+            if isinstance(event_id, str) and event_id:
+                if event_id in duplicate_ids:
+                    continue
+                if event_id in events_by_id:
+                    events_by_id.pop(event_id, None)
+                    duplicate_ids.add(event_id)
+                    continue
+                events_by_id[event_id] = row
+    superseded = terminally_superseded_ids(events_by_id)
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        event_id = str(row.get("id", ""))
+        if not event_id or event_id in duplicate_ids or event_id in superseded:
+            continue
+        if not is_pending_ai_proposal(row):
+            continue
+        targets = row.get("target_agents", row.get("target_profiles", ["*"]))
+        if isinstance(targets, str):
+            targets = [targets]
+        supersedes_ids = normalized_supersedes_ids(row)
+        out.append(
+            {
+                "id": event_id,
+                "type": row.get("type", "event"),
+                "project": row.get("project"),
+                "summary": str(row.get("summary", ""))[:160],
+                "source": row.get("source", "ai"),
+                "domain": row.get("domain", "work"),
+                "sensitivity": row.get("sensitivity", "internal"),
+                "target_agents": targets if isinstance(targets, list) else ["*"],
+                "supersedes_ids": supersedes_ids,
+                "supersedes_targets": [
+                    supersedes_target_summary(target_id, events_by_id)
+                    for target_id in supersedes_ids
+                ],
+                "requires_global_target_confirmation": any(
+                    str(target) == "*" or str(target).lower() == "all"
+                    for target in (targets if isinstance(targets, list) else ["*"])
+                ),
+                "requires_supersedes_confirmation": bool(supersedes_ids),
+                "age_days": days_since(parse_time(row.get("timestamp"))),
+            }
+        )
+    out.sort(key=lambda item: item.get("age_days") or 0, reverse=True)
+    return out
 
 
 def raw_title(text: str, frontmatter: dict[str, str], fallback: str) -> str:
@@ -221,6 +459,8 @@ def collect_stale_events(root: Path, half_lives: float) -> tuple[dict[str, int],
             continue
         if str(r.get("id", "")) in superseded:
             continue
+        if r.get("review_status", r.get("review_state", "approved")) != "approved":
+            continue
         conf, lives = decayed_confidence(r, half_lives)
         if lives is None or lives < half_lives:
             continue
@@ -267,6 +507,7 @@ def build_report(root: Path, half_lives: float) -> dict[str, Any]:
         "last_review_days_ago": days_since(read_last_review(root)),
         "cadence_days": REVIEW_CADENCE_DAYS,
         "corrections_pending": collect_corrections(root),
+        "ai_proposals_pending": collect_pending_proposals(root),
         "promote_suggestions": collect_promote_suggestions(root),
         "uncompiled_raw": collect_uncompiled_raw(root),
         "event_counts": counts,
@@ -339,9 +580,58 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append("或 `llm-wiki-correct --resolve <id> --status rejected`（看过决定不要）。")
     lines.append("")
 
-    # 2. 晋升建议
+    # 2. AI proposals
+    proposals = report["ai_proposals_pending"]
+    lines.append(f"## 2. 待审核的 AI 记忆提案（{len(proposals)} 条）")
+    lines.append("")
+    if not proposals:
+        lines.append("_队列为空。Agent 写入不会绕过人工闸门。_")
+    else:
+        lines.append("_这些提案已持久化，但批准前不会进入 Codex/OpenCode 召回。_")
+        lines.append("")
+        for row in proposals:
+            project = f"/{row['project']}" if row.get("project") else ""
+            targets = ",".join(str(item) for item in row.get("target_agents", []))
+            lines.append(
+                f"- `[{row['id']}]` {row['type']}{project} "
+                f"({fmt_age(row['age_days'])}, {row['domain']}/{row['sensitivity']}, →{targets}) "
+                f"{row['summary']}"
+            )
+            supersedes_targets = row.get("supersedes_targets", [])
+            if supersedes_targets:
+                lines.append("  - ⚠️ 批准后将替代：")
+                for target in supersedes_targets:
+                    target_project = (
+                        f"/{target['project']}" if target.get("project") else ""
+                    )
+                    if target.get("found"):
+                        lines.append(
+                            f"    - `[{target['id']}]` {target.get('type', 'event')}"
+                            f"{target_project} ({target.get('review_status', '?')}/"
+                            f"{target.get('lifecycle', '?')}, {target.get('domain', '?')}/"
+                            f"{target.get('sensitivity', '?')}) {target.get('summary', '')}"
+                        )
+                    else:
+                        lines.append(
+                            f"    - `[{target['id']}]` {target.get('summary', '(target event not found)')}"
+                        )
+            approve_flags: list[str] = []
+            if row.get("requires_global_target_confirmation"):
+                approve_flags.append("--confirm-global-target")
+            if row.get("requires_supersedes_confirmation"):
+                approve_flags.append("--confirm-supersedes")
+            suffix = " " + " ".join(approve_flags) if approve_flags else ""
+            lines.append(
+                f"  - 批准：`llm-wiki-event --approve {row['id']}{suffix}`"
+            )
+            lines.append(f"  - 拒绝：`llm-wiki-event --reject {row['id']}`")
+        lines.append("")
+        lines.append("批准会追加 human-confirmed 修订；拒绝会保留审计记录。两者都不改历史。")
+    lines.append("")
+
+    # 3. 晋升建议
     promo = report["promote_suggestions"]
-    lines.append(f"## 2. 晋升建议（{len(promo)} 条 quick-note / auto-draft）")
+    lines.append(f"## 3. 晋升建议（{len(promo)} 条 quick-note / auto-draft）")
     lines.append("")
     if not promo:
         lines.append("_无。跑 `llm-wiki-govern --force` 可刷新建议。_")
@@ -356,9 +646,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(f"    - {obsidian_link(r.get('note', ''))}")
     lines.append("")
 
-    # 3. 未编译 raw
+    # 4. 未编译 raw
     raw = report["uncompiled_raw"]
-    lines.append(f"## 3. 未编译的源材料（{len(raw)} 个 raw 文件）")
+    lines.append(f"## 4. 未编译的源材料（{len(raw)} 个 raw 文件）")
     lines.append("")
     if not raw:
         lines.append("_全部已编译或已归档。_")
@@ -376,9 +666,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(f"- …还有 {len(raw) - 10} 个")
     lines.append("")
 
-    # 4. event 堆积 + expire 候选
+    # 5. event 堆积 + expire 候选
     exp = report["expire_candidates"]
-    lines.append(f"## 4. Event 堆积与过期候选（共 {report['event_total']} 条 event）")
+    lines.append(f"## 5. Event 堆积与过期候选（共 {report['event_total']} 条 event）")
     lines.append("")
     counts = report["event_counts"]
     if counts:

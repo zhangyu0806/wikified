@@ -73,6 +73,6 @@ ARG_LOG="$WORK/enrich-args.log"
 env HOME="$HOME_DIR" XDG_STATE_HOME="$STATE" LLM_WIKI_ROOT="$ROOT" \
   LLM_WIKI_BIN_TARGET="$BIN" OPENCODE_ARG_LOG="$ARG_LOG" REDACTION_FIXTURE="$REDACTION_FIXTURE" \
   node "$WORK/drive.mjs"
-grep -Fxq -- '--session-start --session-start-scope critical --max-chars 2500' "$ARG_LOG"
-grep -Fq -- '--query normal prompt --ambient --limit 3 --max-chars 2000' "$ARG_LOG"
+grep -Fxq -- '--session-start --session-start-scope critical --agent-profile opencode --max-chars 2500' "$ARG_LOG"
+grep -Fq -- '--agent-profile opencode --query normal prompt --ambient --limit 3 --max-chars 2000' "$ARG_LOG"
 printf 'PASS  OpenCode uses shared bounded adapter, trust-labelled JIT recall and opt-in redacted drafts\n'

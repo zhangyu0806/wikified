@@ -42,9 +42,15 @@ for format in plain claude codex; do
   pass "$format output is trust-labelled, redacted and hard-bounded"
 done
 
-grep -Fxq -- '--session-start --session-start-scope critical --max-chars 2500' "$ARG_LOG" \
+grep -Fxq -- '--session-start --session-start-scope critical --agent-profile coding --max-chars 2500' "$ARG_LOG" \
   || fail 'adapter did not call enrich with exact critical-only 2500 shape'
 pass 'enrich invocation is exact critical-only shape'
+
+"${base_env[@]}" LLM_WIKI_AGENT_PROFILE=opencode \
+  "$BIN/llm-wiki-session-start" --format plain --max-chars 2500 >/dev/null
+grep -Fxq -- '--session-start --session-start-scope critical --agent-profile opencode --max-chars 2500' "$ARG_LOG" \
+  || fail 'adapter did not bind the harness profile into enrich'
+pass 'fixed harness profile is propagated to policy-enforced retrieval'
 
 cursor=$("${base_env[@]}" "$BIN/llm-wiki-session-start" --format cursor --max-chars 2500)
 printf '%s' "$cursor" | python3 -c '

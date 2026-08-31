@@ -56,7 +56,7 @@ def resolve_enrich() -> Path | None:
     return None
 
 
-def build_context(max_chars: int) -> tuple[bool, str]:
+def build_context(max_chars: int, agent_profile: str) -> tuple[bool, str]:
     enrich = resolve_enrich()
     if enrich is None:
         return False, ""
@@ -67,6 +67,8 @@ def build_context(max_chars: int) -> tuple[bool, str]:
                 "--session-start",
                 "--session-start-scope",
                 "critical",
+                "--agent-profile",
+                agent_profile,
                 "--max-chars",
                 str(max_chars),
             ],
@@ -121,9 +123,14 @@ def main() -> int:
         default="plain",
     )
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    parser.add_argument(
+        "--agent-profile",
+        default=os.environ.get("LLM_WIKI_AGENT_PROFILE", "coding"),
+        help="Fixed caller profile used by the retrieval policy.",
+    )
     args = parser.parse_args()
     max_chars = min(HARD_MAX_CHARS, max(1, args.max_chars))
-    ok, context = build_context(max_chars)
+    ok, context = build_context(max_chars, args.agent_profile)
 
     if args.format == "grok-probe":
         payload = {

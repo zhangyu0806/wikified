@@ -9,6 +9,7 @@ merged with backups, validation, atomic replacement, and conflict detection.
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import datetime as dt
 import json
@@ -24,6 +25,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 NAME = "llm-wiki"
+ENV_COMMAND = "/usr/bin/env"
+MEMORY_DOMAIN = "work"
 MARKER_BEGIN = "<!-- BEGIN llm-wiki-recall -->"
 MARKER_END = "<!-- END llm-wiki-recall -->"
 VALID_STATES = ("absent", "installed-unconfigured", "configured", "stale/wrong-link", "unverifiable")
@@ -259,6 +262,20 @@ def append_array_item(text: str, node: JsonNode, value: Any) -> str:
     return text[:position] + insertion + text[position:]
 
 
+def replace_node_value(text: str, node: JsonNode, value: Any) -> str:
+    """Replace one parsed JSON/JSONC value while preserving its surroundings."""
+    indent = leading_indent(text, node.start)
+    lines = json.dumps(value, ensure_ascii=False, indent=2).splitlines()
+    rendered = lines[0] + "".join(f"\n{indent}{line}" for line in lines[1:])
+    return text[: node.start] + rendered + text[node.end :]
+
+
+def node_has_comments(text: str, node: JsonNode) -> bool:
+    """Managed legacy fragments were emitted without comments; comments imply ownership."""
+    fragment = text[node.start : node.end]
+    return "//" in fragment or "/*" in fragment
+
+
 def flatten_strings(value: Any) -> list[str]:
     found: list[str] = []
     if isinstance(value, str):
@@ -284,8 +301,81 @@ def session_start_command() -> str:
     return str(managed_bin_target() / "llm-wiki-session-start")
 
 
-def hook_command(format_name: str) -> str:
-    return f"{shlex.quote(session_start_command())} --format {format_name} --max-chars 2500"
+def profile_environment(profile: str) -> tuple[str, str]:
+    return (f"LLM_WIKI_AGENT_PROFILE={profile}", f"LLM_WIKI_DOMAIN={MEMORY_DOMAIN}")
+
+
+def mcp_environment(profile: str) -> tuple[str, ...]:
+    environment = profile_environment(profile)
+    if profile in ("codex", "opencode"):
+        return (*environment, "LLM_WIKI_TARGET_AGENTS=codex,opencode")
+    return environment
+
+
+def profiled_mcp_command(profile: str, command: str) -> list[str]:
+    return [ENV_COMMAND, *mcp_environment(profile), command]
+
+
+def hook_command(format_name: str, profile: str) -> str:
+    command = [ENV_COMMAND, *profile_environment(profile), session_start_command()]
+    prefix = " ".join(shlex.quote(part) for part in command)
+    return f"{prefix} --format {format_name} --max-chars 2500"
+
+
+def legacy_hook_command(format_name: str, *, home_template: bool = False) -> str:
+    executable = (
+        '"$HOME/.local/bin/llm-wiki-session-start"'
+        if home_template
+        else shlex.quote(session_start_command())
+    )
+    return f"{executable} --format {format_name} --max-chars 2500"
+
+
+def legacy_hook_groups(group: dict[str, Any], format_name: str) -> tuple[dict[str, Any], ...]:
+    """Return only exact hook shapes emitted by the immediately previous release."""
+    variants: list[dict[str, Any]] = []
+    for home_template in (False, True):
+        legacy = copy.deepcopy(group)
+        if isinstance(legacy.get("hooks"), list):
+            handler = legacy["hooks"][0]
+        else:
+            handler = legacy
+        handler["command"] = legacy_hook_command(format_name, home_template=home_template)
+        if format_name == "codex":
+            handler["commandWindows"] = (
+                "wsl.exe -- sh -lc 'exec \"$HOME/.local/bin/llm-wiki-session-start\" "
+                "--format codex --max-chars 2500'"
+            )
+        if legacy not in variants:
+            variants.append(legacy)
+    return tuple(variants)
+
+
+def legacy_opencode_mcp_values(command: str) -> tuple[dict[str, Any], ...]:
+    return (
+        {
+            "type": "local",
+            "command": [command],
+            "enabled": True,
+            "timeout": 5000,
+        },
+    )
+
+
+def legacy_cursor_mcp_values(command: str) -> tuple[dict[str, Any], ...]:
+    return (
+        {"command": "sh", "args": ["-lc", f"exec {shlex.quote(command)}"]},
+        {
+            "command": "sh",
+            "args": ["-lc", 'exec "$HOME/.local/bin/llm-wiki-mcp"'],
+        },
+    )
+
+
+def managed_fragment_matches(text: str, fragment: str) -> bool:
+    if not fragment.startswith("LLM_WIKI_"):
+        return fragment in text
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(fragment)}(?=$|[\s\"'\]\}}])", text) is not None
 
 
 def repo_root() -> Path:
@@ -417,6 +507,7 @@ def merge_named_entry(
     outer: str,
     value: dict[str, Any],
     required: dict[str, Any],
+    legacy_values: Iterable[dict[str, Any]] = (),
 ) -> bool:
     original, root = load_jsonc_for_change(path)
     outer_node = root.members.get(outer)
@@ -430,6 +521,10 @@ def merge_named_entry(
     if entry_node is not None:
         if mapping_contains(entry_node.value, required):
             return False
+        legacy = tuple(legacy_values)
+        if entry_node.value in legacy and not node_has_comments(original, entry_node):
+            updated = replace_node_value(original, entry_node, value)
+            return validate_and_write(path, original, updated)
         backup = backup_file(path, "conflict")
         raise HarnessError(f"existing {outer}.{NAME} differs; unchanged; recovery snapshot: {backup}")
     updated = insert_object_member(original, outer_node, NAME, value)
@@ -458,6 +553,24 @@ def managed_hook_commands(value: Any) -> list[str]:
     ]
 
 
+def managed_hooks_match(value: Any, expected_fragments: Iterable[str]) -> bool:
+    """Require every OS-specific managed command to carry the fixed identity."""
+    commands = managed_hook_commands(value)
+    if not commands:
+        return False
+    fragments = tuple(expected_fragments)
+    identity_fragments = tuple(item for item in fragments if item.startswith("LLM_WIKI_"))
+    if any(
+        not all(managed_fragment_matches(command, fragment) for fragment in identity_fragments)
+        for command in commands
+    ):
+        return False
+    return any(
+        all(managed_fragment_matches(command, fragment) for fragment in fragments)
+        for command in commands
+    )
+
+
 def hook_status(path: Path, event: str, expected_fragments: Iterable[str]) -> str:
     if path.is_symlink():
         return "unverifiable"
@@ -474,11 +587,17 @@ def hook_status(path: Path, event: str, expected_fragments: Iterable[str]) -> st
     commands = managed_hook_commands(groups)
     if not commands:
         return "installed-unconfigured"
-    fragments = tuple(expected_fragments)
-    return "configured" if any(all(fragment in command for fragment in fragments) for command in commands) else "stale/wrong-link"
+    return "configured" if managed_hooks_match(groups, expected_fragments) else "stale/wrong-link"
 
 
-def merge_hook(path: Path, event: str, group: dict[str, Any], expected_fragments: Iterable[str], version: int | None = None) -> bool:
+def merge_hook(
+    path: Path,
+    event: str,
+    group: dict[str, Any],
+    expected_fragments: Iterable[str],
+    version: int | None = None,
+    legacy_groups: Iterable[dict[str, Any]] = (),
+) -> bool:
     original, root = load_jsonc_for_change(path)
     updated = original
     if version is not None and "version" not in root.members:
@@ -498,11 +617,18 @@ def merge_hook(path: Path, event: str, group: dict[str, Any], expected_fragments
     if event_node.kind != "array":
         backup = backup_file(path, "conflict")
         raise HarnessError(f"hooks.{event} is user-owned non-array; unchanged; recovery snapshot: {backup}")
-    managed = managed_hook_commands(event_node.value)
-    if managed:
-        fragments = tuple(expected_fragments)
-        if any(all(fragment in command for fragment in fragments) for command in managed):
+    managed_items = [item for item in event_node.items if managed_hook_commands(item.value)]
+    if managed_items:
+        if len(managed_items) == 1 and managed_hooks_match(managed_items[0].value, expected_fragments):
             return False
+        legacy = tuple(legacy_groups)
+        if (
+            len(managed_items) == 1
+            and managed_items[0].value in legacy
+            and not node_has_comments(updated, managed_items[0])
+        ):
+            updated = replace_node_value(updated, managed_items[0], group)
+            return validate_and_write(path, original, updated)
         backup = backup_file(path, "conflict")
         raise HarnessError(f"existing Wikified {event} hook differs; unchanged; recovery snapshot: {backup}")
     updated = append_array_item(updated, event_node, group)
@@ -510,8 +636,13 @@ def merge_hook(path: Path, event: str, group: dict[str, Any], expected_fragments
 
 
 
-def preflight_named_entry(path: Path, outer: str, required: dict[str, Any]) -> None:
-    _original, root = load_jsonc_for_change(path)
+def preflight_named_entry(
+    path: Path,
+    outer: str,
+    required: dict[str, Any],
+    legacy_values: Iterable[dict[str, Any]] = (),
+) -> None:
+    original, root = load_jsonc_for_change(path)
     outer_node = root.members.get(outer)
     if outer_node is None:
         return
@@ -521,12 +652,19 @@ def preflight_named_entry(path: Path, outer: str, required: dict[str, Any]) -> N
     entry_node = outer_node.members.get(NAME)
     if entry_node is None or mapping_contains(entry_node.value, required):
         return
+    if entry_node.value in tuple(legacy_values) and not node_has_comments(original, entry_node):
+        return
     backup = backup_file(path, "conflict")
     raise HarnessError(f"existing {outer}.{NAME} differs; unchanged; recovery snapshot: {backup}")
 
 
-def preflight_hook(path: Path, event: str, expected_fragments: Iterable[str]) -> None:
-    _original, root = load_jsonc_for_change(path)
+def preflight_hook(
+    path: Path,
+    event: str,
+    expected_fragments: Iterable[str],
+    legacy_groups: Iterable[dict[str, Any]] = (),
+) -> None:
+    original, root = load_jsonc_for_change(path)
     hooks_node = root.members.get("hooks")
     if hooks_node is None:
         return
@@ -539,11 +677,16 @@ def preflight_hook(path: Path, event: str, expected_fragments: Iterable[str]) ->
     if event_node.kind != "array":
         backup = backup_file(path, "conflict")
         raise HarnessError(f"hooks.{event} is user-owned non-array; unchanged; recovery snapshot: {backup}")
-    managed = managed_hook_commands(event_node.value)
-    if not managed:
+    managed_items = [item for item in event_node.items if managed_hook_commands(item.value)]
+    if not managed_items:
         return
-    fragments = tuple(expected_fragments)
-    if any(all(fragment in command for fragment in fragments) for command in managed):
+    if len(managed_items) == 1 and managed_hooks_match(managed_items[0].value, expected_fragments):
+        return
+    if (
+        len(managed_items) == 1
+        and managed_items[0].value in tuple(legacy_groups)
+        and not node_has_comments(original, managed_items[0])
+    ):
         return
     backup = backup_file(path, "conflict")
     raise HarnessError(f"existing Wikified {event} hook differs; unchanged; recovery snapshot: {backup}")
@@ -877,14 +1020,67 @@ def cursor_binary_identity(candidate: Path) -> str:
     return "unverifiable"
 
 
-def cli_get_status(binary: Path, harness: str, expected: str) -> str:
+def display_field(text: str, label: str) -> str | None:
+    # Horizontal whitespace only: ``\s`` would let an empty Args field consume
+    # the following Environment line and turn an exact legacy entry into an
+    # unrecognized/user-owned shape.
+    matches = re.findall(
+        rf"(?im)^[ \t]*{re.escape(label)}[ \t]*:[ \t]*(.*?)[ \t]*$",
+        text,
+    )
+    if len(matches) != 1:
+        return None
+    value = matches[0].strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return value
+
+
+def exact_legacy_text_mcp(combined: str, harness: str, expected: str) -> bool:
+    if "LLM_WIKI_" in combined:
+        return False
+    command = display_field(combined, "command")
+    args = display_field(combined, "args")
+    environment = display_field(combined, "environment" if harness == "claude" else "env")
+    return command == expected and args in {"", "-"} and environment in {"", "-"}
+
+
+def exact_legacy_grok_mcp(server: Any, expected: str) -> bool:
+    if not isinstance(server, dict):
+        return False
+    allowed = {"command", "args", "enabled", "name", "scope", "env", "environment"}
+    if not set(server) <= allowed:
+        return False
+    command = server.get("command")
+    command_matches = command == expected or command == [expected]
+    return (
+        command_matches
+        and server.get("args", []) in (None, [])
+        and server.get("enabled", True) is True
+        and server.get("name", NAME) == NAME
+        and server.get("scope", "user") == "user"
+        and server.get("env", {}) in (None, {}, [])
+        and server.get("environment", {}) in (None, {}, [])
+    )
+
+
+def cli_get_status(
+    binary: Path,
+    harness: str,
+    expected: str,
+    *,
+    recognize_legacy: bool = False,
+) -> str:
+    required_fragments = (expected, *mcp_environment(harness))
     if harness in ("claude", "codex"):
         result = run_readonly([str(binary), "mcp", "get", NAME])
         combined = result.stdout + "\n" + result.stderr
         lower = combined.lower()
         if result.returncode == 0:
-            if expected in combined:
+            if all(managed_fragment_matches(combined, fragment) for fragment in required_fragments):
                 return "configured"
+            if exact_legacy_text_mcp(combined, harness, expected):
+                return "legacy-managed" if recognize_legacy else "stale/wrong-link"
             if "llm-wiki-mcp" in combined:
                 return "stale/wrong-link"
             return "unverifiable"
@@ -913,8 +1109,11 @@ def cli_get_status(binary: Path, harness: str, expected: str) -> str:
         if server is None:
             return "installed-unconfigured"
         strings = flatten_strings(server)
-        if expected in strings or any(expected in item for item in strings):
+        combined = "\n".join(strings)
+        if all(managed_fragment_matches(combined, fragment) for fragment in required_fragments):
             return "configured"
+        if exact_legacy_grok_mcp(server, expected):
+            return "legacy-managed" if recognize_legacy else "stale/wrong-link"
         if strings:
             return "stale/wrong-link"
         return "unverifiable"
@@ -939,18 +1138,82 @@ def find_named_server(value: Any, name: str) -> Any | None:
     return None
 
 
+def native_mcp_add_command(binary: Path, harness: str, server_command: list[str]) -> list[str]:
+    commands = {
+        "claude": [str(binary), "mcp", "add", "--scope", "user", NAME, "--", *server_command],
+        "grok": [str(binary), "mcp", "add", NAME, "--", *server_command],
+        "codex": [str(binary), "mcp", "add", NAME, "--", *server_command],
+    }
+    return commands[harness]
+
+
+def native_mcp_remove_command(binary: Path, harness: str) -> list[str]:
+    if harness == "claude":
+        return [str(binary), "mcp", "remove", NAME, "-s", "user"]
+    return [str(binary), "mcp", "remove", NAME]
+
+
+def backup_native_mcp(harness: str, expected: str) -> Path:
+    state_root = Path(
+        os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+    ).expanduser()
+    backup_dir = state_root / "llm-wiki" / "harness" / "backups"
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    path = backup_dir / f"{harness}-mcp-legacy-{stamp}.json"
+    payload = {
+        "schema_version": "llm-wiki-harness-recovery/v1",
+        "harness": harness,
+        "name": NAME,
+        "command": [expected],
+        "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n", 0o600)
+    return path
+
+
+def restore_legacy_native_mcp(binary: Path, harness: str, expected: str) -> bool:
+    run_readonly(native_mcp_remove_command(binary, harness), timeout=15)
+    restored = run_readonly(
+        native_mcp_add_command(binary, harness, [expected]),
+        timeout=15,
+    )
+    if restored.returncode != 0:
+        return False
+    return cli_get_status(binary, harness, expected, recognize_legacy=True) == "legacy-managed"
+
+
+def migrate_legacy_native_mcp(binary: Path, harness: str, expected: str) -> bool:
+    recovery = backup_native_mcp(harness, expected)
+    removed = run_readonly(native_mcp_remove_command(binary, harness), timeout=15)
+    if removed.returncode != 0:
+        raise HarnessError(
+            f"{harness} legacy MCP remove failed (rc={removed.returncode}); "
+            f"no replacement attempted; recovery snapshot: {recovery}"
+        )
+    added = run_readonly(
+        native_mcp_add_command(binary, harness, profiled_mcp_command(harness, expected)),
+        timeout=15,
+    )
+    if added.returncode == 0 and cli_get_status(binary, harness, expected) == "configured":
+        return True
+    restored = restore_legacy_native_mcp(binary, harness, expected)
+    suffix = "legacy command restored" if restored else "automatic restore failed"
+    raise HarnessError(
+        f"{harness} legacy MCP migration could not be verified; {suffix}; "
+        f"recovery snapshot: {recovery}"
+    )
+
+
 def add_mcp(binary: Path, harness: str, expected: str) -> bool:
-    state = cli_get_status(binary, harness, expected)
+    state = cli_get_status(binary, harness, expected, recognize_legacy=True)
     if state == "configured":
         return False
+    if state == "legacy-managed":
+        return migrate_legacy_native_mcp(binary, harness, expected)
     if state in ("stale/wrong-link", "unverifiable"):
         raise HarnessError(f"{harness} MCP state is {state}; no mutation performed")
-    commands = {
-        "claude": [str(binary), "mcp", "add", "--scope", "user", NAME, "--", expected],
-        "grok": [str(binary), "mcp", "add", NAME, "--", expected],
-        "codex": [str(binary), "mcp", "add", NAME, "--", expected],
-    }
-    result = run_readonly(commands[harness], timeout=15)
+    server_command = profiled_mcp_command(harness, expected)
+    result = run_readonly(native_mcp_add_command(binary, harness, server_command), timeout=15)
     if result.returncode != 0:
         raise HarnessError(f"{harness} MCP add failed (rc={result.returncode}); CLI output suppressed")
     verified = cli_get_status(binary, harness, expected)
@@ -1073,7 +1336,7 @@ def opencode_lifecycle_status() -> str:
     return "installed-unconfigured"
 
 
-def simple_toml_mcp_status(path: Path, expected: str) -> str:
+def simple_toml_mcp_status(path: Path, expected: str, profile: str) -> str:
     if path.is_symlink():
         return "unverifiable"
     if not path.exists():
@@ -1089,8 +1352,10 @@ def simple_toml_mcp_status(path: Path, expected: str) -> str:
     next_section = re.search(r"(?m)^\s*\[", text[match.end():])
     end = match.end() + next_section.start() if next_section else len(text)
     block = text[match.start():end]
-    if expected in block or "llm-wiki-mcp" in block:
-        return "configured" if (expected in block or "wsl" in block.lower()) else "stale/wrong-link"
+    has_command = expected in block or "llm-wiki-mcp" in block
+    has_profile = all(managed_fragment_matches(block, fragment) for fragment in mcp_environment(profile))
+    if has_command:
+        return "configured" if has_profile else "stale/wrong-link"
     return "stale/wrong-link"
 
 
@@ -1146,7 +1411,7 @@ def inspect_all() -> list[HarnessStatus]:
     claude_hook = hook_status(
         claude_settings_path(),
         "SessionStart",
-        (adapter, "--format claude", "--max-chars 2500"),
+        (adapter, "--format claude", "--max-chars 2500", *profile_environment("claude")),
     )
     claude_rules = managed_text_status(claude_instructions_path(), templates / "claude/CLAUDE.recall.md")
     claude_evidence = claude.path is not None
@@ -1163,7 +1428,7 @@ def inspect_all() -> list[HarnessStatus]:
 
     opencode = detect_binary("opencode")
     oc_config = opencode_config_path()
-    oc_required = {"type": "local", "command": [expected], "enabled": True}
+    oc_required = {"type": "local", "command": profiled_mcp_command("opencode", expected), "enabled": True}
     oc_mcp = named_entry_status(oc_config, "mcp", oc_required)
     oc_lifecycle = opencode_lifecycle_status()
     oc_rules = managed_text_status(opencode_instructions_path(), templates / "opencode/AGENTS.recall.md")
@@ -1184,7 +1449,7 @@ def inspect_all() -> list[HarnessStatus]:
     grok_hook = hook_status(
         grok_hook_path(),
         "SessionStart",
-        (adapter, "--format grok-probe", "--max-chars 2500"),
+        (adapter, "--format grok-probe", "--max-chars 2500", *profile_environment("grok")),
     )
     grok_rules = managed_text_status(grok_instructions_path(), templates / "grok/AGENTS.recall.md")
     grok_evidence = grok.path is not None
@@ -1202,13 +1467,17 @@ def inspect_all() -> list[HarnessStatus]:
 
     codex = detect_binary("codex")
     codex_homes = codex_home_paths()
-    codex_mcp_states = [simple_toml_mcp_status(home / "config.toml", expected) for home in codex_homes]
+    codex_mcp_states = [simple_toml_mcp_status(home / "config.toml", expected, "codex") for home in codex_homes]
     codex_mcp = aggregate_component_states(codex_mcp_states)
     # A Windows Codex home may legitimately use $HOME inside commandWindows, so
     # status accepts the managed adapter basename while WSL configuration itself
     # writes the exact absolute managed path.
     codex_hook_states = [
-        hook_status(home / "hooks.json", "SessionStart", ("llm-wiki-session-start", "--format codex", "2500"))
+        hook_status(
+            home / "hooks.json",
+            "SessionStart",
+            ("llm-wiki-session-start", "--format codex", "2500", *profile_environment("codex")),
+        )
         for home in codex_homes
     ]
     codex_hook = aggregate_component_states(codex_hook_states)
@@ -1230,7 +1499,7 @@ def inspect_all() -> list[HarnessStatus]:
     )
 
     cursor = detect_binary("cursor")
-    cursor_value = {"command": "sh", "args": ["-lc", f"exec {shlex.quote(expected)}"]}
+    cursor_value = {"command": ENV_COMMAND, "args": [*mcp_environment("cursor"), expected]}
     cursor_identity_rejected = cursor.path is None and "identity-" in cursor.source
     if cursor_identity_rejected:
         # Do not even interpret existing Cursor config as configured when the
@@ -1242,7 +1511,7 @@ def inspect_all() -> list[HarnessStatus]:
         cursor_hook = hook_status(
             cursor_hooks_path(),
             "sessionStart",
-            (adapter, "--format cursor", "--max-chars 2500"),
+            (adapter, "--format cursor", "--max-chars 2500", *profile_environment("cursor")),
         )
     cursor_evidence = cursor.path is not None
     cursor_overall = overall_state(cursor_evidence, (cursor_mcp, cursor_hook))
@@ -1290,25 +1559,36 @@ def template_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def set_nested_hook_command(group: dict[str, Any], format_name: str) -> dict[str, Any]:
+def set_nested_hook_command(group: dict[str, Any], format_name: str, profile: str) -> dict[str, Any]:
     hooks = group.get("hooks")
     if not isinstance(hooks, list) or not hooks or not isinstance(hooks[0], dict):
         raise HarnessError("invalid managed hook template")
-    hooks[0]["command"] = hook_command(format_name)
+    hooks[0]["command"] = hook_command(format_name, profile)
     return group
 
 
-def set_direct_hook_command(group: dict[str, Any], format_name: str) -> dict[str, Any]:
-    group["command"] = hook_command(format_name)
+def set_direct_hook_command(group: dict[str, Any], format_name: str, profile: str) -> dict[str, Any]:
+    group["command"] = hook_command(format_name, profile)
     return group
 
 
 def configure_claude(binary: Path, expected: str) -> int:
     changes = 0
     fragment = template_json(repo_root() / "templates/claude/settings.hooks.json")
-    group = set_nested_hook_command(fragment["hooks"]["SessionStart"][0], "claude")
-    expected_hook = (session_start_command(), "--format claude", "--max-chars 2500")
-    preflight_hook(claude_settings_path(), "SessionStart", expected_hook)
+    group = set_nested_hook_command(fragment["hooks"]["SessionStart"][0], "claude", "claude")
+    expected_hook = (
+        session_start_command(),
+        "--format claude",
+        "--max-chars 2500",
+        *profile_environment("claude"),
+    )
+    legacy_hooks = legacy_hook_groups(group, "claude")
+    preflight_hook(
+        claude_settings_path(),
+        "SessionStart",
+        expected_hook,
+        legacy_hooks,
+    )
     preflight_managed_text(claude_instructions_path(), repo_root() / "templates/claude/CLAUDE.recall.md")
     changes += int(add_mcp(binary, "claude", expected))
     changes += int(
@@ -1317,6 +1597,7 @@ def configure_claude(binary: Path, expected: str) -> int:
             "SessionStart",
             group,
             expected_hook,
+            legacy_groups=legacy_hooks,
         )
     )
     changes += int(install_managed_text(claude_instructions_path(), repo_root() / "templates/claude/CLAUDE.recall.md"))
@@ -1325,12 +1606,22 @@ def configure_claude(binary: Path, expected: str) -> int:
 
 def configure_opencode(expected: str) -> int:
     changes = 0
-    value = {"type": "local", "command": [expected], "enabled": True, "timeout": 5000}
-    required = {"type": "local", "command": [expected], "enabled": True}
-    preflight_named_entry(opencode_config_path(), "mcp", required)
+    command = profiled_mcp_command("opencode", expected)
+    value = {"type": "local", "command": command, "enabled": True, "timeout": 5000}
+    required = {"type": "local", "command": command, "enabled": True}
+    legacy_values = legacy_opencode_mcp_values(expected)
+    preflight_named_entry(opencode_config_path(), "mcp", required, legacy_values)
     preflight_link(repo_root() / "plugins/llm-wiki-recall.js", opencode_plugin_path())
     preflight_managed_text(opencode_instructions_path(), repo_root() / "templates/opencode/AGENTS.recall.md")
-    changes += int(merge_named_entry(opencode_config_path(), "mcp", value, required))
+    changes += int(
+        merge_named_entry(
+            opencode_config_path(),
+            "mcp",
+            value,
+            required,
+            legacy_values,
+        )
+    )
     changes += int(safe_link(repo_root() / "plugins/llm-wiki-recall.js", opencode_plugin_path()))
     changes += int(install_managed_text(opencode_instructions_path(), repo_root() / "templates/opencode/AGENTS.recall.md"))
     return changes
@@ -1339,10 +1630,16 @@ def configure_opencode(expected: str) -> int:
 def configure_grok(binary: Path, expected: str) -> int:
     changes = 0
     fragment = template_json(repo_root() / "templates/grok/hooks.json")
-    group = set_nested_hook_command(fragment["hooks"]["SessionStart"][0], "grok-probe")
-    expected_hook = (session_start_command(), "--format grok-probe", "--max-chars 2500")
+    group = set_nested_hook_command(fragment["hooks"]["SessionStart"][0], "grok-probe", "grok")
+    expected_hook = (
+        session_start_command(),
+        "--format grok-probe",
+        "--max-chars 2500",
+        *profile_environment("grok"),
+    )
+    legacy_hooks = legacy_hook_groups(group, "grok-probe")
     preflight_managed_text(grok_instructions_path(), repo_root() / "templates/grok/AGENTS.recall.md")
-    preflight_hook(grok_hook_path(), "SessionStart", expected_hook)
+    preflight_hook(grok_hook_path(), "SessionStart", expected_hook, legacy_hooks)
     changes += int(add_mcp(binary, "grok", expected))
     changes += int(install_managed_text(grok_instructions_path(), repo_root() / "templates/grok/AGENTS.recall.md"))
     changes += int(
@@ -1351,6 +1648,7 @@ def configure_grok(binary: Path, expected: str) -> int:
             "SessionStart",
             group,
             expected_hook,
+            legacy_groups=legacy_hooks,
         )
     )
     return changes
@@ -1360,9 +1658,15 @@ def configure_codex(binary: Path, expected: str) -> int:
     changes = 0
     home = codex_home_paths()[0]
     fragment = template_json(repo_root() / "templates/codex/hooks.json")
-    group = set_nested_hook_command(fragment["hooks"]["SessionStart"][0], "codex")
-    expected_hook = (session_start_command(), "--format codex", "--max-chars 2500")
-    preflight_hook(home / "hooks.json", "SessionStart", expected_hook)
+    group = set_nested_hook_command(fragment["hooks"]["SessionStart"][0], "codex", "codex")
+    expected_hook = (
+        session_start_command(),
+        "--format codex",
+        "--max-chars 2500",
+        *profile_environment("codex"),
+    )
+    legacy_hooks = legacy_hook_groups(group, "codex")
+    preflight_hook(home / "hooks.json", "SessionStart", expected_hook, legacy_hooks)
     preflight_managed_text(home / "AGENTS.md", repo_root() / "templates/codex/AGENTS.recall.md")
     preflight_managed_file(home / "prompts/llm-wiki-recall.md", repo_root() / "templates/codex/prompts/llm-wiki-recall.md")
     changes += int(add_mcp(binary, "codex", expected))
@@ -1372,6 +1676,7 @@ def configure_codex(binary: Path, expected: str) -> int:
             "SessionStart",
             group,
             expected_hook,
+            legacy_groups=legacy_hooks,
         )
     )
     changes += int(install_managed_text(home / "AGENTS.md", repo_root() / "templates/codex/AGENTS.recall.md"))
@@ -1381,13 +1686,28 @@ def configure_codex(binary: Path, expected: str) -> int:
 
 def configure_cursor(expected: str) -> int:
     changes = 0
-    value = {"command": "sh", "args": ["-lc", f"exec {shlex.quote(expected)}"]}
+    value = {"command": ENV_COMMAND, "args": [*mcp_environment("cursor"), expected]}
     fragment = template_json(repo_root() / "templates/cursor/hooks.json")
-    group = set_direct_hook_command(fragment["hooks"]["sessionStart"][0], "cursor")
-    expected_hook = (session_start_command(), "--format cursor", "--max-chars 2500")
-    preflight_named_entry(cursor_mcp_path(), "mcpServers", value)
-    preflight_hook(cursor_hooks_path(), "sessionStart", expected_hook)
-    changes += int(merge_named_entry(cursor_mcp_path(), "mcpServers", value, value))
+    group = set_direct_hook_command(fragment["hooks"]["sessionStart"][0], "cursor", "cursor")
+    expected_hook = (
+        session_start_command(),
+        "--format cursor",
+        "--max-chars 2500",
+        *profile_environment("cursor"),
+    )
+    legacy_values = legacy_cursor_mcp_values(expected)
+    legacy_hooks = legacy_hook_groups(group, "cursor")
+    preflight_named_entry(cursor_mcp_path(), "mcpServers", value, legacy_values)
+    preflight_hook(cursor_hooks_path(), "sessionStart", expected_hook, legacy_hooks)
+    changes += int(
+        merge_named_entry(
+            cursor_mcp_path(),
+            "mcpServers",
+            value,
+            value,
+            legacy_values,
+        )
+    )
     changes += int(
         merge_hook(
             cursor_hooks_path(),
@@ -1395,6 +1715,7 @@ def configure_cursor(expected: str) -> int:
             group,
             expected_hook,
             version=1,
+            legacy_groups=legacy_hooks,
         )
     )
     return changes

@@ -13,7 +13,7 @@ mkdir -p "$FAKE_HOME" "$WINDOWS_CODEX_HOME"
 cat > "$WINDOWS_CODEX_HOME/config.toml" <<'EOF_TOML'
 [mcp_servers.llm-wiki]
 command = "wsl.exe"
-args = ["-d", "Ubuntu", "-e", "/home/test/.local/bin/llm-wiki-mcp"]
+args = ["-d", "Ubuntu", "-e", "/usr/bin/env", "LLM_WIKI_AGENT_PROFILE=codex", "LLM_WIKI_DOMAIN=work", "LLM_WIKI_TARGET_AGENTS=codex,opencode", "/home/test/.local/bin/llm-wiki-mcp"]
 EOF_TOML
 cp "$REPO/templates/codex/hooks.json" "$WINDOWS_CODEX_HOME/hooks.json"
 cp "$REPO/templates/codex/AGENTS.recall.md" "$WINDOWS_CODEX_HOME/AGENTS.md"

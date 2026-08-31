@@ -1,8 +1,14 @@
 {
   "mcpServers": {
     "llm-wiki": {
-      "command": "sh",
-      "args": ["-lc", "exec \"$HOME/.local/bin/llm-wiki-mcp\""]
+      "command": "/usr/bin/env",
+      "args": [
+        "LLM_WIKI_AGENT_PROFILE=coding",
+        "LLM_WIKI_DOMAIN=work",
+        "/bin/sh",
+        "-lc",
+        "exec \"$HOME/.local/bin/llm-wiki-mcp\""
+      ]
     }
   }
 }

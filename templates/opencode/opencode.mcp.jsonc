@@ -2,7 +2,13 @@
   "mcp": {
     "llm-wiki": {
       "type": "local",
-      "command": ["/absolute/path/to/.local/bin/llm-wiki-mcp"],
+      "command": [
+        "/usr/bin/env",
+        "LLM_WIKI_AGENT_PROFILE=opencode",
+        "LLM_WIKI_DOMAIN=work",
+        "LLM_WIKI_TARGET_AGENTS=codex,opencode",
+        "/absolute/path/to/.local/bin/llm-wiki-mcp"
+      ],
       "enabled": true,
       "timeout": 5000
     }

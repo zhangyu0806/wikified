@@ -20,6 +20,7 @@ from typing import Any
 
 
 ENRICH = Path(__file__).resolve().parent / "llm-wiki-enrich"
+POLICY_TEMPLATE = ENRICH.parent.parent / "templates" / "access-policy.json"
 
 
 def write(path: Path, text: str) -> None:
@@ -49,6 +50,7 @@ def event_line(**values: Any) -> str:
 
 def seed(root: Path) -> None:
     write(root / "SCHEMA.md", "# Eval schema\n")
+    write(root / "policy" / "access.json", POLICY_TEMPLATE.read_text(encoding="utf-8"))
     for idx in range(90):
         body = "ordinary filler material for deterministic corpus length"
         if idx == 3:

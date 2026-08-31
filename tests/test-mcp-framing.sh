@@ -29,7 +29,17 @@ for c in llm-wiki-enrich llm-wiki-health; do
   printf '#!/bin/sh\necho "STUB-OK"\n' > "$STUB_BIN/$c"
   chmod +x "$STUB_BIN/$c"
 done
-printf '#!/bin/sh\nlast=""\nfor arg do last=$arg; done\nif [ "$last" = "force-fail" ]; then echo "STUB-FAIL" >&2; exit 2; fi\necho "STUB-OK"\n' > "$STUB_BIN/llm-wiki-event"
+cat >"$STUB_BIN/llm-wiki-event" <<'EVENT_STUB'
+#!/bin/sh
+joined=" $* "
+for required in '--actor-type ai' '--epistemic-status ai-proposed' '--review-status pending' '--target-agent coding'; do
+  case "$joined" in *" $required "*) : ;; *) echo "MISSING-GOVERNANCE: $required" >&2; exit 3 ;; esac
+done
+last=""
+for arg do last=$arg; done
+if [ "$last" = "force-fail" ]; then echo "STUB-FAIL" >&2; exit 2; fi
+echo "STUB-PENDING"
+EVENT_STUB
 chmod +x "$STUB_BIN/llm-wiki-event"
 
 # 驱动器：按指定框架收发，输出解析到的 JSON 每行一条
@@ -40,6 +50,9 @@ const [, , mcpPath, framing] = process.argv;
 
 const env = { ...process.env };
 delete env.LLM_WIKI_BIN_TARGET;
+delete env.LLM_WIKI_AGENT_PROFILE;
+delete env.LLM_WIKI_TARGET_AGENTS;
+delete env.LLM_WIKI_DOMAIN;
 
 const p = spawn('node', [mcpPath], { env, stdio: ['pipe', 'pipe', 'pipe'] });
 
@@ -65,6 +78,8 @@ send({ jsonrpc: '2.0', id: 3, method: 'tools/call',
        params: { name: 'search_pages', arguments: { query: 'x' } } });
 send({ jsonrpc: '2.0', id: 4, method: 'tools/call',
        params: { name: 'record_event', arguments: { type: 'fact', summary: 'force-fail' } } });
+send({ jsonrpc: '2.0', id: 5, method: 'tools/call',
+       params: { name: 'record_event', arguments: { type: 'decision', summary: 'proposal-ok' } } });
 
 setTimeout(() => {
   p.kill();
@@ -130,6 +145,12 @@ check_framing() {
     ok "$label: CLI 非零退出传播为 JSON-RPC error"
   else
     bad "$label: CLI 非零退出被伪装成成功 content"
+  fi
+
+  if grep '"id":5' <<<"$res" | grep -q 'STUB-PENDING'; then
+    ok "$label: Agent 写入被固定为 ai-proposed/pending"
+  else
+    bad "$label: record_event 未传入完整治理信封"
   fi
 }
 

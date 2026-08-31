@@ -3,7 +3,7 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "\"$HOME/.local/bin/llm-wiki-session-start\" --format cursor --max-chars 2500",
+        "command": "/usr/bin/env LLM_WIKI_AGENT_PROFILE=cursor LLM_WIKI_DOMAIN=work \"$HOME/.local/bin/llm-wiki-session-start\" --format cursor --max-chars 2500",
         "timeout": 10
       }
     ]

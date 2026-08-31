@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/.local/bin/llm-wiki-session-start\" --format claude --max-chars 2500",
+            "command": "/usr/bin/env LLM_WIKI_AGENT_PROFILE=claude LLM_WIKI_DOMAIN=work \"$HOME/.local/bin/llm-wiki-session-start\" --format claude --max-chars 2500",
             "timeout": 10
           }
         ]

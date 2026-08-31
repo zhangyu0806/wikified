@@ -27,8 +27,13 @@ assert handler["type"] == "command"
 assert "llm-wiki-session-start" in handler["command"]
 assert "--format codex" in handler["command"]
 assert "--max-chars 2500" in handler["command"]
-assert "wsl.exe" in handler["commandWindows"]
+assert "/usr/bin/env" in handler["command"]
+assert "LLM_WIKI_AGENT_PROFILE=codex" in handler["command"]
+assert "LLM_WIKI_DOMAIN=work" in handler["command"]
+assert handler["commandWindows"].startswith("wsl.exe -d Ubuntu -e /usr/bin/env ")
 assert "llm-wiki-session-start" in handler["commandWindows"]
+assert "LLM_WIKI_AGENT_PROFILE=codex" in handler["commandWindows"]
+assert "LLM_WIKI_DOMAIN=work" in handler["commandWindows"]
 assert handler["timeout"] <= 10
 assert handler["additionalContextLimit"] == 2500
 PY_TEMPLATE
@@ -41,7 +46,8 @@ pass 'AGENTS recall template defines trust and human-review boundaries'
 
 FAKE_HOME="$WORK/home"
 ROOT="$WORK/wiki-root"
-mkdir -p "$FAKE_HOME/.local/bin" "$ROOT/wiki/context" "$ROOT/memory/events"
+mkdir -p "$FAKE_HOME/.local/bin" "$ROOT/wiki/context" "$ROOT/memory/events" "$ROOT/policy"
+cp "$REPO/templates/access-policy.json" "$ROOT/policy/access.json"
 cp "$REPO/bin/llm-wiki-session-start" "$FAKE_HOME/.local/bin/llm-wiki-session-start"
 ln -s "$REPO/bin/llm-wiki-enrich" "$FAKE_HOME/.local/bin/llm-wiki-enrich"
 chmod 0755 "$FAKE_HOME/.local/bin/llm-wiki-session-start"

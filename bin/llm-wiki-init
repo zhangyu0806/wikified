@@ -38,8 +38,17 @@ done
 
 # 模板解析顺序与 llm-wiki-mcp 的 CLI 解析同构：先同目录（软链后 readlink -f
 # 已指向 repo 内真实位置），再显式 env，再安装目标的兄弟目录。
-# 全部落空时必须报错退出：静默写一个没有 SCHEMA.md 的残库，会让用户在
+# 全部落空时必须报错退出：静默写一个缺必需模板的残库，会让用户在
 # 之后某个不相关的命令上才发现问题，届时更难定位。
+REQUIRED_TEMPLATES=(SCHEMA.md SYNC.md access-policy.json gitattributes.template gitignore.template)
+
+templates_complete() {
+  local dir=$1 required
+  for required in "${REQUIRED_TEMPLATES[@]}"; do
+    [[ -f "$dir/$required" ]] || return 1
+  done
+}
+
 resolve_templates() {
   local candidates=(
     "$SELF_DIR/../templates"
@@ -49,15 +58,19 @@ resolve_templates() {
   local c
   for c in "${candidates[@]}"; do
     [[ -n "$c" ]] || continue
-    if [[ -f "$c/SCHEMA.md" ]]; then (cd -- "$c" && pwd); return 0; fi
+    if templates_complete "$c"; then (cd -- "$c" && pwd); return 0; fi
   done
   return 1
 }
 
-if [[ -n "${LLM_WIKI_TEMPLATES:-}" && ! -f "${LLM_WIKI_TEMPLATES}/SCHEMA.md" ]]; then
-  die "LLM_WIKI_TEMPLATES 指向的目录里没有 SCHEMA.md: ${LLM_WIKI_TEMPLATES}"
+if [[ -n "${LLM_WIKI_TEMPLATES:-}" ]] && ! templates_complete "$LLM_WIKI_TEMPLATES"; then
+  for required in "${REQUIRED_TEMPLATES[@]}"; do
+    [[ -f "$LLM_WIKI_TEMPLATES/$required" ]] \
+      || die "LLM_WIKI_TEMPLATES 指向的目录缺 $required: $LLM_WIKI_TEMPLATES"
+  done
 fi
-TEMPLATES=$(resolve_templates) || die "找不到 templates（缺 SCHEMA.md）。请设 LLM_WIKI_TEMPLATES 指向 toolkit 的 templates 目录。"
+TEMPLATES=$(resolve_templates) \
+  || die "找不到完整 templates。请设 LLM_WIKI_TEMPLATES 指向 toolkit 的 templates 目录。"
 
 CHANGES=0
 note_created() { CHANGES=$((CHANGES+1)); printf 'created: %s\n' "$1"; }
@@ -98,12 +111,14 @@ for d in \
   wiki wiki/context wiki/dashboards wiki/projects wiki/concepts \
   wiki/decisions wiki/tools wiki/queries \
   raw raw/sessions raw/notes raw/articles raw/inbox raw/inbox/auto-drafts \
-  memory memory/events
+  memory memory/events policy
 do
   ensure_dir "$ROOT/$d"
 done
 
 ensure_copy "$TEMPLATES/SCHEMA.md" "$ROOT/SCHEMA.md"
+ensure_copy "$TEMPLATES/SYNC.md" "$ROOT/SYNC.md"
+ensure_copy "$TEMPLATES/access-policy.json" "$ROOT/policy/access.json"
 ensure_copy "$TEMPLATES/gitattributes.template" "$ROOT/.gitattributes"
 ensure_copy "$TEMPLATES/gitignore.template" "$ROOT/.gitignore"
 

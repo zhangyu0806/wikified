@@ -37,11 +37,16 @@ const resolveCli = (name) => {
 };
 const ENRICH = () => resolveCli('llm-wiki-enrich');
 const EVENT = () => resolveCli('llm-wiki-event');
-const HEALTH = () => resolveCli('llm-wiki-health');
-const GRAPHIFY = () => resolveCli('graphify');
-const GRAPH_JSON = path.join(ROOT, 'graphify-out', 'graph.json');
-const READABLE_WIKI_ROOT = path.join(ROOT, 'wiki');
-const MAX_PAGE_BYTES = 256 * 1024;
+// Caller identity is fixed when the server process starts. It is deliberately
+// absent from every tool schema: an MCP client must not be able to self-assert
+// a more privileged profile in a tool call.
+const AGENT_PROFILE = process.env.LLM_WIKI_AGENT_PROFILE || 'coding';
+const MEMORY_DOMAIN = process.env.LLM_WIKI_DOMAIN || 'work';
+const TARGET_AGENTS = (process.env.LLM_WIKI_TARGET_AGENTS || AGENT_PROFILE)
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean)
+  .slice(0, 16);
 
 const run = (file, args, timeoutMs = 8000) =>
   new Promise((resolve) => {
@@ -74,16 +79,19 @@ const tools = [
   },
   {
     name: 'read_page',
-    description: 'Read one Markdown page below wiki/ by path relative to the Wikified data root (e.g. wiki/context/CRITICAL_FACTS.md). Other repository files, traversal, symlinks escaping wiki/, and oversized pages are rejected.',
+    description: 'Read one authorized Markdown page below wiki/. Path safety and the server-fixed Agent profile policy are enforced before the body is returned.',
     inputSchema: {
       type: 'object',
-      properties: { path: { type: 'string', description: 'Path relative to the Wikified data root.' } },
+      properties: {
+        path: { type: 'string', description: 'Path relative to the Wikified data root.' },
+        project: { type: 'string', description: 'Optional project id that further narrows an explicitly scoped page.' },
+      },
       required: ['path'],
     },
   },
   {
     name: 'find_related',
-    description: 'Find related concepts/pages for a topic via the Graphify knowledge graph (BFS traversal). Falls back to search_pages if the graph is absent.',
+    description: 'Find related concepts/pages through the same policy-filtered retrieval path as search_pages. Direct global-graph traversal is disabled until graphs are profile-partitioned.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -95,7 +103,7 @@ const tools = [
   },
   {
     name: 'list_recent_raw',
-    description: 'List recent raw source materials (sessions, notes, inbox) awaiting compilation into the wiki.',
+    description: 'List recent raw source materials. Disabled for Agent MCP profiles in governance v1; use the human review CLI instead.',
     inputSchema: {
       type: 'object',
       properties: { limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Max entries (default 15).' } },
@@ -103,7 +111,7 @@ const tools = [
   },
   {
     name: 'record_event',
-    description: 'Record a typed memory event (fact/decision/bug/preference/etc.) into memory/events. Secrets are auto-redacted by the underlying CLI.',
+    description: 'Propose a typed memory event for human review. Agent-authored events are stored as ai-proposed/pending and cannot be recalled until explicitly approved.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -124,62 +132,41 @@ const tools = [
   },
   {
     name: 'lint',
-    description: 'Run llm-wiki-health to report wiki structural issues (stale pages, orphans, broken links) as JSON.',
+    description: 'Repository-wide structural lint. Disabled for Agent MCP profiles in governance v1; run llm-wiki-health locally as the human owner.',
     inputSchema: { type: 'object', properties: {} },
   },
 ];
 
 async function dispatch(name, args) {
   if (name === 'search_pages') {
-    const a = ['--query', String(args.query || ''), '--limit', String(args.limit || 5), '--max-chars', String(args.maxChars || 2000)];
+    const a = ['--agent-profile', AGENT_PROFILE, '--query', String(args.query || ''), '--limit', String(args.limit || 5), '--max-chars', String(args.maxChars || 2000)];
     if (args.project) a.push('--project', String(args.project));
     return await runRequired(ENRICH(), a);
   }
   if (name === 'read_page') {
-    // MCP 的读权限只覆盖人工审校后的 wiki Markdown。仅限制在数据仓根目录仍会
-    // 暴露 .git/config、同步日志或未来加入的私有运行状态；目录穿越检查并不等于
-    // 最小权限。realpath 同时防止 wiki 内符号链接逃逸。
+    // Keep only input-shape validation here. Existence, realpath, size and ACL
+    // checks deliberately happen together inside enrich, which returns the same
+    // "page unavailable" error for every denied/missing target. Checking those
+    // properties here would let an unauthorized caller enumerate private pages.
     const rel = String(args.path || '');
-    const abs = path.resolve(ROOT, rel);
     const normalized = rel.replaceAll('\\', '/');
     if (!normalized.startsWith('wiki/') || !normalized.endsWith('.md')) {
       throw new Error('read_page only permits wiki/**/*.md');
     }
-    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) throw new Error(`not a file: ${rel}`);
-    if (!fs.existsSync(READABLE_WIKI_ROOT)) throw new Error('wiki directory does not exist');
-    const realRoot = fs.realpathSync(READABLE_WIKI_ROOT);
-    const realAbs = fs.realpathSync(abs);
-    if (realAbs !== realRoot && !realAbs.startsWith(realRoot + path.sep)) {
-      throw new Error('path escapes readable wiki root');
-    }
-    const size = fs.statSync(realAbs).size;
-    if (size > MAX_PAGE_BYTES) throw new Error(`page exceeds ${MAX_PAGE_BYTES} byte limit`);
-    return fs.readFileSync(realAbs, 'utf8');
+    // Delegate semantic authorization to the same policy engine used by search
+    // so read_page cannot become an ACL bypass.
+    const readArgs = ['--agent-profile', AGENT_PROFILE, '--read-page', normalized];
+    if (args.project) readArgs.push('--project', String(args.project));
+    return await runRequired(ENRICH(), readArgs);
   }
   if (name === 'find_related') {
-    if (fs.existsSync(GRAPH_JSON)) {
-      const r = await run(GRAPHIFY(), ['query', String(args.topic || ''), '--graph', GRAPH_JSON, '--budget', String(args.budget || 1500)]);
-      if (r.ok && r.text) return r.text;
-    }
-    return await runRequired(ENRICH(), ['--query', String(args.topic || ''), '--limit', '5', '--max-chars', '2000']);
+    // A single global Graphify output can expose restricted node names and
+    // edges before page policy is applied. Governance v1 therefore uses only
+    // the policy-filtered lexical path; a later partitioned graph may opt in.
+    return await runRequired(ENRICH(), ['--agent-profile', AGENT_PROFILE, '--query', String(args.topic || ''), '--limit', '5', '--max-chars', '2000']);
   }
   if (name === 'list_recent_raw') {
-    const limit = Number(args.limit || 15);
-    const dirs = ['raw/sessions', 'raw/notes', 'raw/inbox'];
-    const rows = [];
-    for (const d of dirs) {
-      const abs = path.join(ROOT, d);
-      if (!fs.existsSync(abs)) continue;
-      for (const name of fs.readdirSync(abs)) {
-        const f = path.join(abs, name);
-        try {
-          const st = fs.statSync(f);
-          if (st.isFile()) rows.push({ path: `${d}/${name}`, mtime: st.mtimeMs });
-        } catch { /* skip unreadable */ }
-      }
-    }
-    rows.sort((x, y) => y.mtime - x.mtime);
-    return rows.slice(0, limit).map((r) => r.path).join('\n') || '(no raw materials)';
+    throw new Error('raw listing is disabled for Agent MCP profiles; run llm-wiki-review as the human owner');
   }
   if (name === 'record_event') {
     // 前置校验 type 白名单（与 llm-wiki-event 的 EVENT_TYPES 对齐），
@@ -189,7 +176,17 @@ async function dispatch(name, args) {
     if (!TYPES.includes(t)) throw new Error(`invalid type: ${t} (allowed: ${TYPES.join(', ')})`);
     const summary = String(args.summary || '').trim();
     if (!summary) throw new Error('summary is required');
-    const a = ['--type', t, '--source', 'mcp'];
+    const a = [
+      '--type', t,
+      '--source', `mcp:${AGENT_PROFILE}`,
+      '--actor-type', 'ai',
+      '--actor-id', AGENT_PROFILE,
+      '--domain', MEMORY_DOMAIN,
+      '--sensitivity', 'internal',
+      '--epistemic-status', 'ai-proposed',
+      '--review-status', 'pending',
+    ];
+    for (const target of TARGET_AGENTS) a.push('--target-agent', target);
     if (args.details) a.push('--details', String(args.details));
     if (args.project) a.push('--project', String(args.project));
     if (args.validFrom) a.push('--valid-from', String(args.validFrom));
@@ -204,7 +201,7 @@ async function dispatch(name, args) {
     return await runRequired(EVENT(), a);
   }
   if (name === 'lint') {
-    return await runRequired(HEALTH(), ['--json']);
+    throw new Error('repository-wide lint is disabled for Agent MCP profiles; run llm-wiki-health as the human owner');
   }
   throw new Error(`Unknown tool: ${name}`);
 }

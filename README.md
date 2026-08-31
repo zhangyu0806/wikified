@@ -21,6 +21,11 @@
 **本仓库只有机制，不含任何个人内容**——没有 `wiki/`、`raw/`、`memory/` 目录。
 你的记忆库是另一个仓库（通常设为私有），由 `llm-wiki-init` 创建。
 
+当前发布的是治理 Phase 1：人和 AI 共用一套逻辑记忆 schema，但默认编码链路只接
+`work` 领域，并以 Project / Decision 作为执行系统的桥。个人日记应放在独立数据根、
+remote、凭据和索引中；本阶段不导入日记、不建图数据库、不实现完整 OKR / task 系统。
+设计边界见 [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md)。
+
 ---
 
 ## 目录
@@ -38,6 +43,7 @@
 - [共享项目 MCP 模板](#共享项目-mcp-模板)
 - [MCP tools](#mcp-tools)
 - [记忆库结构](#记忆库结构)
+- [治理与权限边界](#治理与权限边界)
 - [跨机同步](#跨机同步)
 - [Obsidian 阅读层](#obsidian-阅读层)
 - [凭据安全](#凭据安全)
@@ -148,9 +154,13 @@ JSON/JSONC 只做结构合并。现有文件在修改前创建恢复快照，修
 # 记一条零散事实 / 命令 / 坑
 llm-wiki-note "WSL 里 cron 不可靠，改用会话启动节流"
 
-# 记 typed event（会进按需召回）
+# 人工记 typed event（v3；默认 human-stated/approved，会进按需召回）
 llm-wiki-event --type decision "MCP 传输统一走 NDJSON，Codex 只认这个"
 llm-wiki-event --type bug      "secret-scan 的词边界在 db_password 上失效"
+
+# Agent 经 MCP 写入只会形成 pending 提案；人审后才可召回
+llm-wiki-review
+llm-wiki-event --approve <event-id>    # 或 --reject <event-id>
 
 # 用户纠正了你的做法 —— 进待人审队列，不直接改 wiki
 llm-wiki-correct "以后结论用中文" --kind preference
@@ -177,8 +187,9 @@ llm-wiki-review --peek          # 只看不计入一次正式复盘
 每个命令都有 `--help`。
 
 **典型工作流**：平时用 `note` / `event` / `correct` 随手记；任务开始前用 `enrich` 召回；
-**定期（约每周）跑一次 `llm-wiki-review`**，它把四路待审——用户纠正、晋升建议、未编译
-raw、过期候选——聚合成一份清单，人工决定每项如何处置。晋升永远经人审——这是信噪比的来源。
+**定期（约每周）跑一次 `llm-wiki-review`**，它把五路待审——用户纠正、AI 记忆提案、
+晋升建议、未编译 raw、过期候选——聚合成一份清单，人工决定每项如何处置。晋升永远
+经人审——这是信噪比的来源。
 
 ### 复盘（review）：给人看的入口
 
@@ -188,19 +199,21 @@ candidate → audit → **approve** → index → retrieve → expire），但 a
 `llm-wiki-review` 就是那个低摩擦入口，它**只读、只建议，从不自动改** wiki/events/corrections：
 
 ```bash
-llm-wiki-review          # 打印复盘清单：4 个板块，每项给一个动作动词
+llm-wiki-review          # 打印复盘清单：5 个板块，每项给一个动作动词
 ```
 
-清单四板块，按优先级：
+清单五板块，按优先级：
 
 1. **待处理的纠正/偏好** — `corrections.jsonl` 里 pending 的项。你纠正过 AI 或表达过偏好，
    但还没进 `CRITICAL_FACTS`/`AGENTS.md`，AI 可能还在犯。处置：
    - `llm-wiki-correct --resolve <id>` — 已晋升（你已手动编译进规则）
    - `llm-wiki-correct --resolve <id> --status rejected` — 看过决定不要
    - 两者都从 pending 移除但**留档**，供审计。
-2. **晋升建议** — `promote-notes` 对 quick-note / auto-draft 的分类打分。
-3. **未编译的源材料** — `raw/` 里还没编译进 `wiki/`、也没标 `status: compiled` 的文件。
-4. **Event 堆积与过期候选** — 按月统计 event；列出已过 ≥2 个半衰期（置信衰减到 1/4 以下）
+2. **AI 记忆提案** — MCP 写入的 `ai-proposed/pending` event。用
+   `llm-wiki-event --approve <id>` 或 `--reject <id>` 追加审核修订，历史不改写。
+3. **晋升建议** — `promote-notes` 对 quick-note / auto-draft 的分类打分。
+4. **未编译的源材料** — `raw/` 里还没编译进 `wiki/`、也没标 `status: compiled` 的文件。
+5. **Event 堆积与过期候选** — 按月统计 event；列出已过 ≥2 个半衰期（置信衰减到 1/4 以下）
    的陈旧项，建议复核去留。过期不删：把 `lifecycle` 手动改 `deprecated` 或用新事实
    `--supersedes` 取代，旧的留档。
 
@@ -313,7 +326,7 @@ home，但不会替你写入 Windows 配置。示例：
 ```toml
 [mcp_servers.llm-wiki]
 command = "wsl.exe"
-args = ["-d", "Ubuntu", "--", "/home/<linux-user>/.local/bin/llm-wiki-mcp"]
+args = ["-d", "Ubuntu", "-e", "/usr/bin/env", "LLM_WIKI_AGENT_PROFILE=codex", "LLM_WIKI_DOMAIN=work", "LLM_WIKI_TARGET_AGENTS=codex,opencode", "/home/<linux-user>/.local/bin/llm-wiki-mcp"]
 startup_timeout_sec = 20
 tool_timeout_sec = 60
 ```
@@ -328,8 +341,10 @@ Codex 原生 Memories 与 Wikified 是两套系统。本安装器不启用、清
 
 ## 事件生命周期与召回评测
 
-事件 schema v2 保持 append-only，同时补上双时态里最实用的三件事：生效时间、
-失效时间、替代关系。
+事件 schema v3 继续保持 append-only，并在既有 v1/v2 数据模型上加入
+稳定 `memory_id`、actor、领域、敏感度、认知状态、人审状态、目标 Agent 与证据引用。
+旧 v1/v2 行不迁移也不改写；兼容读取时缺失的访问字段按
+`work / internal / approved / ["*"]` 处理。
 
 ```bash
 # 未来才生效、到期后不再召回
@@ -341,7 +356,16 @@ llm-wiki-event --type fact --project billing \
 llm-wiki-event --type decision --project billing \
   --supersedes 0123456789abcdef \
   "账单主键改用 invoice_id"
+
+# Agent 提案必须先人审；批准/拒绝都追加修订，不改原行
+llm-wiki-event --approve <pending-event-id>
+# llm-wiki-event --reject <pending-event-id>
 ```
+
+若提案还声明了 `supersedes`，审核列表会先展示被替代对象；批准时必须额外传
+`--confirm-supersedes`。显式把新记忆发给所有 profile 的 `*` 不是默认行为，只有人类加
+`--confirm-global-target` 才能写入或批准。普通人工事件默认发给 `coding` 目标组，Codex、
+OpenCode 等编码 profile 都可按策略接收。
 
 替代目标必须存在、是 16 位小写 hex id、属于同一项目且不能形成环。旧事件不会被
 改写或删除，但当前召回会隐藏它；未来事件和已过期事件也不会参与结果。事件的
@@ -455,10 +479,11 @@ user-level hooks，也不支持 `sessionStart`，所以云端只承诺 MCP/人�
 cp templates/shared/mcp.project.json .mcp.json
 ```
 
-该模板使用 `sh -lc` 与 `$HOME/.local/bin/llm-wiki-mcp`，因此只承诺 WSL/Linux 项目级
-可移植性，不是原生 Windows 路径。Claude/Grok 仍可能要求项目 trust/重启；OpenCode
-使用自己的 `mcp` JSONC schema，Cursor 使用 `~/.cursor/mcp.json`，不能把一个文件
-无条件复制到五端。对单机 WSL，用户级原生 CLI 配置通常比项目文件更确定。
+该模板使用 `/usr/bin/env` 固定 `coding/work` 身份，再由 `/bin/sh -lc` 解析
+`$HOME/.local/bin/llm-wiki-mcp`；因此只承诺 WSL/Linux 项目级可移植性，不是原生 Windows
+路径。Claude/Grok 仍可能要求项目 trust/重启；OpenCode 使用自己的 `mcp` JSONC schema，
+Cursor 使用 `~/.cursor/mcp.json`，不能把一个文件无条件复制到五端。对单机 WSL，用户级
+原生 CLI 配置通常比项目文件更确定。
 
 ## MCP tools
 
@@ -466,12 +491,17 @@ cp templates/shared/mcp.project.json .mcp.json
 
 | tool | 作用 |
 |---|---|
-| `search_pages` | 按自然语言查询检索记忆，可用 `project` 做项目隔离 |
-| `read_page` | 按相对路径读某一页 |
-| `find_related` | 经 Graphify 图谱找相关概念（需 `graphify`） |
-| `list_recent_raw` | 列出待编译的原始材料 |
-| `record_event` | 记 typed event，支持有效期与同项目 `supersedes` |
+| `search_pages` | 先按服务进程固定 profile 做权限过滤，再检索；`project` 只能继续收窄 |
+| `read_page` | 按相对路径读取一页，同时执行同一套 profile 策略，不能绕过 ACL |
+| `find_related` | Phase 1 走策略过滤后的文本检索；未分区的全局图不暴露给 Agent |
+| `list_recent_raw` | Agent profile 下拒绝；raw 由数据所有者通过 review CLI 查看 |
+| `record_event` | 只写 `ai-proposed/pending` v3 提案，必须经人 approve 才能召回 |
 | `lint` | 跑健康检查 |
+
+`LLM_WIKI_AGENT_PROFILE` 在 MCP server 启动时固定，tool schema 不允许调用者自报身份。
+`llm-wiki-harness configure` 会分别绑定 `codex`、`opencode` 等 profile，默认都只读
+`work/internal/approved` 且匹配自身 target 的记忆。策略文件损坏或 profile 未知时检索
+fail closed。
 
 **传输层同时支持两种框架**：换行分隔 JSON（NDJSON，MCP stdio 规范，Codex 只认这个）
 与 LSP 风格 `Content-Length` 帧。按入向首个非空字节自动判定，出向镜像入向。
@@ -486,6 +516,8 @@ cp templates/shared/mcp.project.json .mcp.json
 ```
 ~/llm-wiki/
 ├── SCHEMA.md              # 运行规则，agent 操作前必读
+├── SYNC.md                # 数据仓三层同步边界与通用设置步骤
+├── policy/access.json     # profile/domain/sensitivity/review/target 访问策略
 ├── wiki/                  # 编译后的长期知识
 │   ├── context/           #   会话启动注入的极简卡片
 │   ├── dashboards/        #   派生仪表盘
@@ -506,7 +538,93 @@ cp templates/shared/mcp.project.json .mcp.json
 
 ---
 
+## 治理与权限边界
+
+`llm-wiki-enrich` 在读取页面正文、分词和排序**之前**，先用 `policy/access.json` 检查
+`domain`、`sensitivity`、`review_state` 和 `target_profiles`，并校验 `epistemic_status`。
+显式治理字段非法、frontmatter 疑似存在但格式损坏、策略缺失/损坏或 profile 不存在都会
+拒绝访问。策略文件缺失时先运行 `llm-wiki-init` 补齐，检索不会回退到内置宽松默认。新 wiki 页应使用如下公共
+frontmatter：
+
+```yaml
+---
+memory_id: wiki:project-example
+domain: work
+sensitivity: internal
+epistemic_status: human-confirmed
+review_state: approved
+target_profiles: [coding]
+project: example
+---
+```
+
+v3 event 使用对应的 `review_status`、`target_agents`，并额外记录 `actor`、
+`epistemic_status` 和 `evidence_refs`。旧页没有 `memory_id` 时会得到基于相对路径的确定性
+fallback；移动前补显式 id 才能保持身份不变。旧 v1/v2 event 不做破坏性迁移，按
+`work/internal/approved/*` 兼容读取。
+
+Phase 1 的编码 Agent profile 只允许 `work/internal/approved`，禁止列 raw，也不直接遍历
+未分区图。MCP 写入永远先进入 AI pending 队列：
+
+```bash
+llm-wiki-review
+llm-wiki-event --approve <event-id>   # 或 --reject <event-id>
+# 含 supersedes 的提案：先审被替代对象，再加 --confirm-supersedes
+```
+
+完整字段、默认 profile、个人/工作物理分区与阶段边界见
+[`docs/GOVERNANCE.md`](docs/GOVERNANCE.md)。
+
+---
+
 ## 跨机同步
+
+公开机制仓和私有数据仓是两条独立 Git 链：每台机器都 clone / pull 本仓库以更新工具；
+真实 `wiki/`、`raw/`、`memory/` 和 `policy/` 只在你自己的私有 remote 间同步。
+`llm-wiki-init` 会在数据仓安装 [`templates/SYNC.md`](templates/SYNC.md) 为根目录
+`SYNC.md`，其中记录三层同步边界、通用 remote 设置和安全停止条件；已有文件不会被覆盖。
+既有数据仓重跑 init 时，新补的 `SYNC.md` 不会自动提交；请先审核，再正常 commit / push。
+
+首次在家里机器创建：
+
+```bash
+git clone https://github.com/zhangyu0806/wikified ~/wikified
+cd ~/wikified
+./install.sh --init
+llm-wiki-init --git --profile home       # 幂等；补机器身份
+
+cd ~/llm-wiki
+git remote add origin git@github.com:<your-account>/<private-memory-repo>.git
+git branch -M main
+git push -u origin main
+
+cd ~/wikified
+./install.sh --configure-harnesses       # 已安装的 Claude/OpenCode/Grok
+llm-wiki-harness configure --harness codex
+```
+
+办公室机器接续：
+
+```bash
+git clone https://github.com/zhangyu0806/wikified ~/wikified
+git clone git@github.com:<your-account>/<private-memory-repo>.git ~/llm-wiki
+
+cd ~/wikified
+./install.sh                              # 已 clone 私有库：不要再加 --init 新建数据库
+llm-wiki-init --root ~/llm-wiki --git --profile office  # 补本机 hook/profile，不覆盖已有文件
+./install.sh --configure-harnesses
+llm-wiki-harness configure --harness codex
+llm-wiki-remote-sync --status
+```
+
+把示例 remote 换成你控制的**私有 Git remote**（GitHub、GitLab、Gitea 或 SSH remote
+均可）；不要 fork/提交真实数据到本公有仓。
+若家里或办公室本来就有私有库，先正常 commit / push 它，再在另一台机器 clone（或对既有
+clone 执行 pull）；拉好公有机制仓和私有数据仓后运行 `./install.sh` + harness configure，
+不要用 `--init` 在原路径旁另造一套记忆。机器名可另设 `LLM_WIKI_PROFILE=home|office`，
+未设置时同步器使用 hostname。
+Codex 与 OpenCode 指向同一个 `LLM_WIKI_ROOT`，所以在同一台机器共享已经批准的工作记忆；
+它们分别以固定 `codex` / `opencode` profile 检索，并不会互相冒充权限。
 
 `llm-wiki-remote-sync` 做带节流的双向同步（默认 3 小时窗口）：
 
@@ -516,6 +634,12 @@ llm-wiki-remote-sync             # 到窗口才真跑，否则秒退
 llm-wiki-remote-sync --force     # 忽略节流
 llm-wiki-remote-sync --dry-run   # 预演
 ```
+
+安装器不会替你创建系统定时器。若要自动同步，可在会话启动 hook 或自己的 systemd timer
+中调用无参数命令；多次调用由非阻塞锁和 3 小时节流收敛。`--pull` / `--push` 是显式单向
+操作，不受节流且不写完整同步成功戳。同步只处理已经提交的变更：工作区脏时保留现场并
+跳过 merge / push，所以保存后仍需正常 `git add` / `git commit`。默认还要求当前分支是
+`main`、upstream 是 `origin/main`；detached HEAD、错分支或未完成 merge/rebase 会安全停止。
 
 两个设计取舍值得说明：
 
@@ -573,6 +697,9 @@ llm-wiki-obsidian-sync
 | 变量 | 作用 |
 |---|---|
 | `LLM_WIKI_ROOT` | 私有记忆库位置（默认 `~/llm-wiki`） |
+| `LLM_WIKI_AGENT_PROFILE` | 检索/MCP 进程的固定权限 profile；harness 配置器会写入，不接受 prompt 覆盖 |
+| `LLM_WIKI_DOMAIN` | Agent 写入提案的领域；Phase 1 harness 固定为 `work` |
+| `LLM_WIKI_TARGET_AGENTS` | MCP 提案批准后的目标 profile，逗号分隔；Codex/OpenCode 配置器固定为二者共享 |
 | `LLM_WIKI_MIRROR` | Obsidian 镜像目标 |
 | `LLM_WIKI_BIN_TARGET` | 受管 CLI 目录（默认 `~/.local/bin`） |
 | `LLM_WIKI_AGENT_SKILL_ROOT` | skill 主目录（默认 `~/.agents/skills`） |
@@ -697,7 +824,8 @@ OpenCode/Cursor 的同名结构以及 CLAUDE/AGENTS/hooks 中 BEGIN/END 受管�
 任何编辑器都能看。
 
 **必须装 graphify 吗？**
-不用。它只影响 `wiki-graph` 和 MCP 的 `find_related`，其余命令在没有它的环境下正常工作。
+不用。Phase 1 的 Agent MCP 不直接遍历未分区图，`find_related` 走策略过滤后的文本检索；
+`graphify` 只用于数据所有者显式运行 `wiki-graph` / 图维护。
 
 **能不用 MCP、只用 CLI 吗？**
 可以。CLI 是完整的，MCP 只是把同样的能力换个接口暴露。
@@ -726,7 +854,7 @@ append-only 的 JSONL 走 `merge=union` 保留双方所有行，再按 event id 
 **按需**
 
 - **Node.js** — 仅 `llm-wiki-mcp`（MCP server）需要。零 npm 依赖
-- **`graphify`** — 仅 `wiki-graph` 与 MCP `find_related` 需要
+- **`graphify`** — 仅数据所有者显式使用 `wiki-graph` / 图维护时需要
 - **`gh`** — 仅 `llm-wiki-remote-sync` 在某些克隆场景用到
 - **`explorer.exe` / `wslpath`** — 仅 `wiki-graph` 在 WSL 下开浏览器用
 
@@ -757,7 +885,9 @@ bin/llm-wiki-secret-scan --all
 | `test-codex-hook-template.sh` | Linux 与 Windows→WSL hook 回归、信任标签、动态状态不常驻 |
 | `test-opencode-plugin.sh` | 首条 critical 摘要、JIT 召回、XDG 状态日志、默认无草稿、opt-in 脱敏 raw 草稿 |
 | `test-install-windows-codex-detection.sh` | WSL 对既有 Windows Codex home 的只读识别 |
-| `test-mcp-framing.sh` | NDJSON 与 Content-Length，CLI 失败传播 |
+| `test-mcp-framing.sh` | NDJSON 与 Content-Length、CLI 失败传播、MCP 写入固定为 AI pending |
+| `test-policy-prefilter.sh` | policy fail-closed、正文读取前授权、domain/sensitivity/review/target/profile/project 隔离与 v2 兼容 |
+| `test-proposal-lifecycle.sh` | AI pending 不可召回、人审 approve/reject 的 append-only 生命周期 |
 | 其余 `test-*.sh` | init、事件、锁、同步、镜像、图谱、召回与安全边界 |
 
 所有新集成测试使用临时 HOME、临时数据根和 stub harness executable；不会读取真实

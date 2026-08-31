@@ -11,9 +11,22 @@ bad() { FAIL=$((FAIL + 1)); printf 'FAIL: %s\n' "$1"; }
 
 # MCP read_page: only reviewed Markdown below wiki/, with a bounded size.
 ROOT="$WORK/mcp-root"
-mkdir -p "$ROOT/wiki" "$ROOT/.git"
+mkdir -p "$ROOT/wiki" "$ROOT/.git" "$ROOT/policy"
+cp "$REPO/templates/access-policy.json" "$ROOT/policy/access.json"
 printf '# safe page\n' >"$ROOT/wiki/ok.md"
 printf 'private config marker\n' >"$ROOT/.git/config"
+cat >"$ROOT/wiki/restricted.md" <<'EOF_RESTRICTED'
+---
+schema_version: llm-wiki-page/v1
+id: page:restricted-test
+domain: work
+sensitivity: restricted
+epistemic_status: human-confirmed
+review_state: approved
+target_profiles: [human]
+---
+# Restricted marker
+EOF_RESTRICTED
 python3 - "$ROOT/wiki/large.md" <<'PY'
 from pathlib import Path
 import sys
@@ -31,14 +44,31 @@ call(2, 'wiki/ok.md');
 call(3, '.git/config');
 call(4, 'wiki/../.git/config');
 call(5, 'wiki/large.md');
+call(8, 'wiki/restricted.md');
+call(9, 'wiki/missing.md');
+const tool = (id, name) => p.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method:'tools/call',params:{name,arguments:{}}})+'\n');
+tool(6, 'list_recent_raw');
+tool(7, 'lint');
 setTimeout(() => { p.kill(); process.stdout.write(out); }, 800);
 JS
 MCP_OUT=$(env LLM_WIKI_ROOT="$ROOT" node "$WORK/mcp-drive.js" "$REPO/bin/llm-wiki-mcp")
 grep '"id":2' <<<"$MCP_OUT" | grep -q 'safe page' && ok "MCP reads reviewed wiki Markdown" || bad "MCP rejected safe wiki page"
-for id in 3 4 5; do
+for id in 3 4 5 8 9; do
   grep "\"id\":$id" <<<"$MCP_OUT" | grep -q '"error"' || bad "MCP unsafe read id=$id was not rejected"
 done
 [[ "$FAIL" -eq 0 ]] && ok "MCP rejects repository internals, traversal and oversized pages"
+for id in 5 8 9; do
+  grep "\"id\":$id" <<<"$MCP_OUT" | grep -Fq 'page unavailable' \
+    || bad "MCP denied/missing page id=$id did not use the uniform error"
+done
+for marker in 'page exceeds' 'not a file' 'restricted.md' 'missing.md'; do
+  ! grep -Fq "$marker" <<<"$MCP_OUT" || bad "MCP read_page leaked target state: $marker"
+done
+[[ "$FAIL" -eq 0 ]] && ok "MCP read_page does not expose existence, size or ACL side channels"
+for id in 6 7; do
+  grep "\"id\":$id" <<<"$MCP_OUT" | grep -q '"error"' || bad "MCP repository-wide metadata tool id=$id was not rejected"
+done
+[[ "$FAIL" -eq 0 ]] && ok "MCP denies raw filenames and repository-wide lint to Agent profiles"
 
 # Quick note must redact before deriving title, filename and body.
 NOTE_ROOT="$WORK/note-root"

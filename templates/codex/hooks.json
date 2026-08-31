@@ -7,8 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/.local/bin/llm-wiki-session-start\" --format codex --max-chars 2500",
-            "commandWindows": "wsl.exe -- sh -lc 'exec \"$HOME/.local/bin/llm-wiki-session-start\" --format codex --max-chars 2500'",
+            "command": "/usr/bin/env LLM_WIKI_AGENT_PROFILE=codex LLM_WIKI_DOMAIN=work \"$HOME/.local/bin/llm-wiki-session-start\" --format codex --max-chars 2500",
+            "commandWindows": "wsl.exe -d Ubuntu -e /usr/bin/env LLM_WIKI_AGENT_PROFILE=codex LLM_WIKI_DOMAIN=work /bin/sh -lc 'exec \"$HOME/.local/bin/llm-wiki-session-start\" --format codex --max-chars 2500'",
             "timeout": 10,
             "statusMessage": "Loading stable Wikified context",
             "additionalContextLimit": 2500

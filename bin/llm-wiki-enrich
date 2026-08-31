@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import hashlib
 import json
 import math
 import os
@@ -54,11 +55,38 @@ STOP_TOKENS = {
     "config",
 }
 MAX_EVENT_LINES = 5000
+MAX_EVENT_LINE_BYTES = 256 * 1024
 MAX_WIKI_BYTES = 64 * 1024
+MAX_READ_PAGE_BYTES = 256 * 1024
 MAX_WIKI_FILES = 2000
 MAX_WIKI_TOTAL_BYTES = 8 * 1024 * 1024
+MAX_POLICY_BYTES = 64 * 1024
+MAX_FRONTMATTER_BYTES = 16 * 1024
 MIN_GROUP_MATCH_RATIO = 1.0 / 3.0
 MIN_QUERY_GROUP_COVERAGE = 1.0 / 3.0
+
+POLICY_SCHEMA = "llm-wiki-access-policy/v1"
+KNOWN_DOMAINS = {"work", "personal"}
+KNOWN_SENSITIVITIES = {"public", "internal", "confidential", "restricted"}
+KNOWN_REVIEW_STATES = {"pending", "approved", "rejected"}
+KNOWN_ACTOR_TYPES = {"human", "ai", "system"}
+KNOWN_EPISTEMIC_STATUSES = {
+    "source-record", "human-stated", "ai-proposed", "human-confirmed",
+    "externally-verified", "disputed", "legacy-imported",
+}
+MEMORY_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$")
+TARGET_PROFILE_RE = re.compile(r"^(?:\*|[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,127})$")
+ACTOR_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,127}$")
+EVENT_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+LEGACY_EVENT_SCHEMAS = {"llm-wiki-memory-event/v1", "llm-wiki-memory-event/v2"}
+CURRENT_EVENT_SCHEMA = "llm-wiki-memory-event/v3"
+LEGACY_GOVERNANCE: dict[str, Any] = {
+    "domain": "work",
+    "sensitivity": "internal",
+    "review_state": "approved",
+    "target_profiles": ["*"],
+    "epistemic_status": "legacy-imported",
+}
 
 # Context-discipline per-layer line budgets (Loop/Graph/Context 三分法, Context 学科).
 # Context Rot research (Chroma, 18 frontier models) shows accuracy degrades with input
@@ -86,6 +114,349 @@ class Candidate:
     title: str
     text: str
     signals: dict[str, Any]
+    memory_id: str
+    governance: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AccessContext:
+    profile_name: str
+    domains: frozenset[str]
+    sensitivity_order: tuple[str, ...]
+    max_sensitivity_index: int
+    review_states: frozenset[str]
+    target_mode: str
+    accepted_targets: frozenset[str]
+    allow_raw: bool
+    allow_direct_graph: bool
+
+
+@dataclass(frozen=True)
+class PageMetadata:
+    memory_id: str
+    governance: dict[str, Any]
+    has_frontmatter: bool
+
+
+class PolicyError(ValueError):
+    """The policy or governance metadata is invalid; callers must fail closed."""
+
+
+def _string_list(value: Any, field: str) -> list[str]:
+    if not isinstance(value, list) or not value or not all(
+        isinstance(item, str) and item.strip() for item in value
+    ):
+        raise PolicyError(f"{field} must be a non-empty JSON string array")
+    normalized = [item.strip().lower() for item in value]
+    if len(set(normalized)) != len(normalized):
+        raise PolicyError(f"{field} contains duplicates")
+    return normalized
+
+
+def access_context(root: Path, profile_name: str) -> AccessContext:
+    policy_path = root / "policy" / "access.json"
+    if not policy_path.is_file() or policy_path.is_symlink():
+        raise PolicyError("missing policy/access.json; run llm-wiki-init to install the access policy")
+    try:
+        if policy_path.stat().st_size > MAX_POLICY_BYTES:
+            raise PolicyError(f"policy is larger than {MAX_POLICY_BYTES} bytes")
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PolicyError(f"cannot parse {policy_path}: {exc}") from exc
+    if not isinstance(policy, dict) or policy.get("schema_version") != POLICY_SCHEMA:
+        raise PolicyError(f"policy schema_version must be {POLICY_SCHEMA}")
+    if set(policy) != {"schema_version", "sensitivity_order", "profiles"}:
+        raise PolicyError("policy contains missing or unknown top-level fields")
+    sensitivity_order = _string_list(policy.get("sensitivity_order"), "sensitivity_order")
+    if sensitivity_order != ["public", "internal", "confidential", "restricted"]:
+        raise PolicyError("sensitivity_order must be public, internal, confidential, restricted")
+    profiles = policy.get("profiles")
+    if not isinstance(profiles, dict) or not profiles:
+        raise PolicyError("profiles must be a non-empty JSON object")
+    required_fields = {
+        "domains", "max_sensitivity", "review_states", "target_mode",
+        "accepted_targets", "allow_raw", "allow_direct_graph",
+    }
+    validated: dict[str, tuple[list[str], list[str], str, str, list[str], bool, bool]] = {}
+    for raw_name, profile in profiles.items():
+        if not isinstance(raw_name, str) or raw_name != raw_name.strip().lower() or not raw_name:
+            raise PolicyError("profile names must be non-empty lowercase strings")
+        if not isinstance(profile, dict) or set(profile) != required_fields:
+            raise PolicyError(f"profiles.{raw_name} contains missing or unknown fields")
+        domains = _string_list(profile["domains"], f"profiles.{raw_name}.domains")
+        reviews = _string_list(profile["review_states"], f"profiles.{raw_name}.review_states")
+        targets = _string_list(profile["accepted_targets"], f"profiles.{raw_name}.accepted_targets")
+        if not set(domains) <= KNOWN_DOMAINS:
+            raise PolicyError(f"profiles.{raw_name}.domains contains an unknown domain")
+        if not set(reviews) <= KNOWN_REVIEW_STATES:
+            raise PolicyError(f"profiles.{raw_name}.review_states contains an unknown state")
+        if any(not TARGET_PROFILE_RE.fullmatch(target) for target in targets):
+            raise PolicyError(f"profiles.{raw_name}.accepted_targets contains an invalid target")
+        maximum = profile["max_sensitivity"]
+        mode = profile["target_mode"]
+        if not isinstance(maximum, str) or maximum.lower() not in sensitivity_order:
+            raise PolicyError(f"profiles.{raw_name}.max_sensitivity is unknown")
+        if mode not in {"self", "any"}:
+            raise PolicyError(f"profiles.{raw_name}.target_mode must be self or any")
+        allow_raw = profile["allow_raw"]
+        allow_graph = profile["allow_direct_graph"]
+        if not isinstance(allow_raw, bool) or not isinstance(allow_graph, bool):
+            raise PolicyError(f"profiles.{raw_name} capability flags must be booleans")
+        validated[raw_name] = (domains, reviews, maximum.lower(), mode, targets, allow_raw, allow_graph)
+    name = profile_name.strip().lower() if isinstance(profile_name, str) else ""
+    if name not in validated:
+        raise PolicyError(f"unknown agent profile: {profile_name!r}")
+    domains, reviews, maximum, mode, targets, allow_raw, allow_graph = validated[name]
+    return AccessContext(
+        name, frozenset(domains), tuple(sensitivity_order), sensitivity_order.index(maximum),
+        frozenset(reviews), mode, frozenset(targets), allow_raw, allow_graph,
+    )
+
+
+def stable_memory_id(kind: str, material: str) -> str:
+    return f"{kind}:{hashlib.sha256(material.encode('utf-8', errors='replace')).hexdigest()[:20]}"
+
+
+def _unquote(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _targets(value: Any, *, frontmatter: bool = False) -> list[str] | None:
+    if frontmatter and isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            inner = stripped[1:-1].strip()
+            values = [] if not inner else [_unquote(item) for item in inner.split(",")]
+        else:
+            values = [_unquote(stripped)]
+    elif isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        values = value
+    else:
+        return None
+    normalized = [item.strip().lower() for item in values]
+    if any(not item for item in normalized):
+        return None
+    return normalized
+
+
+def _alias_value(mapping: dict[str, Any], canonical: str, alias: str, default: Any) -> Any:
+    if canonical in mapping and alias in mapping and mapping[canonical] != mapping[alias]:
+        raise PolicyError(f"conflicting {canonical}/{alias} fields")
+    return mapping[canonical] if canonical in mapping else mapping.get(alias, default)
+
+
+def governance_from_mapping(
+    mapping: dict[str, Any], fallback_memory_id: str, *, frontmatter: bool = False
+) -> tuple[str, dict[str, Any]]:
+    domain = mapping.get("domain", LEGACY_GOVERNANCE["domain"])
+    sensitivity = mapping.get("sensitivity", LEGACY_GOVERNANCE["sensitivity"])
+    review = _alias_value(mapping, "review_state", "review_status", LEGACY_GOVERNANCE["review_state"])
+    target_value = _alias_value(mapping, "target_profiles", "target_agents", LEGACY_GOVERNANCE["target_profiles"])
+    epistemic = mapping.get("epistemic_status", LEGACY_GOVERNANCE["epistemic_status"])
+    memory_id = mapping.get("memory_id", fallback_memory_id)
+    if frontmatter:
+        domain = _unquote(domain) if isinstance(domain, str) else domain
+        sensitivity = _unquote(sensitivity) if isinstance(sensitivity, str) else sensitivity
+        review = _unquote(review) if isinstance(review, str) else review
+        epistemic = _unquote(epistemic) if isinstance(epistemic, str) else epistemic
+        memory_id = _unquote(memory_id) if isinstance(memory_id, str) else memory_id
+    targets = _targets(target_value, frontmatter=frontmatter)
+    if not isinstance(domain, str) or domain.strip().lower() not in KNOWN_DOMAINS:
+        raise PolicyError("unknown domain")
+    if not isinstance(sensitivity, str) or sensitivity.strip().lower() not in KNOWN_SENSITIVITIES:
+        raise PolicyError("unknown sensitivity")
+    if not isinstance(review, str) or review.strip().lower() not in KNOWN_REVIEW_STATES:
+        raise PolicyError("unknown review state")
+    if not isinstance(epistemic, str) or epistemic.strip().lower() not in KNOWN_EPISTEMIC_STATUSES:
+        raise PolicyError("unknown epistemic status")
+    if targets is None or len(targets) != len(set(targets)) or any(
+        not TARGET_PROFILE_RE.fullmatch(target) for target in targets
+    ):
+        raise PolicyError("malformed target profiles")
+    if not isinstance(memory_id, str) or not MEMORY_ID_RE.fullmatch(memory_id.strip()):
+        raise PolicyError("malformed memory_id")
+    review_name = review.strip().lower()
+    governance: dict[str, Any] = {
+        "domain": domain.strip().lower(), "sensitivity": sensitivity.strip().lower(),
+        "review_state": review_name, "review_status": review_name,
+        "target_profiles": targets, "target_agents": list(targets),
+        "epistemic_status": epistemic.strip().lower(),
+    }
+    project = mapping.get("project")
+    if isinstance(project, str) and project.strip():
+        governance["project"] = _unquote(project).strip()
+    return memory_id.strip(), governance
+
+
+def is_authorized(governance: dict[str, Any], access: AccessContext) -> bool:
+    if governance.get("domain") not in access.domains:
+        return False
+    sensitivity = governance.get("sensitivity")
+    if sensitivity not in access.sensitivity_order or access.sensitivity_order.index(sensitivity) > access.max_sensitivity_index:
+        return False
+    if governance.get("review_status") not in access.review_states:
+        return False
+    targets = governance.get("target_profiles")
+    if not isinstance(targets, list):
+        return False
+    return access.target_mode == "any" or bool({"*", "all", *access.accepted_targets} & set(targets))
+
+
+def matches_project(governance: dict[str, Any], project: str | None) -> bool:
+    return not project or governance.get("project") in {None, "", project}
+
+
+def page_metadata(path: Path, wiki_dir: Path) -> PageMetadata | None:
+    if wiki_dir.is_symlink():
+        return None
+    try:
+        path.resolve(strict=True).relative_to(wiki_dir.resolve(strict=True))
+        relative = path.relative_to(wiki_dir).as_posix()
+    except (OSError, ValueError):
+        return None
+    fallback_id = stable_memory_id("wiki", relative)
+    try:
+        with path.open("rb") as handle:
+            first = handle.readline(MAX_FRONTMATTER_BYTES + 1)
+            if len(first) > MAX_FRONTMATTER_BYTES:
+                return None
+            consumed = len(first)
+            marker = first[3:] if first.startswith(b"\xef\xbb\xbf") else first
+            marker = marker.rstrip(b"\r\n")
+            if marker != b"---":
+                if marker.strip().startswith(b"---"):
+                    return None
+                if not marker.strip():
+                    while consumed <= MAX_FRONTMATTER_BYTES:
+                        probe = handle.readline(MAX_FRONTMATTER_BYTES - consumed + 1)
+                        if not probe:
+                            break
+                        consumed += len(probe)
+                        if consumed > MAX_FRONTMATTER_BYTES:
+                            return None
+                        stripped = probe.rstrip(b"\r\n").strip()
+                        if not stripped:
+                            continue
+                        if stripped.startswith(b"---"):
+                            return None
+                        break
+                memory_id, governance = governance_from_mapping({}, fallback_id)
+                return PageMetadata(memory_id, governance, False)
+            fields: dict[str, str] = {}
+            keys = {
+                "memory_id", "domain", "sensitivity", "review_state", "review_status",
+                "target_profiles", "target_agents", "epistemic_status", "project",
+            }
+            closed = False
+            while consumed <= MAX_FRONTMATTER_BYTES:
+                line = handle.readline(MAX_FRONTMATTER_BYTES - consumed + 1)
+                if not line:
+                    break
+                consumed += len(line)
+                if consumed > MAX_FRONTMATTER_BYTES:
+                    break
+                if line.rstrip(b"\r\n") == b"---":
+                    closed = True
+                    break
+                decoded = line.decode("utf-8")
+                key, separator, value = decoded.partition(":")
+                key = key.strip().lower()
+                if separator and key in keys:
+                    if key in fields:
+                        return None
+                    fields[key] = value.strip()
+            if not closed:
+                return None
+    except (OSError, UnicodeError):
+        return None
+    try:
+        memory_id, governance = governance_from_mapping(fields, fallback_id, frontmatter=True)
+    except PolicyError:
+        return None
+    return PageMetadata(memory_id, governance, True)
+
+
+def strip_frontmatter(text: str, has_frontmatter: bool) -> str:
+    if not has_frontmatter:
+        return text
+    lines = text.splitlines()
+    for index, line in enumerate(lines[1:], 1):
+        if line == "---":
+            return "\n".join(lines[index + 1 :])
+    return ""
+
+
+def event_metadata(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    schema_present = "schema_version" in event
+    schema = event.get("schema_version")
+    if schema_present and schema not in LEGACY_EVENT_SCHEMAS and schema != CURRENT_EVENT_SCHEMA:
+        return None
+    event_id = event.get("id")
+    if isinstance(event_id, str) and event_id.strip():
+        fallback_id = f"event:{event_id.strip()}"
+    else:
+        canonical = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        fallback_id = stable_memory_id("event", canonical)
+    if schema == CURRENT_EVENT_SCHEMA:
+        required = {
+            "id", "memory_id", "actor", "domain", "sensitivity", "epistemic_status",
+            "review_status", "target_agents",
+        }
+        if not required <= set(event) or "review_state" in event or "target_profiles" in event:
+            return None
+        if not isinstance(event_id, str) or not EVENT_ID_RE.fullmatch(event_id):
+            return None
+        if event.get("memory_id") != f"event:{event_id}":
+            return None
+        actor = event.get("actor")
+        if not isinstance(actor, dict) or set(actor) != {"type", "id"}:
+            return None
+        actor_type, actor_id = actor.get("type"), actor.get("id")
+        if actor_type not in KNOWN_ACTOR_TYPES or not isinstance(actor_id, str) or not ACTOR_ID_RE.fullmatch(actor_id):
+            return None
+        if event.get("lifecycle", "active") not in {"active", "deprecated"}:
+            return None
+        if "timestamp" in event and parse_time(event.get("timestamp")) is None:
+            return None
+        if "valid_from" in event and parse_time(event.get("valid_from")) is None:
+            return None
+        if "valid_until" in event and parse_time(event.get("valid_until")) is None:
+            return None
+        supersedes = event.get("supersedes", [])
+        if not isinstance(supersedes, list) or not all(
+            isinstance(item, str) and EVENT_ID_RE.fullmatch(item) for item in supersedes
+        ):
+            return None
+    try:
+        memory_id, governance = governance_from_mapping(event, fallback_id)
+    except PolicyError:
+        return None
+    if schema == CURRENT_EVENT_SCHEMA:
+        actor_type = event["actor"]["type"]
+        epistemic = governance["epistemic_status"]
+        review = governance["review_status"]
+        if actor_type == "ai" and (epistemic != "ai-proposed" or review != "pending"):
+            return None
+        if epistemic == "ai-proposed" and (actor_type != "ai" or review != "pending"):
+            return None
+        if review == "pending" and (actor_type != "ai" or epistemic != "ai-proposed"):
+            return None
+        if review == "rejected" and (actor_type != "human" or epistemic != "disputed"):
+            return None
+        if epistemic == "disputed" and (actor_type != "human" or review != "rejected"):
+            return None
+        if epistemic in {"human-stated", "human-confirmed"} and (
+            actor_type != "human" or review != "approved"
+        ):
+            return None
+        if epistemic in {"source-record", "externally-verified", "legacy-imported"} and review != "approved":
+            return None
+    return memory_id, governance
 
 
 def redact(text: str) -> str:
@@ -244,39 +615,90 @@ def decayed_confidence(event: dict[str, Any]) -> float:
     return base * math.pow(0.5, age_days / half_life)
 
 
-def load_events(root: Path) -> list[dict[str, Any]]:
+def load_events(root: Path, access: AccessContext) -> list[dict[str, Any]]:
     events_dir = root / "memory" / "events"
-    if not events_dir.exists():
+    if not events_dir.is_dir() or events_dir.is_symlink():
         return []
     events: list[dict[str, Any]] = []
+    scanned = 0
     for path in sorted(events_dir.glob("*.jsonl"), reverse=True):
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.strip():
-                continue
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(item, dict):
-                events.append(item)
-                if len(events) >= MAX_EVENT_LINES:
-                    break
-        if len(events) >= MAX_EVENT_LINES:
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            with path.open("rb") as handle:
+                while scanned < MAX_EVENT_LINES:
+                    raw_line = handle.readline(MAX_EVENT_LINE_BYTES + 1)
+                    if not raw_line:
+                        break
+                    scanned += 1
+                    if len(raw_line) > MAX_EVENT_LINE_BYTES:
+                        # Do not drain an attacker-controlled giant line into
+                        # memory; stop this file and continue with older files.
+                        break
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        item = json.loads(raw_line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    metadata = event_metadata(item)
+                    if metadata is None:
+                        continue
+                    memory_id, governance = metadata
+                    governed = dict(item)
+                    governed["__memory_id"] = memory_id
+                    governed["__governance"] = governance
+                    events.append(governed)
+        except OSError:
+            continue
+        if scanned >= MAX_EVENT_LINES:
             break
 
     now = datetime.now(timezone.utc)
+    id_counts = Counter(
+        str(event.get("id")) for event in events
+        if isinstance(event.get("id"), str) and event.get("id")
+    )
+    events = [event for event in events if not isinstance(event.get("id"), str) or id_counts[str(event.get("id"))] == 1]
+    event_index = {
+        str(event["id"]): event for event in events
+        if isinstance(event.get("id"), str) and event.get("id")
+    }
     superseded: set[str] = set()
-    for event in events:
-        if event.get("lifecycle", "active") == "deprecated":
+    for revision in events:
+        if revision.get("lifecycle", "active") == "deprecated":
             continue
-        valid_from = parse_time(event.get("valid_from") or event.get("timestamp"))
+        valid_from = parse_time(revision.get("valid_from") or revision.get("timestamp"))
         if valid_from is not None and valid_from > now:
             continue
-        targets = event.get("supersedes", [])
+        revision_review = revision["__governance"].get("review_status")
+        if revision_review == "pending":
+            continue
+        targets = revision.get("supersedes", [])
         if isinstance(targets, str):
             targets = [targets]
         if isinstance(targets, list):
-            superseded.update(str(item) for item in targets if isinstance(item, str))
+            for item in targets:
+                if not isinstance(item, str):
+                    continue
+                target = event_index.get(item)
+                if target is None:
+                    continue
+                revision_governance = revision["__governance"]
+                target_governance = target["__governance"]
+                if revision_governance.get("domain") != target_governance.get("domain"):
+                    continue
+                revision_project = revision_governance.get("project") or None
+                target_project = target_governance.get("project") or None
+                if revision_project != target_project:
+                    continue
+                target_review = target_governance.get("review_status")
+                if revision_review == "approved" or (
+                    revision_review == "rejected" and target_review == "pending"
+                ):
+                    superseded.add(item)
 
     active: list[dict[str, Any]] = []
     for event in events:
@@ -289,6 +711,8 @@ def load_events(root: Path) -> list[dict[str, Any]]:
         if valid_from is not None and valid_from > now:
             continue
         if valid_until is not None and valid_until <= now:
+            continue
+        if not is_authorized(event["__governance"], access):
             continue
         active.append(event)
     return active
@@ -347,20 +771,34 @@ def event_candidates(
                     "decayed_confidence": round(decayed_confidence(event), 6),
                     "lexical_evidence": evidence,
                 },
+                memory_id=str(event["__memory_id"]),
+                governance=dict(event["__governance"]),
             )
         )
     return candidates
 
 
-def _legacy_wiki_candidates(root: Path, query_tokens: set[str]) -> list[Candidate]:
+def _legacy_wiki_candidates(
+    root: Path,
+    query_tokens: set[str],
+    access: AccessContext,
+    project: str | None = None,
+) -> list[Candidate]:
     wiki_dir = root / "wiki"
     if not wiki_dir.exists():
         return []
     candidates: list[Candidate] = []
     paths = sorted(path for path in wiki_dir.rglob("*.md") if path.is_file())
     for path in paths[:80]:
-        with path.open("rb") as handle:
-            text = handle.read(MAX_WIKI_BYTES).decode("utf-8", errors="replace")
+        metadata = page_metadata(path, wiki_dir)
+        if metadata is None or not is_authorized(metadata.governance, access) or not matches_project(metadata.governance, project):
+            continue
+        try:
+            with path.open("rb") as handle:
+                text = handle.read(MAX_WIKI_BYTES).decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        text = strip_frontmatter(text, metadata.has_frontmatter)
         title = path.relative_to(wiki_dir).as_posix()
         tokens = legacy_tokenize([title, text[:12000]])
         overlap = len(query_tokens & tokens)
@@ -375,19 +813,31 @@ def _legacy_wiki_candidates(root: Path, query_tokens: set[str]) -> list[Candidat
                 title=title,
                 text=excerpt,
                 signals={"legacy_overlap": overlap, "title_bonus": title_bonus},
+                memory_id=metadata.memory_id,
+                governance=metadata.governance,
             )
         )
     return candidates
 
 
-def wiki_candidates(root: Path, query: str, query_terms: list[str], query_groups: list[set[str]]) -> list[Candidate]:
+def wiki_candidates(
+    root: Path,
+    query: str,
+    query_terms: list[str],
+    query_groups: list[set[str]],
+    access: AccessContext,
+    project: str | None = None,
+) -> list[Candidate]:
     wiki_dir = root / "wiki"
     if not wiki_dir.exists() or not query_terms:
         return []
 
-    documents: list[tuple[str, str, list[str], list[str]]] = []
+    documents: list[tuple[str, str, list[str], list[str], PageMetadata]] = []
     total_bytes = 0
     for path in sorted(item for item in wiki_dir.rglob("*.md") if item.is_file())[:MAX_WIKI_FILES]:
+        metadata = page_metadata(path, wiki_dir)
+        if metadata is None or not is_authorized(metadata.governance, access) or not matches_project(metadata.governance, project):
+            continue
         try:
             with path.open("rb") as handle:
                 raw = handle.read(MAX_WIKI_BYTES)
@@ -396,22 +846,22 @@ def wiki_candidates(root: Path, query: str, query_terms: list[str], query_groups
         if total_bytes + len(raw) > MAX_WIKI_TOTAL_BYTES:
             break
         total_bytes += len(raw)
-        text = raw.decode("utf-8", errors="replace")
+        text = strip_frontmatter(raw.decode("utf-8", errors="replace"), metadata.has_frontmatter)
         title = path.relative_to(wiki_dir).as_posix()
-        documents.append((title, text, token_terms([title, text]), token_terms([title])))
+        documents.append((title, text, token_terms([title, text]), token_terms([title]), metadata))
 
     if not documents:
         return []
     document_frequency: Counter[str] = Counter()
-    for _, _, terms, _ in documents:
+    for _, _, terms, _, _ in documents:
         document_frequency.update(set(terms))
-    average_length = sum(len(terms) for _, _, terms, _ in documents) / len(documents)
+    average_length = sum(len(terms) for _, _, terms, _, _ in documents) / len(documents)
     average_length = max(1.0, average_length)
     query_counts = Counter(query_terms)
     normalized_query = " ".join(query.lower().split())
     candidates: list[Candidate] = []
 
-    for title, text, terms, title_terms in documents:
+    for title, text, terms, title_terms, metadata in documents:
         frequencies = Counter(terms)
         bm25 = 0.0
         matched: list[str] = []
@@ -456,6 +906,8 @@ def wiki_candidates(root: Path, query: str, query_terms: list[str], query_groups
                     "matched_terms": sorted(set(matched), key=lambda item: (-len(item), item))[:12],
                     "lexical_evidence": evidence,
                 },
+                memory_id=metadata.memory_id,
+                governance=metadata.governance,
             )
         )
     return candidates
@@ -476,13 +928,16 @@ def extract_excerpt(text: str, query_tokens: set[str], max_lines: int = 8) -> st
     return "\n".join(lines[idx] for idx in selected if lines[idx].strip())
 
 
-def graph_hint(root: Path, query_tokens: set[str], query_groups: list[set[str]]) -> Candidate | None:
-    if not query_tokens:
+def graph_hint(
+    root: Path, query_tokens: set[str], query_groups: list[set[str]], access: AccessContext
+) -> Candidate | None:
+    if not query_tokens or not access.allow_direct_graph:
         return None
     report = root / "graphify-out" / "GRAPH_REPORT.md"
-    if not report.exists():
-        report = Path.cwd() / "graphify-out" / "GRAPH_REPORT.md"
-    if not report.exists():
+    if not report.is_file() or report.is_symlink() or report.parent.is_symlink():
+        return None
+    memory_id, governance = governance_from_mapping({}, stable_memory_id("graph", report.name))
+    if not is_authorized(governance, access):
         return None
     text = report.read_text(encoding="utf-8", errors="replace")
     matching_lines = [
@@ -502,13 +957,19 @@ def graph_hint(root: Path, query_tokens: set[str], query_groups: list[set[str]])
         title=str(report),
         text="\n".join(matching_lines),
         signals={"token_overlap": len(matched_terms), "lexical_evidence": evidence},
+        memory_id=memory_id,
+        governance=governance,
     )
 
 
-def read_text_head(path: Path, max_bytes: int = MAX_WIKI_BYTES) -> str:
+def read_text_head(path: Path, root: Path, access: AccessContext, max_bytes: int = MAX_WIKI_BYTES) -> str:
+    metadata = page_metadata(path, root / "wiki")
+    if metadata is None or not is_authorized(metadata.governance, access):
+        return ""
     try:
         with path.open("rb") as handle:
-            return handle.read(max_bytes).decode("utf-8", errors="replace")
+            text = handle.read(max_bytes).decode("utf-8", errors="replace")
+            return strip_frontmatter(text, metadata.has_frontmatter)
     except OSError:
         return ""
 
@@ -572,7 +1033,9 @@ def drop_done_lines(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not _DONE_LINE_RE.match(line)).strip()
 
 
-def session_start_sections(root: Path, max_projects: int, scope: str = "full") -> list[str]:
+def session_start_sections(
+    root: Path, max_projects: int, access: AccessContext, scope: str = "full"
+) -> list[str]:
     """Assemble session-start digest sections in priority order.
 
     Prefers the curated wiki/context/ layer; falls back to index.md + Today.md so
@@ -581,14 +1044,14 @@ def session_start_sections(root: Path, max_projects: int, scope: str = "full") -
     context_dir = root / "wiki" / "context"
     parts: list[str] = []
 
-    critical = read_text_head(context_dir / "CRITICAL_FACTS.md")
+    critical = read_text_head(context_dir / "CRITICAL_FACTS.md", root, access)
     block = section("Critical Facts", take_lines(critical, LAYER_LINES_CRITICAL)) if critical else None
     if block:
         parts.append(block)
     if scope == "critical":
         return parts
 
-    active = read_text_head(context_dir / "active-projects.md")
+    active = read_text_head(context_dir / "active-projects.md", root, access)
     if active:
         status_only, dropped = strip_next_actions(take_lines(active, LAYER_LINES_PROJECTS))
         status_only = drop_done_lines(status_only)
@@ -599,7 +1062,7 @@ def session_start_sections(root: Path, max_projects: int, scope: str = "full") -
             )
         block = section("Active Projects (status only)", status_only)
     else:
-        index_text = read_text_head(root / "wiki" / "index.md")
+        index_text = read_text_head(root / "wiki" / "index.md", root, access)
         project_lines = [
             line.rstrip()
             for line in index_text.splitlines()
@@ -611,7 +1074,7 @@ def session_start_sections(root: Path, max_projects: int, scope: str = "full") -
     if scope == "status":
         return parts
 
-    loops = read_text_head(context_dir / "open-loops.md")
+    loops = read_text_head(context_dir / "open-loops.md", root, access)
     if loops:
         loops_status, _ = strip_next_actions(take_lines(loops, LAYER_LINES_LOOPS))
         loops_status = drop_done_lines(loops_status)
@@ -622,13 +1085,13 @@ def session_start_sections(root: Path, max_projects: int, scope: str = "full") -
         parts.append(block)
 
     if not (context_dir / "open-loops.md").exists():
-        today = read_text_head(root / "Today.md")
+        today = read_text_head(root / "Today.md", root, access)
         block = section("Today (latest session)", take_lines(today, LAYER_LINES_TODAY)) if today else None
         if block:
             parts.append(block)
 
     report = root / "graphify-out" / "GRAPH_REPORT.md"
-    graph_text = read_text_head(report) if report.exists() else ""
+    graph_text = read_text_head(report, root, access) if report.exists() and access.allow_direct_graph else ""
     block = section("Knowledge Graph (overview)", take_lines(graph_text, LAYER_LINES_GRAPH)) if graph_text else None
     if block:
         parts.append(block)
@@ -636,8 +1099,10 @@ def session_start_sections(root: Path, max_projects: int, scope: str = "full") -
     return parts
 
 
-def render_session_start(root: Path, max_chars: int, max_projects: int, scope: str = "full") -> str:
-    parts = session_start_sections(root, max_projects, scope)
+def render_session_start(
+    root: Path, max_chars: int, max_projects: int, access: AccessContext, scope: str = "full"
+) -> str:
+    parts = session_start_sections(root, max_projects, access, scope)
     if not parts:
         return "## Wikified — Session Memory\n\nNo wiki content found yet.\n"
     body = redact("\n\n".join(parts).strip())
@@ -673,6 +1138,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--file", dest="files", action="append", default=[], help="Touched file path. Repeatable.")
     parser.add_argument("--query", default="", help="Natural-language query or task description.")
     parser.add_argument("--project", help="Filter memory events by project id.")
+    parser.add_argument(
+        "--agent-profile",
+        default=os.environ.get("LLM_WIKI_AGENT_PROFILE", "coding"),
+        help="Fixed access-policy profile (default: LLM_WIKI_AGENT_PROFILE or coding).",
+    )
+    parser.add_argument(
+        "--read-page",
+        help="Policy-checked full-page read; accepts only a relative wiki/**/*.md path.",
+    )
     parser.add_argument("--limit", type=int, default=8, help="Maximum candidates to print.")
     parser.add_argument("--max-chars", type=int, default=3500, help="Maximum output characters.")
     parser.add_argument("--json", action="store_true", help="Output machine-readable JSON instead of Markdown.")
@@ -735,6 +1209,15 @@ def render_markdown(candidates: list[Candidate], max_chars: int, ambient: bool =
         if not text.strip():
             continue
         chunks.append(f"### {candidate.source}: {candidate.title}")
+        governance = candidate.governance
+        targets = ",".join(str(item) for item in governance.get("target_agents", []))
+        chunks.append(
+            "> provenance: "
+            f"memory_id={candidate.memory_id} · domain={governance.get('domain', '')} · "
+            f"sensitivity={governance.get('sensitivity', '')} · "
+            f"epistemic_status={governance.get('epistemic_status', '')} · "
+            f"review_status={governance.get('review_status', '')} · target_agents={targets}"
+        )
         chunks.append(redact(text))
         chunks.append("")
     output = "\n".join(chunks).strip() + "\n"
@@ -754,6 +1237,8 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
             "title": candidate.title,
             "text": redact(candidate.text.strip()),
             "signals": candidate.signals,
+            "memory_id": candidate.memory_id,
+            "governance": candidate.governance,
         }
         trial = payload + [base]
         serialized = json.dumps(trial, ensure_ascii=False, indent=2)
@@ -780,15 +1265,69 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def read_page(
+    root: Path, requested: str, access: AccessContext, project: str | None
+) -> str | None:
+    relative = Path(requested)
+    if (
+        not requested or relative.is_absolute() or relative.suffix.lower() != ".md"
+        or not relative.parts or relative.parts[0] != "wiki"
+        or any(part in {"", ".", ".."} or ":" in part for part in relative.parts)
+    ):
+        return None
+    wiki_dir = root / "wiki"
+    candidate = root.joinpath(*relative.parts)
+    try:
+        resolved_wiki = wiki_dir.resolve(strict=True)
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(resolved_wiki)
+        if not resolved.is_file() or resolved.stat().st_size > MAX_READ_PAGE_BYTES:
+            return None
+    except (OSError, ValueError):
+        return None
+    metadata = page_metadata(candidate, wiki_dir)
+    if (
+        metadata is None or not is_authorized(metadata.governance, access)
+        or not matches_project(metadata.governance, project)
+    ):
+        return None
+    try:
+        with candidate.open("rb") as handle:
+            raw = handle.read(MAX_READ_PAGE_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > MAX_READ_PAGE_BYTES:
+        return None
+    return redact(raw.decode("utf-8", errors="replace"))
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     root = root_path()
+    try:
+        access = access_context(root, args.agent_profile)
+    except PolicyError as exc:
+        print(f"llm-wiki-enrich: access denied ({exc})", file=sys.stderr)
+        return 3
+    if args.read_page is not None:
+        if args.files or args.query or args.session_start:
+            print("llm-wiki-enrich: page unavailable", file=sys.stderr)
+            return 3
+        page = read_page(root, args.read_page, access, args.project)
+        if page is None:
+            print("llm-wiki-enrich: page unavailable", file=sys.stderr)
+            return 3
+        sys.stdout.write(page)
+        if page and not page.endswith("\n"):
+            sys.stdout.write("\n")
+        return 0
     if args.session_start:
         sys.stdout.write(
             render_session_start(
                 root,
                 max(200, args.max_chars),
                 max(1, args.max_projects),
+                access,
                 args.session_start_scope,
             )
         )
@@ -801,12 +1340,12 @@ def main(argv: list[str]) -> int:
     query_terms = token_terms(query_parts)
     query_groups = query_term_groups(query_parts)
     query_tokens = set(query_terms)
-    candidates = event_candidates(load_events(root), query_tokens, query_groups, touched_files, args.project)
+    candidates = event_candidates(load_events(root, access), query_tokens, query_groups, touched_files, args.project)
     if args.ranking == "legacy":
-        candidates.extend(_legacy_wiki_candidates(root, legacy_tokenize([args.query, *touched_files])))
+        candidates.extend(_legacy_wiki_candidates(root, legacy_tokenize([args.query, *touched_files]), access, args.project))
     else:
-        candidates.extend(wiki_candidates(root, args.query, query_terms, query_groups))
-    hint = graph_hint(root, query_tokens, query_groups)
+        candidates.extend(wiki_candidates(root, args.query, query_terms, query_groups, access, args.project))
+    hint = graph_hint(root, query_tokens, query_groups, access)
     if hint is not None:
         candidates.append(hint)
     candidates = sorted(candidates, key=lambda item: item.score, reverse=True)[: max(1, args.limit)]

@@ -1,0 +1,92 @@
+{
+  "schema_version": "llm-wiki-access-policy/v1",
+  "sensitivity_order": [
+    "public",
+    "internal",
+    "confidential",
+    "restricted"
+  ],
+  "profiles": {
+    "coding": {
+      "domains": ["work"],
+      "max_sensitivity": "internal",
+      "review_states": ["approved"],
+      "target_mode": "self",
+      "accepted_targets": ["coding"],
+      "allow_raw": false,
+      "allow_direct_graph": false
+    },
+    "codex": {
+      "domains": ["work"],
+      "max_sensitivity": "internal",
+      "review_states": ["approved"],
+      "target_mode": "self",
+      "accepted_targets": ["codex", "coding"],
+      "allow_raw": false,
+      "allow_direct_graph": false
+    },
+    "opencode": {
+      "domains": ["work"],
+      "max_sensitivity": "internal",
+      "review_states": ["approved"],
+      "target_mode": "self",
+      "accepted_targets": ["opencode", "coding"],
+      "allow_raw": false,
+      "allow_direct_graph": false
+    },
+    "claude": {
+      "domains": ["work"],
+      "max_sensitivity": "internal",
+      "review_states": ["approved"],
+      "target_mode": "self",
+      "accepted_targets": ["claude", "coding"],
+      "allow_raw": false,
+      "allow_direct_graph": false
+    },
+    "cursor": {
+      "domains": ["work"],
+      "max_sensitivity": "internal",
+      "review_states": ["approved"],
+      "target_mode": "self",
+      "accepted_targets": ["cursor", "coding"],
+      "allow_raw": false,
+      "allow_direct_graph": false
+    },
+    "grok": {
+      "domains": ["work"],
+      "max_sensitivity": "internal",
+      "review_states": ["approved"],
+      "target_mode": "self",
+      "accepted_targets": ["grok", "coding"],
+      "allow_raw": false,
+      "allow_direct_graph": false
+    },
+    "planning": {
+      "domains": ["work"],
+      "max_sensitivity": "confidential",
+      "review_states": ["approved"],
+      "target_mode": "self",
+      "accepted_targets": ["planning"],
+      "allow_raw": false,
+      "allow_direct_graph": false
+    },
+    "reflection": {
+      "domains": ["personal", "work"],
+      "max_sensitivity": "restricted",
+      "review_states": ["approved"],
+      "target_mode": "self",
+      "accepted_targets": ["reflection"],
+      "allow_raw": false,
+      "allow_direct_graph": false
+    },
+    "human": {
+      "domains": ["personal", "work"],
+      "max_sensitivity": "restricted",
+      "review_states": ["pending", "approved"],
+      "target_mode": "any",
+      "accepted_targets": ["human"],
+      "allow_raw": true,
+      "allow_direct_graph": true
+    }
+  }
+}

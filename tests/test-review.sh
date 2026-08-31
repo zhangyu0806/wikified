@@ -30,6 +30,17 @@ EOF
 cat >"$ROOT/memory/events/2999-01.jsonl" <<'EOF'
 {"schema_version":"llm-wiki-memory-event/v2","id":"bbbbbbbbbbbbbbbb","timestamp":"2999-01-01T00:00:00+00:00","type":"fact","project":"new","summary":"fresh fact","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2999-01-01T00:00:00+00:00"}
 EOF
+# 一条稳定目标 + 一条会替代它的 AI pending proposal。复盘必须披露替代影响。
+cat >"$ROOT/memory/events/2026-08.jsonl" <<'EOF'
+{"schema_version":"llm-wiki-memory-event/v3","id":"dddddddddddddddd","memory_id":"event:dddddddddddddddd","timestamp":"2999-01-01T00:00:00+00:00","type":"decision","project":"alpha","summary":"approved target summary for replacement review","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2999-01-01T00:00:00+00:00","actor":{"type":"human","id":"local-user"},"domain":"work","sensitivity":"internal","epistemic_status":"human-confirmed","review_status":"approved","target_agents":["codex"]}
+{"schema_version":"llm-wiki-memory-event/v3","id":"cccccccccccccccc","memory_id":"event:cccccccccccccccc","timestamp":"2026-08-31T00:00:00+00:00","type":"decision","project":"alpha","summary":"pending AI proposal","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2026-08-31T00:00:00+00:00","actor":{"type":"ai","id":"codex"},"domain":"work","sensitivity":"internal","epistemic_status":"ai-proposed","review_status":"pending","target_agents":["codex"],"supersedes":["dddddddddddddddd"]}
+{"schema_version":"llm-wiki-memory-event/v3","id":"eeeeeeeeeeeeeeee","memory_id":"event:eeeeeeeeeeeeeeee","timestamp":"2026-08-31T00:00:00+00:00","type":"fact","project":"alpha","summary":"first still-reviewable pending proposal","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2026-08-31T00:00:00+00:00","actor":{"type":"ai","id":"codex"},"domain":"work","sensitivity":"internal","epistemic_status":"ai-proposed","review_status":"pending","target_agents":["codex"]}
+{"schema_version":"llm-wiki-memory-event/v3","id":"ffffffffffffffff","memory_id":"event:ffffffffffffffff","timestamp":"2026-08-31T00:00:00+00:00","type":"fact","project":"alpha","summary":"pending proposal that intends to supersede another pending proposal","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2026-08-31T00:00:00+00:00","actor":{"type":"ai","id":"opencode"},"domain":"work","sensitivity":"internal","epistemic_status":"ai-proposed","review_status":"pending","target_agents":["codex","opencode"],"supersedes":["eeeeeeeeeeeeeeee"]}
+{"schema_version":"llm-wiki-memory-event/v3","id":"3333333333333333","memory_id":"event:3333333333333333","timestamp":"2026-08-31T00:00:00+00:00","type":"fact","project":"alpha","summary":"pending closed by an ordinary approved replacement","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2026-08-31T00:00:00+00:00","actor":{"type":"ai","id":"codex"},"domain":"work","sensitivity":"internal","epistemic_status":"ai-proposed","review_status":"pending","target_agents":["codex"]}
+{"schema_version":"llm-wiki-memory-event/v3","id":"4444444444444444","memory_id":"event:4444444444444444","timestamp":"2026-08-31T00:00:01+00:00","type":"fact","project":"alpha","summary":"ordinary approved replacement with no trusted source label","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2026-08-31T00:00:00+00:00","actor":{"type":"human","id":"local-user"},"domain":"work","sensitivity":"internal","epistemic_status":"human-stated","review_status":"approved","target_agents":["codex"],"supersedes":["3333333333333333"]}
+{"schema_version":"llm-wiki-memory-event/v3","id":"7777777777777777","memory_id":"event:7777777777777777","timestamp":"2026-08-31T00:00:00+00:00","type":"fact","project":"alpha","summary":"first ambiguous pending row","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2026-08-31T00:00:00+00:00","actor":{"type":"ai","id":"codex"},"domain":"work","sensitivity":"internal","epistemic_status":"ai-proposed","review_status":"pending","target_agents":["codex"]}
+{"schema_version":"llm-wiki-memory-event/v3","id":"7777777777777777","memory_id":"event:7777777777777777","timestamp":"2026-08-31T00:00:01+00:00","type":"fact","project":"alpha","summary":"second ambiguous pending row","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2026-08-31T00:00:00+00:00","actor":{"type":"ai","id":"codex"},"domain":"work","sensitivity":"internal","epistemic_status":"ai-proposed","review_status":"pending","target_agents":["codex"]}
+EOF
 
 # --- 1. JSON 聚合正确性 ---
 OUT=$(env LLM_WIKI_ROOT="$ROOT" python3 "$REVIEW" --json --peek --root "$ROOT")
@@ -37,11 +48,30 @@ python3 -c '
 import json,sys
 r=json.load(sys.stdin)
 assert len(r["corrections_pending"]) == 2, "corrections=%d" % len(r["corrections_pending"])
-assert r["event_total"] == 2, r["event_total"]
+assert r["event_total"] == 10, r["event_total"]
+proposals={x["id"]:x for x in r["ai_proposals_pending"]}
+assert set(proposals) == {"cccccccccccccccc","eeeeeeeeeeeeeeee","ffffffffffffffff"}, proposals
+proposal=proposals["cccccccccccccccc"]
+assert proposal["supersedes_ids"] == ["dddddddddddddddd"], proposal
+assert proposal["requires_supersedes_confirmation"] is True
+assert proposal["requires_global_target_confirmation"] is False
+assert proposal["supersedes_targets"] == [{
+    "id":"dddddddddddddddd",
+    "found":True,
+    "type":"decision",
+    "project":"alpha",
+    "summary":"approved target summary for replacement review",
+    "review_status":"approved",
+    "lifecycle":"active",
+    "domain":"work",
+    "sensitivity":"internal",
+}], proposal["supersedes_targets"]
+assert proposals["ffffffffffffffff"]["supersedes_ids"] == ["eeeeeeeeeeeeeeee"]
 # 老 event 应入 expire 候选，新 event 不应
 ids=[e["id"] for e in r["expire_candidates"]]
 assert "aaaaaaaaaaaaaaaa" in ids, "old event missing from expire candidates"
 assert "bbbbbbbbbbbbbbbb" not in ids, "fresh event wrongly flagged expire"
+assert "cccccccccccccccc" not in ids, "pending proposal wrongly flagged expire"
 # 未编译 raw 计入、已编译不计
 paths=[x["path"] for x in r["uncompiled_raw"]]
 assert any("uncompiled.md" in p for p in paths), paths
@@ -52,6 +82,10 @@ printf 'PASS  review 聚合：corrections/events/expire/uncompiled-raw 分类正
 MD=$(env LLM_WIKI_ROOT="$ROOT" python3 "$REVIEW" --peek --root "$ROOT")
 grep -q '\[\[raw/notes/uncompiled|uncompiled\]\]' <<<"$MD" \
   || { printf 'FAIL: review Markdown 应把已镜像 raw note 渲染成 Obsidian wikilink\n'; exit 1; }
+grep -q '\[dddddddddddddddd\].*approved target summary for replacement review' <<<"$MD" \
+  || { printf 'FAIL: review Markdown 应披露 supersedes 目标 ID 与摘要\n'; exit 1; }
+grep -q 'llm-wiki-event --approve cccccccccccccccc --confirm-supersedes' <<<"$MD" \
+  || { printf 'FAIL: review Markdown 应给出 supersedes 确认参数\n'; exit 1; }
 printf 'PASS  review Markdown: 已镜像 raw 路径可在 Obsidian 中点击\n'
 
 # --- 2. --peek 不写时间戳，正式跑写时间戳 ---

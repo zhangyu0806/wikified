@@ -39,9 +39,22 @@ fi
 R="$H1/llm-wiki"
 
 # Tier A：消除硬失败的必需项
-for p in SCHEMA.md .gitattributes .gitignore .secret-allowlist .githooks/pre-commit; do
+for p in SCHEMA.md SYNC.md policy/access.json .gitattributes .gitignore .secret-allowlist .githooks/pre-commit; do
   [[ -e "$R/$p" ]] && ok "manifest: $p" || bad "manifest: 缺 $p"
 done
+if cmp -s "$R/SYNC.md" "$REPO/templates/SYNC.md" \
+   && grep -q '^## 三层模型$' "$R/SYNC.md" \
+   && grep -q '<private-data-remote>' "$R/SYNC.md"; then
+  ok "manifest: SYNC.md 使用通用私有 remote 与三层同步边界"
+else
+  bad "manifest: SYNC.md 未按公共模板安装或缺少通用同步边界"
+fi
+git -C "$R" ls-files --error-unmatch SYNC.md >/dev/null 2>&1 \
+  && ok "manifest: SYNC.md 已进入首个 commit，可随数据仓同步" \
+  || bad "manifest: SYNC.md 未被 Git 跟踪"
+grep -Fxq 'wiki/context/.open-loops.bak' "$R/.gitignore" \
+  && ok "manifest: 机器本地 open-loops 备份不跨机同步" \
+  || bad "manifest: .gitignore 缺 open-loops 本地备份规则"
 [[ -d "$R/.git" ]] && ok "manifest: .git 已初始化" || bad "manifest: 缺 .git"
 if [[ -d "$R/.git" ]] && [[ "$(git -C "$R" config --get core.hooksPath 2>/dev/null)" == ".githooks" ]]; then
   ok "manifest: core.hooksPath=.githooks"
@@ -52,7 +65,7 @@ fi
 
 # Tier B：消除静默降级的目录
 for d in wiki wiki/context wiki/dashboards wiki/projects wiki/concepts wiki/decisions wiki/tools wiki/queries \
-         raw raw/sessions raw/notes raw/articles raw/inbox memory memory/events; do
+         raw raw/sessions raw/notes raw/articles raw/inbox memory memory/events policy; do
   [[ -d "$R/$d" ]] && ok "manifest: $d/" || bad "manifest: 缺目录 $d/"
 done
 for f in wiki/index.md wiki/context/CRITICAL_FACTS.md wiki/context/active-projects.md wiki/context/open-loops.md; do
@@ -85,9 +98,8 @@ else
 fi
 
 # ---------- 3. 幂等 ----------
-# 必须在独立 HOME 上验证：上面的 hard-fail 检查会让 refresh 合法生成
-# wiki/dashboards/*.md 等派生内容（未被 gitignore，属应由用户提交的 wiki 内容），
-# 在同一个 HOME 上断言「worktree 干净」会把别人的正常产物记到 init 账上。
+# 必须在独立 HOME 上验证：上面的 hard-fail 检查会合法生成或修改运行产物；
+# 在同一个 HOME 上断言「worktree 干净」会把其他命令的副作用记到 init 账上。
 HI="$WORK/hi"; mkdir -p "$HI"
 env HOME="$HI" "$INIT" --git >/dev/null 2>&1 || true
 RI="$HI/llm-wiki"
@@ -111,10 +123,14 @@ fi
 # ---------- 4. 不覆盖既有内容 ----------
 SENTINEL="__sentinel_$(date +%s)__"
 printf '\n%s\n' "$SENTINEL" >> "$R/SCHEMA.md"
+printf '\n%s\n' "$SENTINEL" >> "$R/SYNC.md"
 env HOME="$H1" "$INIT" --git >/dev/null 2>&1 || true
 grep -q "$SENTINEL" "$R/SCHEMA.md" \
   && ok "no-clobber: 用户对 SCHEMA.md 的修改被保留" \
   || bad "no-clobber: 用户修改被覆盖"
+grep -q "$SENTINEL" "$R/SYNC.md" \
+  && ok "no-clobber: 用户对 SYNC.md 的修改被保留" \
+  || bad "no-clobber: 用户的同步说明被覆盖"
 
 # ---------- 5. 模板解析三种布局 ----------
 H2="$WORK/h2"; mkdir -p "$H2"
@@ -148,6 +164,22 @@ if grep -q 'LLM_WIKI_TEMPLATES' <<<"$errout"; then
   ok "template: 无法解析时报错点名 LLM_WIKI_TEMPLATES"
 else
   bad "template: 无法解析时未给出可行动报错"
+fi
+
+# 缺任一必需模板时必须在首次写入前失败，不能留下半初始化数据仓。
+H5B="$WORK/h5b"; mkdir -p "$H5B/home" "$H5B/bin" "$H5B/templates"
+cp "$INIT" "$H5B/bin/llm-wiki-init"; chmod 0755 "$H5B/bin/llm-wiki-init"
+cp "$REPO/templates/SCHEMA.md" "$H5B/templates/SCHEMA.md"
+set +e
+missing_sync_out=$(env HOME="$H5B/home" LLM_WIKI_TEMPLATES="$H5B/templates" \
+  "$H5B/bin/llm-wiki-init" 2>&1)
+missing_sync_rc=$?
+set -e
+if [[ $missing_sync_rc -ne 0 ]] && grep -q 'SYNC.md' <<<"$missing_sync_out" \
+   && [[ ! -e "$H5B/home/llm-wiki" ]]; then
+  ok "template: 缺 SYNC.md 时首次写入前失败且不留半初始化目录"
+else
+  bad "template: 缺 SYNC.md 未能原子安全停止"
 fi
 
 # ---------- 6. --dry-run 不落盘 ----------

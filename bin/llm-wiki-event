@@ -15,12 +15,16 @@ import os
 import re
 import sys
 import uuid
-import fcntl
+try:
+    import fcntl  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # Native Windows; WSL/Linux uses fcntl above.
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "llm-wiki-memory-event/v2"
+SCHEMA_VERSION = "llm-wiki-memory-event/v3"
 DEFAULT_HALF_LIFE_DAYS = 90
 EVENT_TYPES = {
     "fact",
@@ -33,6 +37,21 @@ EVENT_TYPES = {
     "session",
     "lesson",
 }
+DOMAINS = {"work", "personal"}
+SENSITIVITIES = {"public", "internal", "confidential", "restricted"}
+EPISTEMIC_STATUSES = {
+    "source-record",
+    "human-stated",
+    "ai-proposed",
+    "human-confirmed",
+    "externally-verified",
+    "disputed",
+    "legacy-imported",
+}
+REVIEW_STATUSES = {"pending", "approved", "rejected"}
+ACTOR_TYPES = {"human", "ai", "system"}
+ACTOR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$")
+TARGET_AGENT_RE = re.compile(r"^(?:\*|[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127})$")
 
 SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(sk-[a-zA-Z0-9_-]{16,})\b"), "[REDACTED_OPENAI_KEY]"),
@@ -65,9 +84,9 @@ def redact(value: Any) -> Any:
 
 
 def stable_project(cwd: Path, explicit: str | None) -> str:
-    if explicit:
-        return explicit
-    return cwd.name or "unknown-project"
+    value = explicit if explicit is not None else cwd.name
+    normalized = str(value or "").strip()
+    return normalized or "unknown-project"
 
 
 def normalize_files(files: list[str], cwd: Path) -> list[str]:
@@ -103,11 +122,25 @@ def parse_valid_time(value: str | None, label: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def load_event_index(root: Path) -> dict[str, dict[str, Any]]:
+def parse_time(value: Any) -> datetime | None:
+    """Best-effort parser for an already-recorded event timestamp."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def load_event_state(root: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
     index: dict[str, dict[str, Any]] = {}
+    duplicate_ids: set[str] = set()
     events_dir = root / "events"
     if not events_dir.exists():
-        return index
+        return index, duplicate_ids
     for path in sorted(events_dir.glob("*.jsonl")):
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             if not line.strip():
@@ -117,20 +150,47 @@ def load_event_index(root: Path) -> dict[str, dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict) and isinstance(event.get("id"), str):
-                index[event["id"]] = event
+                event_id = event["id"]
+                if event_id in duplicate_ids:
+                    continue
+                if event_id in index:
+                    index.pop(event_id, None)
+                    duplicate_ids.add(event_id)
+                    continue
+                index[event_id] = event
+    return index, duplicate_ids
+
+
+def load_event_index(root: Path) -> dict[str, dict[str, Any]]:
+    index, _ = load_event_state(root)
     return index
 
 
-def validate_supersedes(event_index: dict[str, dict[str, Any]], targets: list[str], project: str) -> list[str]:
+def validate_supersedes(
+    event_index: dict[str, dict[str, Any]],
+    targets: list[str],
+    project: str,
+    domain: str,
+    ambiguous_ids: set[str] | None = None,
+) -> list[str]:
     normalized = list(dict.fromkeys(targets))
+    normalized_project = str(project or "").strip()
+    normalized_domain = str(domain or "").strip().lower()
+    ambiguous = ambiguous_ids or set()
     for target_id in normalized:
         if not re.fullmatch(r"[0-9a-f]{16}", target_id):
             raise ValueError(f"supersedes id must be 16 lowercase hex characters: {target_id!r}")
+        if target_id in ambiguous:
+            raise ValueError(f"supersedes target id is ambiguous (duplicate rows): {target_id}")
         target = event_index.get(target_id)
         if target is None:
             raise ValueError(f"supersedes target does not exist: {target_id}")
-        if target.get("project") not in {project, None, ""}:
+        target_project = str(target.get("project") or "").strip()
+        if not normalized_project or target_project != normalized_project:
             raise ValueError(f"supersedes target belongs to another project: {target_id}")
+        target_domain = str(target.get("domain") or "work").strip().lower()
+        if target_domain != normalized_domain:
+            raise ValueError(f"supersedes target belongs to another domain: {target_id}")
 
         visiting: set[str] = set()
         visited: set[str] = set()
@@ -153,6 +213,215 @@ def validate_supersedes(event_index: dict[str, dict[str, Any]], targets: list[st
 
         visit(target_id)
     return normalized
+
+
+def validate_target_agents(
+    values: list[str], *, default_targets: tuple[str, ...] | None = ("coding",)
+) -> list[str]:
+    targets = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+    if not targets:
+        if default_targets is None:
+            raise ValueError("target agents must not be empty")
+        targets = list(default_targets)
+    for target in targets:
+        if not TARGET_AGENT_RE.fullmatch(target):
+            raise ValueError(
+                "target agent must be '*' or a 1-128 character profile beginning with a letter/digit: "
+                f"{target!r}"
+            )
+    return targets
+
+
+def has_global_target(targets: list[str]) -> bool:
+    return any(target == "*" or target.lower() == "all" for target in targets)
+
+
+def normalized_supersedes(event: dict[str, Any]) -> list[str]:
+    raw = event.get("supersedes", [])
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return list(dict.fromkeys(item for item in raw if isinstance(item, str) and item))
+
+
+def is_effective_terminal_revision(event: dict[str, Any]) -> bool:
+    event_id = event.get("id")
+    if not isinstance(event_id, str) or not re.fullmatch(r"[0-9a-f]{16}", event_id):
+        return False
+    if event.get("schema_version") != SCHEMA_VERSION:
+        return False
+    if event.get("memory_id") != f"event:{event_id}":
+        return False
+    if "review_status" not in event or "review_state" in event or "target_profiles" in event:
+        return False
+    if event.get("lifecycle", "active") != "active":
+        return False
+    actor = event.get("actor")
+    if not isinstance(actor, dict) or set(actor) != {"type", "id"}:
+        return False
+    actor_type = actor.get("type")
+    if (
+        actor_type not in ACTOR_TYPES
+        or not isinstance(actor.get("id"), str)
+        or not ACTOR_ID_RE.fullmatch(actor["id"])
+    ):
+        return False
+    status = event.get("review_status")
+    epistemic = event.get("epistemic_status")
+    try:
+        validate_governance_transition(str(actor_type), str(epistemic), str(status))
+    except ValueError:
+        return False
+    if status not in {"approved", "rejected"}:
+        return False
+    if str(event.get("project") or "").strip() == "":
+        return False
+    if event.get("domain") not in DOMAINS or event.get("sensitivity") not in SENSITIVITIES:
+        return False
+    targets = event.get("target_agents")
+    if (
+        not isinstance(targets, list)
+        or not targets
+        or not all(isinstance(target, str) and target.strip() for target in targets)
+    ):
+        return False
+    try:
+        if validate_target_agents(targets, default_targets=None) != targets:
+            return False
+    except ValueError:
+        return False
+    supersedes = event.get("supersedes", [])
+    if not isinstance(supersedes, list) or not all(
+        isinstance(item, str) and re.fullmatch(r"[0-9a-f]{16}", item)
+        for item in supersedes
+    ):
+        return False
+    valid_from = parse_time(event.get("valid_from") or event.get("timestamp"))
+    return valid_from is not None and valid_from <= datetime.now(timezone.utc)
+
+
+def terminally_superseded_ids(event_index: dict[str, dict[str, Any]]) -> set[str]:
+    closed: set[str] = set()
+    for event in event_index.values():
+        if not is_effective_terminal_revision(event):
+            continue
+        event_project = str(event.get("project") or "").strip()
+        event_domain = str(event.get("domain") or "").strip().lower()
+        for target_id in normalized_supersedes(event):
+            target = event_index.get(target_id)
+            if target is None:
+                continue
+            target_project = str(target.get("project") or "").strip()
+            target_domain = str(target.get("domain") or "").strip().lower()
+            if target_project == event_project and target_domain == event_domain:
+                closed.add(target_id)
+    return closed
+
+
+def current_pending_proposal(
+    event_index: dict[str, dict[str, Any]],
+    event_id: str,
+    ambiguous_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{16}", event_id):
+        raise ValueError(f"event id must be 16 lowercase hex characters: {event_id!r}")
+    if event_id in (ambiguous_ids or set()):
+        raise ValueError(f"review target id is ambiguous (duplicate rows): {event_id}")
+    target = event_index.get(event_id)
+    if target is None:
+        raise ValueError(f"review target does not exist: {event_id}")
+
+    if event_id in terminally_superseded_ids(event_index):
+        superseded_by = sorted(
+            str(candidate.get("id", ""))
+            for candidate in event_index.values()
+            if is_effective_terminal_revision(candidate)
+            and event_id in normalized_supersedes(candidate)
+        )
+        raise ValueError(
+            f"review target is no longer current: {event_id} "
+            f"(superseded by {', '.join(superseded_by)})"
+        )
+    if target.get("lifecycle", "active") != "active":
+        raise ValueError(f"review target is not active: {event_id}")
+    if "review_status" not in target or "review_state" in target or "target_profiles" in target:
+        raise ValueError(f"review target is not a canonical v3 proposal: {event_id}")
+    status = str(target.get("review_status"))
+    if status != "pending":
+        raise ValueError(f"review target is not pending: {event_id}")
+    if target.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(f"review target is not a v3 proposal: {event_id}")
+    if target.get("memory_id") != f"event:{event_id}":
+        raise ValueError(f"review target has invalid memory_id: {event_id}")
+    actor = target.get("actor", {})
+    if not isinstance(actor, dict) or set(actor) != {"type", "id"}:
+        raise ValueError(f"review target is not an AI proposal: {event_id}")
+    actor_type = actor.get("type") if isinstance(actor, dict) else None
+    actor_id = actor.get("id") if isinstance(actor, dict) else None
+    if actor_type != "ai" or not isinstance(actor_id, str) or not ACTOR_ID_RE.fullmatch(actor_id):
+        raise ValueError(f"review target is not an AI proposal: {event_id}")
+    if target.get("epistemic_status") != "ai-proposed":
+        raise ValueError(f"review target is not an AI proposal: {event_id}")
+    if str(target.get("project") or "").strip() == "":
+        raise ValueError(f"review target has no project scope: {event_id}")
+    if target.get("domain") not in DOMAINS or target.get("sensitivity") not in SENSITIVITIES:
+        raise ValueError(f"review target has invalid domain/sensitivity: {event_id}")
+    raw_targets = target.get("target_agents")
+    if (
+        not isinstance(raw_targets, list)
+        or not all(isinstance(item, str) for item in raw_targets)
+    ):
+        raise ValueError(f"review target has invalid target_agents: {event_id}")
+    normalized_targets = validate_target_agents(
+        raw_targets,
+        default_targets=None,
+    )
+    if normalized_targets != raw_targets:
+        raise ValueError(f"review target has invalid target_agents: {event_id}")
+    supersedes = target.get("supersedes", [])
+    if not isinstance(supersedes, list) or not all(
+        isinstance(item, str) and re.fullmatch(r"[0-9a-f]{16}", item)
+        for item in supersedes
+    ):
+        raise ValueError(f"review target has invalid supersedes: {event_id}")
+    return target
+
+
+def validate_governance_transition(
+    actor_type: str, epistemic_status: str, review_status: str
+) -> None:
+    if actor_type not in ACTOR_TYPES:
+        raise ValueError(f"unknown actor type: {actor_type}")
+    if epistemic_status not in EPISTEMIC_STATUSES:
+        raise ValueError(f"unknown epistemic status: {epistemic_status}")
+    if review_status not in REVIEW_STATUSES:
+        raise ValueError(f"unknown review status: {review_status}")
+    if epistemic_status in {"human-stated", "human-confirmed"} and actor_type != "human":
+        raise ValueError(f"{epistemic_status} events must be human-authored")
+    if review_status == "pending":
+        if actor_type != "ai" or epistemic_status != "ai-proposed":
+            raise ValueError("pending events must be AI-authored ai-proposed claims")
+        return
+    if actor_type == "ai" or epistemic_status == "ai-proposed":
+        raise ValueError("AI/ai-proposed events must enter review_status=pending")
+    if review_status == "rejected":
+        if actor_type != "human" or epistemic_status != "disputed":
+            raise ValueError("rejected events must be human-authored disputed reviews")
+        return
+    if epistemic_status == "disputed":
+        raise ValueError("disputed events must enter review_status=rejected")
+    if epistemic_status == "human-confirmed" and actor_type != "human":
+        raise ValueError("human-confirmed events must be human-authored")
+
+
+def event_by_id(root: Path, event_id: str) -> dict[str, Any] | None:
+    if not re.fullmatch(r"[0-9a-f]{16}", event_id):
+        raise ValueError(f"event id must be 16 lowercase hex characters: {event_id!r}")
+    index, duplicate_ids = load_event_state(root)
+    if event_id in duplicate_ids:
+        raise ValueError(f"event id is ambiguous (duplicate rows): {event_id}")
+    return index.get(event_id)
 
 
 def month_path(root: Path, now: datetime) -> Path:
@@ -208,6 +477,26 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def lock_memory(handle: Any) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write("\0")
+        handle.flush()
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+
+
+def unlock_memory(handle: Any) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Record a typed Wikified memory event.")
     parser.add_argument("summary", nargs="?", help="Short event summary. If omitted, stdin is used.")
@@ -219,6 +508,46 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--confidence", type=float, default=0.7, help="Initial confidence, 0.0-1.0.")
     parser.add_argument("--half-life-days", type=int, default=DEFAULT_HALF_LIFE_DAYS, help="Confidence decay half-life.")
     parser.add_argument("--source", default="manual", help="Source label, e.g. manual/session/tool.")
+    parser.add_argument("--domain", default="work", choices=sorted(DOMAINS), help="Memory domain.")
+    parser.add_argument(
+        "--sensitivity",
+        default="internal",
+        choices=sorted(SENSITIVITIES),
+        help="Disclosure sensitivity.",
+    )
+    parser.add_argument(
+        "--epistemic-status",
+        default="human-stated",
+        choices=sorted(EPISTEMIC_STATUSES),
+        help="How this claim became known.",
+    )
+    parser.add_argument(
+        "--review-status",
+        default="approved",
+        choices=sorted(REVIEW_STATUSES),
+        help="Human review gate. Pending/rejected events are not recallable.",
+    )
+    parser.add_argument(
+        "--target-agent",
+        dest="target_agents",
+        action="append",
+        default=[],
+        help="Agent profile allowed to receive this memory. Repeatable; default 'coding'.",
+    )
+    parser.add_argument(
+        "--confirm-global-target",
+        action="store_true",
+        help="Required when creating or approving a memory targeted to '*' or 'all'.",
+    )
+    parser.add_argument("--actor-type", default="human", choices=sorted(ACTOR_TYPES), help="Writer class.")
+    parser.add_argument("--actor-id", default="local-user", help="Stable non-secret writer label.")
+    parser.add_argument(
+        "--evidence-ref",
+        dest="evidence_refs",
+        action="append",
+        default=[],
+        help="Opaque evidence/provenance reference. Repeatable.",
+    )
     parser.add_argument("--valid-from", help="ISO-8601 instant/date when this fact becomes current.")
     parser.add_argument("--valid-until", help="ISO-8601 instant/date when this fact expires (exclusive).")
     parser.add_argument(
@@ -227,74 +556,271 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=[],
         help="Existing same-project event id made obsolete by this event. Repeatable.",
     )
+    review = parser.add_mutually_exclusive_group()
+    review.add_argument("--approve", metavar="EVENT_ID", help="Append a human-approved revision of a pending event.")
+    review.add_argument("--reject", metavar="EVENT_ID", help="Append a human-rejected revision of a pending event.")
+    parser.add_argument(
+        "--confirm-supersedes",
+        action="store_true",
+        help="Required when approving a proposal that would supersede existing events.",
+    )
     parser.add_argument("--print", action="store_true", help="Print the redacted event JSON after writing.")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    summary = args.summary or sys.stdin.read().strip()
-    if not summary:
-        print("llm-wiki-event: summary is required", file=sys.stderr)
-        return 2
-
-    confidence = max(0.0, min(1.0, float(args.confidence)))
     cwd = Path.cwd()
     now = datetime.now(timezone.utc)
-    files = normalize_files(args.files, cwd)
-    project = stable_project(cwd, args.project)
-    try:
-        valid_from = parse_valid_time(args.valid_from, "valid_from") or now
-        valid_until = parse_valid_time(args.valid_until, "valid_until")
-    except ValueError as exc:
-        print(f"llm-wiki-event: {exc}", file=sys.stderr)
-        return 2
-    if valid_until is not None and valid_until <= valid_from:
-        print("llm-wiki-event: valid_until must be later than valid_from", file=sys.stderr)
-        return 2
-
     root = memory_root()
     root.mkdir(parents=True, exist_ok=True)
+
+    review_target_id = args.approve or args.reject
+    review_target: dict[str, Any] | None = None
+    if review_target_id:
+        try:
+            initial_index, initial_duplicate_ids = load_event_state(root)
+            review_target = current_pending_proposal(
+                initial_index, review_target_id, initial_duplicate_ids
+            )
+        except ValueError as exc:
+            print(f"llm-wiki-event: {exc}", file=sys.stderr)
+            return 2
+        summary = str(review_target.get("summary", "")).strip()
+        files = [str(item) for item in review_target.get("files", []) if isinstance(item, str)]
+        concepts = [str(item) for item in review_target.get("concepts", []) if isinstance(item, str)]
+        project = str(review_target.get("project") or "").strip()
+        event_type = str(review_target.get("type") or "fact")
+        details = str(review_target.get("details") or "")
+        confidence = max(0.0, min(1.0, float(review_target.get("confidence", 0.7))))
+        half_life_days = max(1, int(review_target.get("half_life_days", DEFAULT_HALF_LIFE_DAYS)))
+        valid_from = parse_time(review_target.get("valid_from")) or now
+        valid_until = parse_time(review_target.get("valid_until"))
+        source = "human-review"
+        domain = str(review_target.get("domain") or "work").strip().lower()
+        sensitivity = str(review_target.get("sensitivity") or "internal").strip().lower()
+        if domain not in DOMAINS or sensitivity not in SENSITIVITIES:
+            print("llm-wiki-event: review target has invalid domain/sensitivity", file=sys.stderr)
+            return 2
+        epistemic_status = "human-confirmed" if args.approve else "disputed"
+        review_status = "approved" if args.approve else "rejected"
+        raw_targets = review_target.get("target_agents", review_target.get("target_profiles", ["*"]))
+        if isinstance(raw_targets, str):
+            raw_targets = [raw_targets]
+        try:
+            if not isinstance(raw_targets, list) or not all(
+                isinstance(item, str) for item in raw_targets
+            ):
+                raise ValueError("target agents must be a list of strings")
+            target_agents = validate_target_agents(
+                raw_targets,
+                default_targets=None,
+            )
+        except ValueError as exc:
+            print(f"llm-wiki-event: target has invalid governance metadata: {exc}", file=sys.stderr)
+            return 2
+        if args.approve and has_global_target(target_agents) and not args.confirm_global_target:
+            print(
+                "llm-wiki-event: approving a '*'/'all' target requires --confirm-global-target",
+                file=sys.stderr,
+            )
+            return 2
+        actor = {"type": "human", "id": "local-review"}
+        try:
+            validate_governance_transition(
+                actor["type"], epistemic_status, review_status
+            )
+        except ValueError as exc:
+            print(f"llm-wiki-event: {exc}", file=sys.stderr)
+            return 2
+        prior_evidence = review_target.get("evidence_refs", [])
+        if not isinstance(prior_evidence, list):
+            prior_evidence = []
+        evidence_refs = list(dict.fromkeys([*(str(item) for item in prior_evidence), f"event:{review_target_id}"]))
+        supersedes_requested = [str(review_target_id)]
+        if args.approve:
+            inherited_supersedes = normalized_supersedes(review_target)
+            if inherited_supersedes and not args.confirm_supersedes:
+                print(
+                    "llm-wiki-event: approving a proposal with supersedes requires --confirm-supersedes",
+                    file=sys.stderr,
+                )
+                return 2
+            supersedes_requested.extend(inherited_supersedes)
+    else:
+        summary = args.summary or sys.stdin.read().strip()
+        if not summary:
+            print("llm-wiki-event: summary is required", file=sys.stderr)
+            return 2
+        confidence = max(0.0, min(1.0, float(args.confidence)))
+        files = normalize_files(args.files, cwd)
+        concepts = sorted(dict.fromkeys(args.concepts))
+        project = stable_project(cwd, args.project)
+        event_type = args.type
+        details = args.details
+        half_life_days = max(1, int(args.half_life_days))
+        try:
+            valid_from = parse_valid_time(args.valid_from, "valid_from") or now
+            valid_until = parse_valid_time(args.valid_until, "valid_until")
+            target_agents = validate_target_agents(args.target_agents)
+        except ValueError as exc:
+            print(f"llm-wiki-event: {exc}", file=sys.stderr)
+            return 2
+        if valid_until is not None and valid_until <= valid_from:
+            print("llm-wiki-event: valid_until must be later than valid_from", file=sys.stderr)
+            return 2
+        if has_global_target(target_agents) and not args.confirm_global_target:
+            print(
+                "llm-wiki-event: '*'/'all' target requires --confirm-global-target",
+                file=sys.stderr,
+            )
+            return 2
+        source = args.source
+        domain = args.domain
+        sensitivity = args.sensitivity
+        epistemic_status = args.epistemic_status
+        review_status = args.review_status
+        actor = {"type": args.actor_type, "id": args.actor_id}
+        if not ACTOR_ID_RE.fullmatch(args.actor_id):
+            print(
+                "llm-wiki-event: actor id must be 1-128 characters, begin with a letter/digit, "
+                "and contain only letters, digits, '.', '_', ':', '/', '@', or '-'",
+                file=sys.stderr,
+            )
+            return 2
+        evidence_refs = list(dict.fromkeys(args.evidence_refs))
+        supersedes_requested = args.supersedes
+        try:
+            validate_governance_transition(
+                args.actor_type, args.epistemic_status, args.review_status
+            )
+        except ValueError as exc:
+            print(f"llm-wiki-event: {exc}", file=sys.stderr)
+            return 2
+
     try:
-        supersedes = validate_supersedes(load_event_index(root), args.supersedes, project)
+        initial_index, initial_duplicate_ids = load_event_state(root)
+        supersedes = validate_supersedes(
+            initial_index,
+            supersedes_requested,
+            project,
+            domain,
+            initial_duplicate_ids,
+        )
     except ValueError as exc:
         print(f"llm-wiki-event: {exc}", file=sys.stderr)
         return 2
-    event_id_seed = f"{now.isoformat()}\0{args.type}\0{summary}\0{uuid.uuid4()}"
+    event_id_seed = f"{now.isoformat()}\0{event_type}\0{summary}\0{uuid.uuid4()}"
     event_id = hashlib.sha256(event_id_seed.encode("utf-8")).hexdigest()[:16]
 
     event: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "id": event_id,
+        "memory_id": f"event:{event_id}",
         "timestamp": now.isoformat(),
-        "type": args.type,
+        "type": event_type,
         "project": project,
         "cwd": str(cwd),
         "files": files,
-        "concepts": sorted(dict.fromkeys(args.concepts)),
+        "concepts": concepts,
         "summary": summary,
-        "details": args.details,
+        "details": details,
         "confidence": confidence,
-        "half_life_days": max(1, int(args.half_life_days)),
+        "half_life_days": half_life_days,
         "lifecycle": "active",
-        "source": args.source,
+        "source": source,
         "valid_from": valid_from.isoformat(),
+        "actor": actor,
+        "domain": domain,
+        "sensitivity": sensitivity,
+        "epistemic_status": epistemic_status,
+        "review_status": review_status,
+        "target_agents": target_agents,
     }
     if valid_until is not None:
         event["valid_until"] = valid_until.isoformat()
     if supersedes:
         event["supersedes"] = supersedes
+    if evidence_refs:
+        event["evidence_refs"] = evidence_refs
     event = redact(event)
 
     path = month_path(root, now)
     lock_path = root / ".memory.lock"
-    with lock_path.open("a", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        lock_memory(lock_handle)
         try:
+            locked_index, locked_duplicate_ids = load_event_state(root)
+            if review_target_id:
+                try:
+                    locked_target = current_pending_proposal(
+                        locked_index, review_target_id, locked_duplicate_ids
+                    )
+                except ValueError as exc:
+                    print(f"llm-wiki-event: {exc}", file=sys.stderr)
+                    return 2
+                if locked_target != review_target:
+                    print(
+                        f"llm-wiki-event: review target changed while awaiting lock: {review_target_id}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                locked_raw_targets = locked_target.get(
+                    "target_agents", locked_target.get("target_profiles", ["*"])
+                )
+                if isinstance(locked_raw_targets, str):
+                    locked_raw_targets = [locked_raw_targets]
+                try:
+                    if not isinstance(locked_raw_targets, list) or not all(
+                        isinstance(item, str) for item in locked_raw_targets
+                    ):
+                        raise ValueError("target agents must be a list of strings")
+                    locked_targets = validate_target_agents(
+                        locked_raw_targets,
+                        default_targets=None,
+                    )
+                except ValueError as exc:
+                    print(
+                        f"llm-wiki-event: target has invalid governance metadata: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                if args.approve and has_global_target(locked_targets) and not args.confirm_global_target:
+                    print(
+                        "llm-wiki-event: approving a '*'/'all' target requires --confirm-global-target",
+                        file=sys.stderr,
+                    )
+                    return 2
+                if (
+                    args.approve
+                    and normalized_supersedes(locked_target)
+                    and not args.confirm_supersedes
+                ):
+                    print(
+                        "llm-wiki-event: approving a proposal with supersedes requires --confirm-supersedes",
+                        file=sys.stderr,
+                    )
+                    return 2
+            try:
+                locked_supersedes = validate_supersedes(
+                    locked_index,
+                    supersedes_requested,
+                    project,
+                    domain,
+                    locked_duplicate_ids,
+                )
+            except ValueError as exc:
+                print(f"llm-wiki-event: {exc}", file=sys.stderr)
+                return 2
+            if locked_supersedes != supersedes:
+                print("llm-wiki-event: supersedes state changed while awaiting lock", file=sys.stderr)
+                return 2
             append_event(path, event)
-            update_touched_index(root, event)
+            # Pending/rejected proposals must not leak into the local reverse index.
+            if event.get("review_status") == "approved":
+                update_touched_index(root, event)
         finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            unlock_memory(lock_handle)
     if args.print:
         print(json.dumps(event, ensure_ascii=False, indent=2))
     else:

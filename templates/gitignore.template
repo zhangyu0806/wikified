@@ -17,8 +17,10 @@ Today.md
 wiki/dashboards/health-weekly.json
 raw/inbox/promote-suggestions.json
 
-# llm-wiki-refresh / llm-wiki-review 生成的仪表盘（含生成时间戳或各机
-# 不同的 raw/review 清单），各机自建，不跨机同步。
+# llm-wiki-refresh / llm-wiki-review 生成的仪表盘（含生成时间戳 + 各机
+# 不同的 uncompiled_raw 清单，跟踪它会导致：每次治理都脏 → remote-sync
+# 坚持「提交需显式意图」拒绝自动提交 → 同步永久卡住。与上面的
+# health-weekly.json 对齐，改为各机自建。用 llm-wiki-refresh 重新生成。
 wiki/dashboards/health.md
 wiki/dashboards/review.md
 wiki/dashboards/review-weekly.json
@@ -31,6 +33,9 @@ memory/touched-files.json
 *.lock
 .corrections.lock
 memory/.memory.lock
+
+# Cockpit 写 open-loops 前的自动备份（运行时产物）
+wiki/context/.open-loops.bak
 
 # ---------- 3. 未经人审的敏感暂存 ----------
 # compact 前自动落盘的原始 prompt 片段，含未脱敏凭据（历史上出现过

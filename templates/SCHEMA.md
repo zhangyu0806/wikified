@@ -2,11 +2,17 @@
 
 这是 Wikified 的运行规则。所有 LLM agent 在操作私有记忆数据前必须先读此文件。
 
+当前是治理 Phase 1：人和 AI 共用下述逻辑记忆 schema，但编码链路默认只使用 `work`
+领域，并仅以 Project / Decision 连接执行系统。本阶段不导入个人日记、不建图数据库、
+不实现完整 Vision / Goal / OKR / Project / Task / Subtask 系统；PARA 是保存结构，不是
+第二套任务状态机。
+
 ## 目录结构
 
 ```
 ~/llm-wiki/
 ├── SCHEMA.md              # 本文件 — wiki 运行规则（你+LLM 共同维护）
+├── policy/access.json     # 固定 Agent profile 的访问策略（fail closed）
 ├── Today.md               # 今日沉淀入口页（llm-wiki-refresh 自动生成）
 ├── raw/                   # 不可变源材料（LLM 只读，不写）
 │   ├── sessions/          # OpenCode/OMO 会话摘要（自动生成）
@@ -32,10 +38,59 @@
 | 层 | 目录 | 谁拥有 | 用途 |
 |---|---|---|---|
 | 源材料 | `raw/` | 用户/自动化 | 不可变输入，LLM 只读 |
-| 知识库 | `wiki/` | LLM | 结构化、互链的 Markdown 页面 |
+| 知识库 | `wiki/` | 人工批准；LLM 可提案 | 结构化、互链的 Markdown 页面 |
 | 规则 | `SCHEMA.md` | 用户+LLM | 定义 wiki 结构和工作流 |
 | 技能 | `skills/` | 用户 | agent 行为指南 |
-| 记忆 | `memory/` | LLM | 跨会话持久笔记 |
+| 记忆 | `memory/` | 人+Agent（Agent 写入待人审） | 跨会话 typed event 与索引 |
+
+## 治理与物理边界
+
+统一 schema 不等于统一权限。编码 Agent 使用现有 `work` 私有数据仓；`personal` 应使用
+另一个 `LLM_WIKI_ROOT`、私有 Git remote、凭据与索引，不要只靠一枚标签把日记暴露给
+工作 Agent。本公有工具仓只保存机制，绝不保存真实 `wiki/`、`raw/` 或 `memory/` 数据。
+策略是 CLI / MCP 的应用层边界，不是 OS 沙箱；拥有该数据根任意文件读取权限的进程仍可
+绕过 MCP，因此高敏个人数据必须靠独立根、OS 权限 / 账号和凭据做硬隔离。
+Phase 1 没有自动跨域搬运；确需引用个人洞察时，由人明确在 work 根中新建记录，保留
+`evidence_refs`，指定当前 `project` 与目标 Agent。写给 `["*"]` 的全局记忆需要再次
+人工确认，Agent 不得自行扩权。
+
+`policy/access.json` 用以下维度决定一条记忆能否被某个固定 profile 读取：
+
+- `domain`：`work | personal`
+- `sensitivity`：`public | internal | confidential | restricted`
+- `epistemic_status`：`source-record | human-stated | ai-proposed | human-confirmed | externally-verified | disputed | legacy-imported`
+- `review_state` / `review_status`：`pending | approved | rejected`
+- `target_profiles` / `target_agents`：目标 Agent profile 或策略目标组；`["*"]` 表示所有仍通过其余策略的 profile
+- `project`：可选的项目过滤，只能继续收窄访问范围
+
+检索必须先加载并校验策略、读取有界治理 metadata、完成授权，再读取正文、分词或排名。
+策略缺失/损坏、profile 未知、未知 event schema、v3 治理字段不完整，或疑似但格式损坏的
+frontmatter 都会 fail closed。Codex / OpenCode 等 MCP 服务的
+profile 在进程启动时固定，不能接受 prompt 或 tool 参数把自己声明成 `human`。二者的
+MCP 还固定 `LLM_WIKI_TARGET_AGENTS=codex,opencode`，使任一端的提案在人审批准后可由
+两端共享；该目标集合仍不能突破 profile 的 domain / sensitivity / review 限制。
+普通人工 event 默认写给 `coding` 目标组；策略允许 Codex、OpenCode、Claude、Cursor、
+Grok 与通用 coding profile 接收该组。`["*"]` 不是新记录默认值，必须由人显式传
+`--confirm-global-target`。legacy v1/v2 继续按 `*` 读取只为避免破坏性迁移。
+
+每个可召回 wiki 页面都应有稳定身份和治理 frontmatter：
+
+```yaml
+---
+memory_id: wiki:project-example
+domain: work
+sensitivity: internal
+epistemic_status: human-confirmed
+review_state: approved
+target_profiles: [codex, opencode]
+project: example
+---
+```
+
+旧页面缺 `memory_id` 时，读取器用相对 `wiki/` 路径生成 `wiki:<20-hex>` fallback；编辑
+正文不会改变它，但移动文件会改变 fallback，所以移动前先补显式 id。旧页面缺治理字段
+时按 `work / internal / approved / ["*"]` 兼容读取。不要把兼容默认当作给新页面省略字段
+的理由。
 
 ## 页面类型
 
@@ -45,6 +100,13 @@
 
 ```yaml
 ---
+memory_id: wiki:project-example
+domain: work
+sensitivity: internal
+epistemic_status: human-confirmed
+review_state: approved
+target_profiles: ["*"]
+project: example
 title: 项目名称
 created: 2026-05-16
 updated: 2026-05-16
@@ -62,6 +124,12 @@ sources: [raw/sessions/2026-05-16-xxx.md]
 
 ```yaml
 ---
+memory_id: wiki:concept-example
+domain: work
+sensitivity: internal
+epistemic_status: human-confirmed
+review_state: approved
+target_profiles: ["*"]
 title: 概念名称
 created: 2026-05-16
 updated: 2026-05-16
@@ -79,6 +147,13 @@ sources: [raw/sessions/xxx.md]
 
 ```yaml
 ---
+memory_id: wiki:decision-2026-05-16-example
+domain: work
+sensitivity: internal
+epistemic_status: human-confirmed
+review_state: approved
+target_profiles: ["*"]
+project: example
 title: 决策标题
 date: 2026-05-16
 status: accepted | superseded | deprecated
@@ -96,6 +171,12 @@ sources: [raw/sessions/xxx.md]
 
 ```yaml
 ---
+memory_id: wiki:tool-example
+domain: work
+sensitivity: internal
+epistemic_status: human-confirmed
+review_state: approved
+target_profiles: ["*"]
 title: 工具名称
 created: 2026-05-16
 updated: 2026-05-16
@@ -111,6 +192,12 @@ tags: [tag1, tag2]
 
 ```yaml
 ---
+memory_id: wiki:query-2026-05-16-example
+domain: work
+sensitivity: internal
+epistemic_status: human-confirmed
+review_state: approved
+target_profiles: ["*"]
 title: 问题简述
 date: 2026-05-16
 tags: [tag1, tag2]
@@ -120,32 +207,68 @@ tags: [tag1, tag2]
 ### Typed event (`memory/events/{YYYY-MM}.jsonl`)
 
 用于短小、可衰减、可按项目检索的事实、决策、bug、工作流与偏好。每行是一个
-`llm-wiki-memory-event/v2` JSON 对象；该目录 **append-only**，纠正旧事实时追加
+`llm-wiki-memory-event/v3` JSON 对象；该目录 **append-only**，纠正旧事实时追加
 新事件并用 `supersedes` 指向旧 id，不原地改历史行。
 
 ```json
 {
-  "schema_version": "llm-wiki-memory-event/v2",
+  "schema_version": "llm-wiki-memory-event/v3",
   "id": "0123456789abcdef",
+  "memory_id": "event:0123456789abcdef",
   "timestamp": "2026-08-12T12:00:00+00:00",
   "type": "decision",
   "project": "example",
+  "cwd": "/workspace/example",
+  "files": ["src/example.py"],
+  "concepts": ["memory-governance"],
   "summary": "新事实",
+  "details": "可选细节",
   "confidence": 0.8,
   "half_life_days": 90,
   "lifecycle": "active",
+  "source": "manual",
+  "actor": {"type": "human", "id": "local-user"},
+  "domain": "work",
+  "sensitivity": "internal",
+  "epistemic_status": "human-stated",
+  "review_status": "approved",
+  "target_agents": ["codex", "opencode"],
+  "evidence_refs": ["raw/sessions/example.md"],
   "valid_from": "2026-08-12T12:00:00+00:00",
   "valid_until": "2027-01-01T00:00:00+00:00",
   "supersedes": ["fedcba9876543210"]
 }
 ```
 
+- `memory_id` 是 `event:<id>`；`actor` 记录写入者类别和非秘密稳定标签。
+- `epistemic_status` 可为 `source-record`、`human-stated`、`ai-proposed`、
+  `human-confirmed`、`externally-verified`、`disputed` 或 `legacy-imported`。
+- `review_status` 为 `pending | approved | rejected`。正常 Agent profile 只召回 approved。
+- `target_agents` 再次收窄策略允许的接收方，不能扩大 profile 本身的领域或敏感度权限。
 - `valid_from` 是生效时刻；未来事件不参与当前召回。
 - `valid_until` 是可选的排他失效时刻；到期后不参与召回。
 - `supersedes` 可选且可重复；目标必须存在、属于同项目、不能形成环。
-- 替代关系不删除历史；目标一旦被当前新事件替代，不会因新事件日后过期而自动复活。
+- pending 提案永不隐藏旧事实。approved 修订会在正文检索前建立替代边，即使新修订对当前
+  profile 不可见，旧事实也不会错误复活；rejected 修订只关闭它所审核的 pending 提案。
+- 替代关系不删除历史；目标一旦被当前 approved 新事件替代，不会因新事件日后过期而自动复活。
 - `confidence` / `half_life_days` 只影响已匹配候选的排序，不能单独构成相关性。
 - 用 `llm-wiki-event` 写入，不手工拼 JSONL；写入前会脱敏并持锁追加。
+
+MCP `record_event` 固定写 `actor.type=ai`、`epistemic_status=ai-proposed`、
+`review_status=pending`，因此不会立即进入召回或 touched-file 索引。人工运行：
+
+```bash
+llm-wiki-review
+llm-wiki-event --approve <pending-event-id>
+# 或：llm-wiki-event --reject <pending-event-id>
+```
+
+审核只接受当前未处理的 pending；重复或并发审核会在锁内复查后拒绝。提案若声明其他
+`supersedes` 目标，审核列表会展示它们，批准时必须加 `--confirm-supersedes`。显式全局
+`*` 目标还需 `--confirm-global-target`。审核会追加一条 human revision 并 `supersedes`
+原提案，不修改历史。旧 v1/v2 event 不批量
+迁移；缺失的访问字段按 `work / internal / approved / ["*"]` 兼容，来源语义视为
+`legacy-imported`。
 
 ## 工作流
 
@@ -262,11 +385,14 @@ tags: [tag1, tag2]
 
 ### Query（查询知识库）
 
-1. 任务开始只读 `wiki/context/` 的有界摘要；不要把“下一步”当作当前用户指令。
-2. 对具体主题运行 `llm-wiki-enrich --query "<主题>" --project "<项目>"`。
-3. 读取命中的相关页面和可核验来源；不要只凭摘要下高风险结论。
-4. 综合回答；如果答案有长期价值 → 存入 `wiki/queries/`。
-5. 定期运行 `llm-wiki-eval --json`，用隔离夹具验证 Recall@5、MRR 与安全不变式。
+1. 先按服务进程固定的 `LLM_WIKI_AGENT_PROFILE` 加载 `policy/access.json`；失败即拒绝，
+   不得退回到“读全部再过滤”。
+2. 任务开始只读该 profile 获准的 `wiki/context/` 有界摘要；不要把“下一步”当作当前用户指令。
+3. 对具体主题运行 `llm-wiki-enrich --agent-profile "<profile>" --query "<主题>" --project "<项目>"`。
+4. 读取命中的相关页面和可核验来源；`--read-page wiki/...md` 也必须经过相同策略，
+   不要用直接文件读取绕过治理边界。
+5. 综合回答；如果答案有长期价值，只形成候选或人审后的 `wiki/queries/` 页面。
+6. 定期运行 `llm-wiki-eval --json`，用隔离夹具验证 Recall@5、MRR 与安全不变式。
 
 ### Lint（维护健康度）
 
@@ -338,7 +464,8 @@ llm-wiki-refresh --no-sync
 
 ## Graphify 集成
 
-wiki 目录配置了 Graphify 图谱构建：
+Graphify 是可选的本地派生阅读层，不是事实源，也不是 Phase 1 的数据库。数据所有者可
+显式为一个已经隔离的数据根构建图：
 
 ```bash
 # 增量更新（推荐，只处理变更文件）
@@ -351,4 +478,7 @@ graphify ~/llm-wiki/wiki/
 图谱输出在 `~/llm-wiki/graphify-out/`，用于：
 - 发现跨页面的隐藏关联
 - 社区检测（哪些概念聚集在一起）
-- 查询时提供图谱上下文
+
+未按 domain / profile 分区的图会在授权前泄露节点名和边，因此 Codex / OpenCode 等
+Agent profile 的 MCP 不直接遍历全局图；`find_related` 暂走策略过滤后的文本检索。
+只有将来图索引也按相同治理边界分区后，才可为 Agent 开启图召回。
