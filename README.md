@@ -97,7 +97,7 @@ cd ~/wikified
 
 正常安装只做两类受管工作：
 
-1. 把 18 个 CLI 软链到 `~/.local/bin`，把三个 lowercase kebab-case skill
+1. 把 19 个 CLI 软链到 `~/.local/bin`，把三个 lowercase kebab-case skill
    软链到 `~/.agents/skills`，并在已存在的 Agent skill 目录做可选 fanout。
 2. 把 OpenCode 插件链接到当前官方全局目录
    `~/.config/opencode/plugins/llm-wiki-recall.js`。
@@ -274,6 +274,7 @@ cd ~/wikified-cockpit
 | `llm-wiki-session-start` | 统一的 critical-only、脱敏、2500 字符 hook 适配器 |
 | `llm-wiki-mcp` | 零 npm 依赖 MCP server |
 | `llm-wiki-remote-sync` | 带节流的多机双向 Git 同步 |
+| `llm-wiki-auto-commit` | 白名单 + 密钥门禁的自动提交；`--sync` 用于无人值守多机收敛 |
 | `llm-wiki-obsidian-sync` | 生成可读 Obsidian 镜像 |
 | `wiki-graph` | 打开可选 Graphify 图谱 |
 
@@ -651,6 +652,24 @@ llm-wiki-remote-sync --dry-run   # 预演
 **绝不动未提交的改动。** 工作区脏时跳过合并并提示，不做 `reset --hard` /
 `checkout -f` / `clean`——未知改动可能是另一个 agent 或你自己在编辑。
 有未解决冲突时直接失败退出且**不写成功戳**，下个窗口自动重试。
+
+### 每日无人值守同步
+
+仅运行 `remote-sync` 不会提交工作区里的新记忆。需要自动上传时显式开启每日任务：
+
+```bash
+mkdir -p ~/.config/wikified ~/.cache/llm-wiki-sync
+echo enabled > ~/.config/wikified/auto-commit.enabled
+echo home > ~/.cache/llm-wiki-sync/profile   # 每台机器使用不同名字
+cd ~/wikified && ./install.sh
+systemctl --user list-timers llm-wiki-auto-commit.timer
+llm-wiki-auto-commit --dry-run
+```
+
+timer 默认每天 22:00 后随机延迟 0–15 分钟执行 `llm-wiki-auto-commit --sync`：
+只暂存记忆白名单，密钥扫描通过后 commit，再强制 fetch/merge/dedupe/push。两台机器
+各自产生提交时也会先合并，而不是直接 push 导致 non-fast-forward。完整的首台/第二台
+安装、代理、WSL 和故障恢复说明见 [`docs/AUTO_SYNC.md`](docs/AUTO_SYNC.md)。
 
 ---
 

@@ -1,0 +1,35 @@
+# Wikified 每日自动同步 —— systemd user timer
+#
+# 每天跑一次 llm-wiki-auto-commit --sync。
+#
+# 为什么用 timer 而不是 shell 启动钩子：
+#   - shell 钩子依赖你开终端，开机不开终端就永远不跑
+#   - timer 的 Persistent=true 会补跑错过的周期（WSL 关机期间错过的，
+#     下次开机自动补一次），shell 钩子做不到
+#
+# 注意 WSL 特性：Linger=no 时 WSL 完全关闭后 user systemd 也停。
+# 只要你日常开着 WSL，Persistent=true 足够覆盖。想要彻底不漏，
+# 可开 lingering（需 sudo）：sudo loginctl enable-linger $USER
+#
+# 启用：systemctl --user enable --now llm-wiki-auto-commit.timer
+# 查看：systemctl --user list-timers llm-wiki-auto-commit.timer
+# 停用：systemctl --user disable --now llm-wiki-auto-commit.timer
+
+[Unit]
+Description=Wikified 每日记忆自动提交定时器
+Documentation=https://github.com/zhangyu0806/wikified
+
+[Timer]
+# 每天 22:00 本地时区。选晚间是因为一天的记忆沉淀基本完成。
+OnCalendar=*-*-* 22:00:00
+
+# 错过的周期在下次可用时补跑（WSL 关机、休眠等场景的关键开关）
+Persistent=true
+
+# 随机延迟，避免多机同时 push 撞在一起产生不必要的 merge
+RandomizedDelaySec=15min
+
+Unit=llm-wiki-auto-commit.service
+
+[Install]
+WantedBy=timers.target
