@@ -306,10 +306,13 @@ rows = [
 absent_schema = event("1212121212121212", "absentschemamarker")
 absent_schema.pop("schema_version")
 rows.append(absent_schema)
+unknown = [row for row in rows if row.get("schema_version") == "llm-wiki-memory-event/v99"]
+rows = [row for row in rows if row not in unknown]
+(root / "unknown-event-fixture.jsonl").write_text("\n".join(json.dumps(row) for row in unknown) + "\n", encoding="utf-8")
 path = root / "memory" / "events" / "policy.jsonl"
 path.write_text("\n".join(json.dumps(row, separators=(",", ":")) for row in rows) + "\n", encoding="utf-8")
 tail = event("1717171717171717", "overlongtailmarker")
-(root / "memory" / "events" / "zz-overlong.jsonl").write_text(
+(root / "overlong-event-fixture.jsonl").write_text(
     "{" + ("x" * (256 * 1024)) + "\n" + json.dumps(tail) + "\n",
     encoding="utf-8",
 )
@@ -318,6 +321,20 @@ PY_EVENTS
 search() {
   LLM_WIKI_ROOT="$ROOT" python3 "$ENRICH" --agent-profile "$1" --query "$2" --json --max-chars 12000
 }
+
+# Unknown semantics and unreadable tails invalidate the entire event snapshot,
+# unlike an individually invalid record whose known schema can be rejected.
+for fault in unknown overlong; do
+  cp "$ROOT/$fault-event-fixture.jsonl" "$ROOT/memory/events/fault.jsonl"
+  if search codex legacyeventmarker >"$WORK/fault.out" 2>"$WORK/fault.err"; then
+    printf 'FAIL: %s event fault returned a partial successful snapshot\n' "$fault"; exit 1
+  fi
+  [ ! -s "$WORK/fault.out" ] || { printf 'FAIL: partial event output escaped\n'; exit 1; }
+  expected='unknown-event-schema'; [ "$fault" != overlong ] || expected='line-byte-limit'
+  grep -q "$expected" "$WORK/fault.err"
+  mv "$ROOT/memory/events/fault.jsonl" "$WORK/quarantined-$fault.jsonl"
+done
+printf 'PASS  unknown schemas and overlong event tails fail closed before any recall results\n'
 
 python3 -c '
 import json, sys
@@ -424,7 +441,12 @@ EVENT_LINK_ROOT="$WORK/event-link-root"
 mkdir -p "$EVENT_LINK_ROOT/policy" "$EVENT_LINK_ROOT/wiki" "$EVENT_LINK_ROOT/memory"
 cp "$REPO/templates/access-policy.json" "$EVENT_LINK_ROOT/policy/access.json"
 if ln -s "$ROOT/memory/events" "$EVENT_LINK_ROOT/memory/events" 2>/dev/null && [[ -L "$EVENT_LINK_ROOT/memory/events" ]]; then
-  [[ "$(LLM_WIKI_ROOT="$EVENT_LINK_ROOT" python3 "$ENRICH" --agent-profile coding --query legacyeventmarker --json)" == "[]" ]]
+  if LLM_WIKI_ROOT="$EVENT_LINK_ROOT" python3 "$ENRICH" --agent-profile coding --query legacyeventmarker --json \
+      >"$WORK/event-link.out" 2>"$WORK/event-link.err"; then
+    printf 'FAIL: linked event snapshot was reported as complete\n'; exit 1
+  fi
+  [[ ! -s "$WORK/event-link.out" ]]
+  grep -q 'unsafe-event-directory' "$WORK/event-link.err"
 fi
 mkdir -p "$ROOT/wiki/context"
 printf 'sessionstartsymlinkmarker\n' >"$ROOT/non-wiki-private.txt"

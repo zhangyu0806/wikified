@@ -20,6 +20,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -54,8 +55,13 @@ STOP_TOKENS = {
     "files",
     "config",
 }
-MAX_EVENT_LINES = 5000
+# Complete-snapshot resource bounds, NOT a prefix or candidate budget. A query
+# fails explicitly if any bound is exceeded, including blank physical lines.
+MAX_EVENT_LINES = 50000
 MAX_EVENT_LINE_BYTES = 256 * 1024
+MAX_EVENT_TOTAL_BYTES = 16 * 1024 * 1024
+MAX_EVENT_FILES = 512
+MAX_EVENT_DIRECTORY_ENTRIES = 1024
 MAX_WIKI_BYTES = 64 * 1024
 MAX_READ_PAGE_BYTES = 256 * 1024
 MAX_WIKI_FILES = 2000
@@ -311,6 +317,273 @@ def matches_project(governance: dict[str, Any], project: str | None) -> bool:
     return not project or governance.get("project") in {None, "", project}
 
 
+def _yaml_quoted_prefix(value: str) -> tuple[str, int]:
+    """Read the deliberately supported single-line YAML string subset."""
+    if value.startswith('"'):
+        try:
+            parsed, end = json.JSONDecoder().raw_decode(value)
+        except json.JSONDecodeError as exc:
+            raise PolicyError("invalid quoted governance string") from exc
+        if not isinstance(parsed, str):
+            raise PolicyError("governance key must be a string")
+        return parsed, end
+    if value.startswith("'"):
+        index, result = 1, []
+        while index < len(value):
+            if value[index] != "'":
+                result.append(value[index])
+                index += 1
+            elif index + 1 < len(value) and value[index + 1] == "'":
+                result.append("'")
+                index += 2
+            else:
+                return "".join(result), index + 1
+        raise PolicyError("unterminated quoted governance string")
+    raise PolicyError("expected quoted governance string")
+
+
+def _yaml_scalar(value: str) -> Any:
+    value = value.strip()
+    if not value or value.startswith("#"):
+        return None
+    if value[0] in "\"'":
+        parsed, end = _yaml_quoted_prefix(value)
+        tail = value[end:]
+        if tail and (not tail[0].isspace() or not tail.lstrip().startswith("#")):
+            raise PolicyError("trailing quoted governance content")
+        if any(ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF for char in parsed):
+            raise PolicyError("control character in governance string")
+        return parsed
+    value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+    if (
+        not value or value[0] in "&*!|>{[?%@`"
+        or any(char in value for char in "\"'[]{},")
+        or re.search(r":(?:\s|$)", value)
+        or any(ord(char) < 32 for char in value)
+    ):
+        raise PolicyError("unsupported governance scalar")
+    if value in {"null", "Null", "NULL", "~"}:
+        return None
+    if value in {"true", "True", "TRUE", "false", "False", "FALSE"}:
+        return value.lower() == "true"
+    if re.fullmatch(r"[-+]?(?:0|[1-9][0-9]*)", value):
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise PolicyError("oversized numeric governance scalar") from exc
+    return value
+
+
+def _yaml_entry(line: str) -> tuple[str, str]:
+    if line.startswith(('"', "'")):
+        key, end = _yaml_quoted_prefix(line)
+        rest = line[end:].lstrip(" ")
+        if not rest.startswith(":"):
+            raise PolicyError("missing governance separator")
+        value = rest[1:]
+    else:
+        match = re.match(r"([^\s:\[\]{},&*!|>?%@`#]+)\s*:(.*)$", line)
+        if not match:
+            raise PolicyError("unsupported frontmatter mapping")
+        key, value = match.groups()
+    if value and not value[0].isspace() and not value.startswith("#"):
+        raise PolicyError("unsupported frontmatter separator")
+    if not key or key == "<<" or any(ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF for char in key):
+        raise PolicyError("unsupported frontmatter key")
+    return key.lower(), value.strip()
+
+
+def _yaml_groups(lines: list[str]) -> list[tuple[str, str, list[str]]]:
+    """Group column-zero entries; never mistake nested source text for ACLs."""
+    groups: list[tuple[str, str, list[str]]] = []
+    seen: set[str] = set()
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith("\t") or re.match(r" +\t", line):
+            raise PolicyError("tabs in frontmatter indentation")
+        if line.startswith(" "):
+            if not groups:
+                raise PolicyError("unsupported indented frontmatter root")
+            groups[-1][2].append(line)
+            continue
+        key, value = _yaml_entry(line)
+        if key in seen:
+            raise PolicyError("duplicate frontmatter key")
+        seen.add(key)
+        groups.append((key, value, []))
+    return groups
+
+
+def _yaml_target_list(value: str, children: list[str]) -> list[str]:
+    if not value or value.startswith("#"):
+        if not children:
+            raise PolicyError("empty target declaration")
+        values: list[Any] = []
+        indent: int | None = None
+        for line in children:
+            current = len(line) - len(line.lstrip(" "))
+            if indent is None:
+                indent = current
+            if current != indent or not line[current:].startswith("- "):
+                raise PolicyError("unsupported target block list")
+            values.append(_yaml_scalar(line[current + 2:]))
+    elif value.startswith("["):
+        if children:
+            raise PolicyError("multiline flow targets are unsupported")
+        values, index = [], 1
+        while True:
+            while index < len(value) and value[index].isspace():
+                index += 1
+            if index >= len(value):
+                raise PolicyError("unterminated target list")
+            if value[index] == "]":
+                tail = value[index + 1:]
+                if tail and (not tail[0].isspace() or not tail.lstrip().startswith("#")):
+                    raise PolicyError("trailing target list content")
+                break
+            start = index
+            if value[index] in "\"'":
+                _, length = _yaml_quoted_prefix(value[index:])
+                index += length
+            else:
+                while index < len(value) and value[index] not in ",]":
+                    index += 1
+            values.append(_yaml_scalar(value[start:index]))
+            while index < len(value) and value[index].isspace():
+                index += 1
+            if index >= len(value) or value[index] not in ",]":
+                raise PolicyError("invalid target list separator")
+            if value[index] == ",":
+                index += 1
+                if index >= len(value) or value[index:].lstrip().startswith("]"):
+                    raise PolicyError("trailing target list comma is unsupported")
+    else:
+        if children:
+            raise PolicyError("nested scalar target is unsupported")
+        values = [_yaml_scalar(value)]
+    if not all(isinstance(item, str) for item in values):
+        raise PolicyError("target entries must be strings")
+    return values
+
+
+def _validate_opaque_yaml_value(value: str) -> None:
+    """Ignore unrelated values, but do not accept an unfinished flow/quote."""
+    if not value or value.startswith(("#", "|", ">")):
+        return
+    brackets: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char in "\"'" and (index == 0 or value[index - 1] in " \t[{,:"):
+            _, consumed = _yaml_quoted_prefix(value[index:])
+            index += consumed
+            continue
+        if char == "#" and (index == 0 or value[index - 1].isspace()):
+            break
+        if char in "[{":
+            brackets.append(char)
+        elif char in "]}":
+            if not brackets or brackets.pop() != {"]": "[", "}": "{"}[char]:
+                raise PolicyError("unbalanced unrelated frontmatter value")
+        index += 1
+    if brackets:
+        raise PolicyError("multiline flow frontmatter is unsupported")
+
+
+def _page_governance_fields(lines: list[str]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    product: dict[str, Any] | None = None
+    scalar_keys = {"memory_id", "domain", "sensitivity", "review_state", "review_status",
+                   "epistemic_status", "project"}
+    for key, value, children in _yaml_groups(lines):
+        if key in {"target_profiles", "target_agents"}:
+            fields[key] = _yaml_target_list(value, children)
+        elif key in scalar_keys:
+            if children:
+                raise PolicyError("nested governance scalar is unsupported")
+            fields[key] = _yaml_scalar(value)
+            if not isinstance(fields[key], str) and not (key == "project" and fields[key] is None):
+                raise PolicyError("governance scalar must be a string")
+        elif key == "mind2one":
+            if value.startswith("{"):
+                # The product also writes a JSON flow object. JSON is a bounded
+                # YAML subset here, not permission to guess general YAML flow maps.
+                if children:
+                    raise PolicyError("nested content after product JSON")
+                def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                    result: dict[str, Any] = {}
+                    for name, item in pairs:
+                        if name in result:
+                            raise PolicyError("duplicate product JSON key")
+                        result[name] = item
+                    return result
+                def reject_constant(_: str) -> Any:
+                    raise PolicyError("non-finite product JSON value")
+                def finite_float(number: str) -> float:
+                    parsed = float(number)
+                    if not math.isfinite(parsed):
+                        raise PolicyError("non-finite product JSON number")
+                    return parsed
+                try:
+                    product, end = json.JSONDecoder(
+                        object_pairs_hook=unique_object, parse_constant=reject_constant,
+                        parse_float=finite_float,
+                    ).raw_decode(value)
+                except (ValueError, RecursionError) as exc:
+                    raise PolicyError("invalid product JSON") from exc
+                tail = value[end:]
+                if not isinstance(product, dict) or (
+                    tail and (not tail[0].isspace() or not tail.lstrip().startswith("#"))
+                ):
+                    raise PolicyError("trailing product JSON content")
+                continue
+            if (value and not value.startswith("#")) or not children:
+                raise PolicyError("unsupported product governance object")
+            indent = min(len(line) - len(line.lstrip(" ")) for line in children)
+            product = {}
+            for child_key, child_value, nested in _yaml_groups([line[indent:] for line in children]):
+                if child_key in {"version", "id", "review-state", "origin"}:
+                    if nested:
+                        raise PolicyError("nested product governance scalar")
+                    product[child_key] = _yaml_scalar(child_value)
+                else:
+                    _validate_opaque_yaml_value(child_value)
+        else:
+            _validate_opaque_yaml_value(value)
+    acl = (
+        "domain" in fields, "sensitivity" in fields,
+        bool({"review_state", "review_status"} & fields.keys()),
+        bool({"target_profiles", "target_agents"} & fields.keys()),
+    )
+    if any(acl) and not all(acl):
+        raise PolicyError("incomplete page ACL")
+    if not any(acl) and {"memory_id", "epistemic_status"} & fields.keys():
+        raise PolicyError("governance identity requires an explicit ACL")
+    if product is not None:
+        if not all(acl) or not {"memory_id", "epistemic_status"} <= fields.keys():
+            raise PolicyError("incomplete product governance")
+        if type(product.get("version")) is not int or product["version"] != 1:
+            raise PolicyError("unsupported product governance version")
+        if product.get("id") != fields["memory_id"]:
+            raise PolicyError("product memory identity disagrees")
+        reviews = {"not-required": "approved", "pending": "pending", "accepted": "approved",
+                   "corrected": "approved", "rejected": "rejected"}
+        state = product.get("review-state")
+        if not isinstance(state, str) or state not in reviews:
+            raise PolicyError("unsupported product review state")
+        review = _alias_value(fields, "review_state", "review_status", None)
+        if not isinstance(review, str) or reviews[state] != review.strip().lower():
+            raise PolicyError("product review declarations disagree")
+        if "origin" in product:
+            origin = product["origin"]
+            if not isinstance(origin, str) or origin not in {"human", "ai", "import", "system"}:
+                raise PolicyError("unknown product origin")
+            if (origin == "ai" and state == "not-required") or (origin == "human" and state == "pending"):
+                raise PolicyError("product origin and review disagree")
+    return fields
+
+
 def page_metadata(path: Path, wiki_dir: Path) -> PageMetadata | None:
     if wiki_dir.is_symlink():
         return None
@@ -324,13 +597,13 @@ def page_metadata(path: Path, wiki_dir: Path) -> PageMetadata | None:
         with path.open("rb") as handle:
             first = handle.readline(MAX_FRONTMATTER_BYTES + 1)
             if len(first) > MAX_FRONTMATTER_BYTES:
-                return None
+                raise PolicyError("oversized frontmatter prefix")
             consumed = len(first)
             marker = first[3:] if first.startswith(b"\xef\xbb\xbf") else first
             marker = marker.rstrip(b"\r\n")
             if marker != b"---":
                 if marker.strip().startswith(b"---"):
-                    return None
+                    raise PolicyError("malformed frontmatter opening")
                 if not marker.strip():
                     while consumed <= MAX_FRONTMATTER_BYTES:
                         probe = handle.readline(MAX_FRONTMATTER_BYTES - consumed + 1)
@@ -338,20 +611,16 @@ def page_metadata(path: Path, wiki_dir: Path) -> PageMetadata | None:
                             break
                         consumed += len(probe)
                         if consumed > MAX_FRONTMATTER_BYTES:
-                            return None
+                            raise PolicyError("oversized frontmatter prefix")
                         stripped = probe.rstrip(b"\r\n").strip()
                         if not stripped:
                             continue
                         if stripped.startswith(b"---"):
-                            return None
+                            raise PolicyError("misplaced frontmatter opening")
                         break
                 memory_id, governance = governance_from_mapping({}, fallback_id)
                 return PageMetadata(memory_id, governance, False)
-            fields: dict[str, str] = {}
-            keys = {
-                "memory_id", "domain", "sensitivity", "review_state", "review_status",
-                "target_profiles", "target_agents", "epistemic_status", "project",
-            }
+            lines: list[str] = []
             closed = False
             while consumed <= MAX_FRONTMATTER_BYTES:
                 line = handle.readline(MAX_FRONTMATTER_BYTES - consumed + 1)
@@ -363,20 +632,14 @@ def page_metadata(path: Path, wiki_dir: Path) -> PageMetadata | None:
                 if line.rstrip(b"\r\n") == b"---":
                     closed = True
                     break
-                decoded = line.decode("utf-8")
-                key, separator, value = decoded.partition(":")
-                key = key.strip().lower()
-                if separator and key in keys:
-                    if key in fields:
-                        return None
-                    fields[key] = value.strip()
+                lines.append(line.decode("utf-8").rstrip("\r\n"))
             if not closed:
-                return None
-    except (OSError, UnicodeError):
-        return None
-    try:
-        memory_id, governance = governance_from_mapping(fields, fallback_id, frontmatter=True)
-    except PolicyError:
+                raise PolicyError("unclosed or oversized frontmatter")
+        fields = _page_governance_fields(lines)
+        memory_id, governance = governance_from_mapping(fields, fallback_id)
+    except (OSError, UnicodeError, PolicyError):
+        # Do not include source paths, field values or page text in diagnostics.
+        print("llm-wiki-enrich: invalid or unsupported page governance", file=sys.stderr)
         return None
     return PageMetadata(memory_id, governance, True)
 
@@ -615,96 +878,235 @@ def decayed_confidence(event: dict[str, Any]) -> float:
     return base * math.pow(0.5, age_days / half_life)
 
 
-def load_events(root: Path, access: AccessContext) -> list[dict[str, Any]]:
-    events_dir = root / "memory" / "events"
-    if not events_dir.is_dir() or events_dir.is_symlink():
-        return []
-    events: list[dict[str, Any]] = []
-    scanned = 0
-    for path in sorted(events_dir.glob("*.jsonl"), reverse=True):
-        if not path.is_file() or path.is_symlink():
-            continue
+class EventSnapshotError(RuntimeError):
+    """No current event result is safe to return; never include source content."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def _event_stat_signature(value: os.stat_result) -> tuple[int, ...]:
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+            value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _event_manifest(directory: Path) -> tuple[tuple[int, ...] | None, dict[str, tuple[int, ...]]]:
+    """Bound enumeration too; sorting an unbounded glob would defeat the cap."""
+    try:
+        before = directory.lstat()
+    except FileNotFoundError:
+        return None, {}
+    except OSError:
+        raise EventSnapshotError("unreadable") from None
+    if not stat.S_ISDIR(before.st_mode):
+        raise EventSnapshotError("unsafe-event-directory")
+    # directory is formed from a resolved vault root. Its memory parent must
+    # not redirect this otherwise ordinary-looking events directory elsewhere.
+    try:
+        if directory.resolve(strict=True) != directory:
+            raise EventSnapshotError("unsafe-event-directory")
+    except OSError:
+        raise EventSnapshotError("unreadable") from None
+    files: dict[str, tuple[int, ...]] = {}
+    try:
+        with os.scandir(directory) as entries:
+            for count, entry in enumerate(entries, 1):
+                if count > MAX_EVENT_DIRECTORY_ENTRIES:
+                    raise EventSnapshotError("directory-entry-limit")
+                if not entry.name.endswith(".jsonl"):
+                    continue
+                if len(files) >= MAX_EVENT_FILES:
+                    raise EventSnapshotError("file-count-limit")
+                metadata = entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                    raise EventSnapshotError("unsafe-event-file")
+                files[entry.name] = _event_stat_signature(metadata)
+        if _event_stat_signature(directory.lstat()) != _event_stat_signature(before):
+            raise EventSnapshotError("snapshot-changed")
+    except OSError:
+        raise EventSnapshotError("unreadable") from None
+    return _event_stat_signature(before), files
+
+
+def _event_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+
+def _event_json_constant(_: str) -> Any:
+    raise ValueError("non-JSON numeric constant")
+
+
+def _read_event_snapshot(root: Path) -> list[dict[str, Any]]:
+    try:
+        root = root.resolve(strict=True)
+    except OSError:
+        raise EventSnapshotError("unreadable") from None
+    memory = root / "memory"
+    def parent_signature() -> tuple[int, ...] | None:
         try:
-            with path.open("rb") as handle:
-                while scanned < MAX_EVENT_LINES:
-                    raw_line = handle.readline(MAX_EVENT_LINE_BYTES + 1)
+            value = memory.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise EventSnapshotError("unreadable") from None
+        if not stat.S_ISDIR(value.st_mode):
+            raise EventSnapshotError("unsafe-event-directory")
+        return _event_stat_signature(value)
+    parent = parent_signature()
+    directory = root / "memory" / "events"
+    manifest = _event_manifest(directory)
+    # An absent directory is also checked again, so a newly-created event set
+    # during this observation cannot silently disappear from the result.
+    files = manifest[1]
+    if sum(value[4] for value in files.values()) > MAX_EVENT_TOTAL_BYTES:
+        raise EventSnapshotError("total-byte-limit")
+    rows: list[dict[str, Any]] = []
+    identities: dict[str, str] = {}
+    total_bytes = line_count = rejected = 0
+    for name, expected in sorted(files.items()):
+        try:
+            if parent_signature() != parent:
+                raise EventSnapshotError("snapshot-changed")
+            descriptor = os.open(directory / name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "rb") as handle:
+                if _event_stat_signature(os.fstat(handle.fileno())) != expected:
+                    raise EventSnapshotError("snapshot-changed")
+                while True:
+                    remaining = MAX_EVENT_TOTAL_BYTES - total_bytes
+                    raw_line = handle.readline(min(MAX_EVENT_LINE_BYTES, remaining) + 1)
                     if not raw_line:
-                        break
-                    scanned += 1
+                        break  # Exact limit + EOF is complete, not truncated.
+                    total_bytes += len(raw_line)
+                    line_count += 1
                     if len(raw_line) > MAX_EVENT_LINE_BYTES:
-                        # Do not drain an attacker-controlled giant line into
-                        # memory; stop this file and continue with older files.
-                        break
+                        raise EventSnapshotError("line-byte-limit")
+                    if total_bytes > MAX_EVENT_TOTAL_BYTES:
+                        raise EventSnapshotError("total-byte-limit")
+                    if line_count > MAX_EVENT_LINES:
+                        raise EventSnapshotError("record-count-limit")
                     if not raw_line.strip():
                         continue
                     try:
-                        item = json.loads(raw_line.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
+                        item = json.loads(raw_line.decode("utf-8"), object_pairs_hook=_event_json_object,
+                                          parse_constant=_event_json_constant)
+                    except (UnicodeError, ValueError, RecursionError):
+                        raise EventSnapshotError("malformed-jsonl") from None
                     if not isinstance(item, dict):
-                        continue
-                    metadata = event_metadata(item)
+                        raise EventSnapshotError("malformed-jsonl")
+                    schema = item.get("schema_version")
+                    if "schema_version" in item and (
+                        not isinstance(schema, str)
+                        or schema not in LEGACY_EVENT_SCHEMAS | {CURRENT_EVENT_SCHEMA}
+                    ):
+                        raise EventSnapshotError("unknown-event-schema")
+                    try:
+                        metadata = event_metadata(item)
+                    except (TypeError, ValueError):
+                        metadata = None
                     if metadata is None:
+                        rejected += 1
                         continue
                     memory_id, governance = metadata
+                    # Known-invalid records get no identity or revision authority.
+                    # Identical valid rows are harmless Git-union retries; valid
+                    # conflicting identities make the entire current state unsafe.
+                    identity = str(item["id"]) if isinstance(item.get("id"), str) and item["id"] else memory_id
+                    try:
+                        canonical = json.dumps(item, sort_keys=True, ensure_ascii=True,
+                                               separators=(",", ":"), allow_nan=False)
+                    except (ValueError, RecursionError):
+                        raise EventSnapshotError("malformed-jsonl") from None
+                    digest = hashlib.sha256(canonical.encode()).hexdigest()
+                    if identity in identities:
+                        if identities[identity] != digest:
+                            raise EventSnapshotError("identity-conflict")
+                        continue
+                    identities[identity] = digest
                     governed = dict(item)
                     governed["__memory_id"] = memory_id
                     governed["__governance"] = governance
-                    events.append(governed)
+                    rows.append(governed)
+                if _event_stat_signature(os.fstat(handle.fileno())) != expected:
+                    raise EventSnapshotError("snapshot-changed")
         except OSError:
-            continue
-        if scanned >= MAX_EVENT_LINES:
-            break
+            raise EventSnapshotError("unreadable") from None
+    if _event_manifest(directory) != manifest or parent_signature() != parent:
+        raise EventSnapshotError("snapshot-changed")
+    # No lock file, persistent index, or real data is written by this reader.
+    # This detects observed races; it is not a multi-file transaction guarantee.
+    if rejected:
+        print(f"llm-wiki-enrich: rejected {rejected} known-schema event record(s) with invalid governance", file=sys.stderr)
+    return rows
 
-    now = datetime.now(timezone.utc)
-    id_counts = Counter(
-        str(event.get("id")) for event in events
-        if isinstance(event.get("id"), str) and event.get("id")
-    )
-    events = [event for event in events if not isinstance(event.get("id"), str) or id_counts[str(event.get("id"))] == 1]
-    event_index = {
-        str(event["id"]): event for event in events
-        if isinstance(event.get("id"), str) and event.get("id")
-    }
-    superseded: set[str] = set()
+
+def _event_terminal_edges(events: list[dict[str, Any]], now: datetime) -> dict[str, set[str]]:
+    index = {event["id"]: event for event in events if isinstance(event.get("id"), str) and event["id"]}
+    edges: dict[str, set[str]] = {}
     for revision in events:
-        if revision.get("lifecycle", "active") == "deprecated":
+        source_id = revision.get("id")
+        if not isinstance(source_id, str) or not source_id:
             continue
-        valid_from = parse_time(revision.get("valid_from") or revision.get("timestamp"))
-        if valid_from is not None and valid_from > now:
+        governance = revision["__governance"]
+        review = governance.get("review_status")
+        effective = parse_time(revision.get("valid_from") or revision.get("timestamp"))
+        expiry = parse_time(revision.get("valid_until"))
+        if review not in {"approved", "rejected"} or effective is None or effective > now:
             continue
-        revision_review = revision["__governance"].get("review_status")
-        if revision_review == "pending":
+        if expiry is not None and expiry <= effective:
+            continue
+        if revision.get("lifecycle", "active") not in {"active", "deprecated"}:
+            continue
+        project = governance.get("project")
+        if not isinstance(project, str) or not project:
             continue
         targets = revision.get("supersedes", [])
         if isinstance(targets, str):
-            targets = [targets]
-        if isinstance(targets, list):
-            for item in targets:
-                if not isinstance(item, str):
-                    continue
-                target = event_index.get(item)
-                if target is None:
-                    continue
-                revision_governance = revision["__governance"]
-                target_governance = target["__governance"]
-                if revision_governance.get("domain") != target_governance.get("domain"):
-                    continue
-                revision_project = revision_governance.get("project") or None
-                target_project = target_governance.get("project") or None
-                if revision_project != target_project:
-                    continue
-                target_review = target_governance.get("review_status")
-                if revision_review == "approved" or (
-                    revision_review == "rejected" and target_review == "pending"
-                ):
-                    superseded.add(item)
+            targets = [targets]  # Legacy input compatibility, not a v3 writer format.
+        if not isinstance(targets, list):
+            continue
+        for target_id in targets:
+            target = index.get(target_id) if isinstance(target_id, str) else None
+            if target is None:
+                continue
+            target_policy = target["__governance"]
+            if governance.get("domain") != target_policy.get("domain") or project != target_policy.get("project"):
+                continue
+            if review == "approved" or (review == "rejected" and target_policy.get("review_status") == "pending"):
+                edges.setdefault(source_id, set()).add(target_id)
+    # A revision's edge survives its deprecation, expiry, replacement and a
+    # narrower visibility policy. Restoring a predecessor requires a new event.
+    indegree: dict[str, int] = {}
+    for source, targets in edges.items():
+        indegree.setdefault(source, 0)
+        for target in targets:
+            indegree[target] = indegree.get(target, 0) + 1
+    ready = [node for node, degree in indegree.items() if degree == 0]
+    visited = 0
+    while ready:
+        source = ready.pop()
+        visited += 1
+        for target in edges.get(source, ()):
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                ready.append(target)
+    if visited != len(indegree):
+        raise EventSnapshotError("revision-cycle")
+    return edges
 
+
+def load_events(root: Path, access: AccessContext) -> list[dict[str, Any]]:
+    events = _read_event_snapshot(root)
+    now = datetime.now(timezone.utc)
+    superseded = {target for targets in _event_terminal_edges(events, now).values() for target in targets}
     active: list[dict[str, Any]] = []
     for event in events:
-        if event.get("lifecycle", "active") == "deprecated":
-            continue
-        if str(event.get("id", "")) in superseded:
+        if event.get("lifecycle", "active") != "active" or str(event.get("id", "")) in superseded:
             continue
         valid_from = parse_time(event.get("valid_from") or event.get("timestamp"))
         valid_until = parse_time(event.get("valid_until"))
@@ -1340,7 +1742,13 @@ def main(argv: list[str]) -> int:
     query_terms = token_terms(query_parts)
     query_groups = query_term_groups(query_parts)
     query_tokens = set(query_terms)
-    candidates = event_candidates(load_events(root, access), query_tokens, query_groups, touched_files, args.project)
+    try:
+        events = load_events(root, access)
+    except EventSnapshotError as exc:
+        recovery = "retry after writers finish" if exc.code == "snapshot-changed" else "inspect the event snapshot before retrying"
+        print(f"llm-wiki-enrich: event snapshot unavailable [{exc.code}]; {recovery}", file=sys.stderr)
+        return 4
+    candidates = event_candidates(events, query_tokens, query_groups, touched_files, args.project)
     if args.ranking == "legacy":
         candidates.extend(_legacy_wiki_candidates(root, legacy_tokenize([args.query, *touched_files]), access, args.project))
     else:

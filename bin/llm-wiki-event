@@ -255,7 +255,9 @@ def is_effective_terminal_revision(event: dict[str, Any]) -> bool:
         return False
     if "review_status" not in event or "review_state" in event or "target_profiles" in event:
         return False
-    if event.get("lifecycle", "active") != "active":
+    # Deprecating a terminal revision hides its content; it does not undo an
+    # approval/rejection and make the predecessor reviewable for a second time.
+    if event.get("lifecycle", "active") not in {"active", "deprecated"}:
         return False
     actor = event.get("actor")
     if not isinstance(actor, dict) or set(actor) != {"type", "id"}:
@@ -298,6 +300,9 @@ def is_effective_terminal_revision(event: dict[str, Any]) -> bool:
     ):
         return False
     valid_from = parse_time(event.get("valid_from") or event.get("timestamp"))
+    valid_until = parse_time(event.get("valid_until"))
+    if "valid_until" in event and (valid_until is None or valid_from is None or valid_until <= valid_from):
+        return False
     return valid_from is not None and valid_from <= datetime.now(timezone.utc)
 
 
@@ -314,7 +319,9 @@ def terminally_superseded_ids(event_index: dict[str, dict[str, Any]]) -> set[str
                 continue
             target_project = str(target.get("project") or "").strip()
             target_domain = str(target.get("domain") or "").strip().lower()
-            if target_project == event_project and target_domain == event_domain:
+            target_status = target.get("review_status", target.get("review_state", "approved"))
+            closes_target = event.get("review_status") == "approved" or target_status == "pending"
+            if target_project == event_project and target_domain == event_domain and closes_target:
                 closed.add(target_id)
     return closed
 
