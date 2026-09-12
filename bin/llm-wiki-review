@@ -688,8 +688,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         if len(exp) > 15:
             lines.append(f"- …还有 {len(exp) - 15} 条")
         lines.append("")
-        lines.append("过期处理：确认无用后，把对应 event 的 `lifecycle` 手动改为 `deprecated`，")
-        lines.append("或用新事实 `llm-wiki-event --supersedes <id>` 取代（不删，留档）。")
+        lines.append("过期处理：先检查 schema。v4 及其被审核来源不可手动改正文、id 或 lifecycle；")
+        lines.append("请用独立授权的 `llm-wiki-event-review` 执行 withdraw/correct，并保留原记录。")
+        lines.append("仅未参与 v4 链的旧事件可按原流程标记 deprecated 或用新事实 supersedes；不要删除历史。")
     lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

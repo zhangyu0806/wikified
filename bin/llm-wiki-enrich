@@ -20,6 +20,7 @@ import json
 import math
 import os
 import re
+import runpy
 import stat
 import struct
 import sys
@@ -88,6 +89,8 @@ ACTOR_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,127}$")
 EVENT_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 LEGACY_EVENT_SCHEMAS = {"llm-wiki-memory-event/v1", "llm-wiki-memory-event/v2"}
 CURRENT_EVENT_SCHEMA = "llm-wiki-memory-event/v3"
+EVENT_REVIEW = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_event_review.py")))
+REVIEW_EVENT_SCHEMA = EVENT_REVIEW["SCHEMA"]
 LEGACY_GOVERNANCE: dict[str, Any] = {
     "domain": "work",
     "sensitivity": "internal",
@@ -975,7 +978,7 @@ def strip_frontmatter(text: str, has_frontmatter: bool) -> str:
 def event_metadata(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     schema_present = "schema_version" in event
     schema = event.get("schema_version")
-    if schema_present and schema not in LEGACY_EVENT_SCHEMAS and schema != CURRENT_EVENT_SCHEMA:
+    if schema_present and schema not in LEGACY_EVENT_SCHEMAS | {CURRENT_EVENT_SCHEMA, REVIEW_EVENT_SCHEMA}:
         return None
     event_id = event.get("id")
     if isinstance(event_id, str) and event_id.strip():
@@ -983,7 +986,7 @@ def event_metadata(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     else:
         canonical = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         fallback_id = stable_memory_id("event", canonical)
-    if schema == CURRENT_EVENT_SCHEMA:
+    if schema in {CURRENT_EVENT_SCHEMA, REVIEW_EVENT_SCHEMA}:
         required = {
             "id", "memory_id", "actor", "domain", "sensitivity", "epistemic_status",
             "review_status", "target_agents",
@@ -1017,7 +1020,7 @@ def event_metadata(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
         memory_id, governance = governance_from_mapping(event, fallback_id)
     except PolicyError:
         return None
-    if schema == CURRENT_EVENT_SCHEMA:
+    if schema in {CURRENT_EVENT_SCHEMA, REVIEW_EVENT_SCHEMA}:
         actor_type = event["actor"]["type"]
         epistemic = governance["epistemic_status"]
         review = governance["review_status"]
@@ -1037,6 +1040,8 @@ def event_metadata(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
             return None
         if epistemic in {"source-record", "externally-verified", "legacy-imported"} and review != "approved":
             return None
+    if schema == REVIEW_EVENT_SCHEMA and not EVENT_REVIEW["validate_binding"](event):
+        return None
     return memory_id, governance
 
 
@@ -1320,7 +1325,7 @@ def _read_event_snapshot(root: Path) -> list[dict[str, Any]]:
                     schema = item.get("schema_version")
                     if "schema_version" in item and (
                         not isinstance(schema, str)
-                        or schema not in LEGACY_EVENT_SCHEMAS | {CURRENT_EVENT_SCHEMA}
+                        or schema not in LEGACY_EVENT_SCHEMAS | {CURRENT_EVENT_SCHEMA, REVIEW_EVENT_SCHEMA}
                     ):
                         raise EventSnapshotError("unknown-event-schema")
                     try:
@@ -1328,6 +1333,8 @@ def _read_event_snapshot(root: Path) -> list[dict[str, Any]]:
                     except (TypeError, ValueError):
                         metadata = None
                     if metadata is None:
+                        if schema == REVIEW_EVENT_SCHEMA:
+                            raise EventSnapshotError("invalid-event-review")
                         rejected += 1
                         continue
                     memory_id, governance = metadata
@@ -1356,6 +1363,10 @@ def _read_event_snapshot(root: Path) -> list[dict[str, Any]]:
             raise EventSnapshotError("unreadable") from None
     if _event_manifest(directory) != manifest or parent_signature() != parent:
         raise EventSnapshotError("snapshot-changed")
+    try:
+        EVENT_REVIEW["validate_links"](rows)
+    except (ValueError, TypeError, KeyError, UnicodeError, OverflowError, RecursionError):
+        raise EventSnapshotError("invalid-event-review-chain") from None
     # No lock file, persistent index, or real data is written by this reader.
     # This detects observed races; it is not a multi-file transaction guarantee.
     if rejected:
@@ -1372,11 +1383,12 @@ def _event_terminal_edges(events: list[dict[str, Any]], now: datetime) -> dict[s
             continue
         governance = revision["__governance"]
         review = governance.get("review_status")
-        effective = parse_time(revision.get("valid_from") or revision.get("timestamp"))
+        versioned = revision.get("schema_version") == REVIEW_EVENT_SCHEMA
+        effective = parse_time(revision["review"]["at"] if versioned else revision.get("valid_from") or revision.get("timestamp"))
         expiry = parse_time(revision.get("valid_until"))
         if review not in {"approved", "rejected"} or effective is None or effective > now:
             continue
-        if expiry is not None and expiry <= effective:
+        if not versioned and expiry is not None and expiry <= effective:
             continue
         if revision.get("lifecycle", "active") not in {"active", "deprecated"}:
             continue
@@ -1395,7 +1407,8 @@ def _event_terminal_edges(events: list[dict[str, Any]], now: datetime) -> dict[s
             target_policy = target["__governance"]
             if governance.get("domain") != target_policy.get("domain") or project != target_policy.get("project"):
                 continue
-            if review == "approved" or (review == "rejected" and target_policy.get("review_status") == "pending"):
+            withdrawal = versioned and revision["review"]["decision"] == "withdraw"
+            if review == "approved" or withdrawal or (review == "rejected" and target_policy.get("review_status") == "pending"):
                 edges.setdefault(source_id, set()).add(target_id)
     # A revision's edge survives its deprecation, expiry, replacement and a
     # narrower visibility policy. Restoring a predecessor requires a new event.
@@ -1425,6 +1438,8 @@ def load_events(root: Path, access: AccessContext) -> list[dict[str, Any]]:
     active: list[dict[str, Any]] = []
     for event in events:
         if event.get("lifecycle", "active") != "active" or str(event.get("id", "")) in superseded:
+            continue
+        if event.get("schema_version") == REVIEW_EVENT_SCHEMA and parse_time(event["review"]["at"]) > now:
             continue
         valid_from = parse_time(event.get("valid_from") or event.get("timestamp"))
         valid_until = parse_time(event.get("valid_until"))

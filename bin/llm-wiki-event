@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import sys
 import uuid
 try:
@@ -52,6 +53,7 @@ REVIEW_STATUSES = {"pending", "approved", "rejected"}
 ACTOR_TYPES = {"human", "ai", "system"}
 ACTOR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$")
 TARGET_AGENT_RE = re.compile(r"^(?:\*|[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127})$")
+EVENT_REVIEW = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_event_review.py")))
 
 SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(sk-[a-zA-Z0-9_-]{16,})\b"), "[REDACTED_OPENAI_KEY]"),
@@ -138,6 +140,7 @@ def parse_time(value: Any) -> datetime | None:
 def load_event_state(root: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
     index: dict[str, dict[str, Any]] = {}
     duplicate_ids: set[str] = set()
+    has_versioned = False
     events_dir = root / "events"
     if not events_dir.exists():
         return index, duplicate_ids
@@ -149,6 +152,8 @@ def load_event_state(root: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(event, dict) and event.get("schema_version") == EVENT_REVIEW["SCHEMA"]:
+                has_versioned = True
             if isinstance(event, dict) and isinstance(event.get("id"), str):
                 event_id = event["id"]
                 if event_id in duplicate_ids:
@@ -158,6 +163,14 @@ def load_event_state(root: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
                     duplicate_ids.add(event_id)
                     continue
                 index[event_id] = event
+    if has_versioned:
+        # A legacy writer must observe the complete v4 terminal chain too. Never
+        # approve an ancestor simply because its newer row uses another schema.
+        engine = runpy.run_path(str(Path(__file__).resolve().with_name("llm-wiki-enrich")), run_name="legacy_event_review_guard")
+        try:
+            engine["_read_event_snapshot"](root.parent)
+        except engine["EventSnapshotError"]:
+            raise ValueError("versioned event snapshot is invalid") from None
     return index, duplicate_ids
 
 
@@ -172,6 +185,7 @@ def validate_supersedes(
     project: str,
     domain: str,
     ambiguous_ids: set[str] | None = None,
+    allow_versioned: bool = False,
 ) -> list[str]:
     normalized = list(dict.fromkeys(targets))
     normalized_project = str(project or "").strip()
@@ -185,6 +199,8 @@ def validate_supersedes(
         target = event_index.get(target_id)
         if target is None:
             raise ValueError(f"supersedes target does not exist: {target_id}")
+        if target.get("schema_version") == EVENT_REVIEW["SCHEMA"] and not allow_versioned:
+            raise ValueError("versioned event target requires the independent review command")
         target_project = str(target.get("project") or "").strip()
         if not normalized_project or target_project != normalized_project:
             raise ValueError(f"supersedes target belongs to another project: {target_id}")
@@ -246,6 +262,8 @@ def normalized_supersedes(event: dict[str, Any]) -> list[str]:
 
 
 def is_effective_terminal_revision(event: dict[str, Any]) -> bool:
+    if event.get("schema_version") == EVENT_REVIEW["SCHEMA"]:
+        return EVENT_REVIEW["validate_binding"](event) and parse_time(event["review"]["at"]) <= datetime.now(timezone.utc)
     event_id = event.get("id")
     if not isinstance(event_id, str) or not re.fullmatch(r"[0-9a-f]{16}", event_id):
         return False
@@ -320,7 +338,8 @@ def terminally_superseded_ids(event_index: dict[str, dict[str, Any]]) -> set[str
             target_project = str(target.get("project") or "").strip()
             target_domain = str(target.get("domain") or "").strip().lower()
             target_status = target.get("review_status", target.get("review_state", "approved"))
-            closes_target = event.get("review_status") == "approved" or target_status == "pending"
+            withdrawal = event.get("schema_version") == EVENT_REVIEW["SCHEMA"] and event["review"]["decision"] == "withdraw"
+            closes_target = event.get("review_status") == "approved" or target_status == "pending" or withdrawal
             if target_project == event_project and target_domain == event_domain and closes_target:
                 closed.add(target_id)
     return closed

@@ -1,0 +1,437 @@
+{
+  "schemaVersion": 1,
+  "syntheticOnly": true,
+  "cases": [
+    {
+      "name": "pending-v3",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v3",
+        "id": "0000000000000001",
+        "memory_id": "event:0000000000000001",
+        "actor": {
+          "type": "ai",
+          "id": "codex"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "ai-proposed",
+        "review_status": "pending",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2020-01-01T00:00:00Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "vfourmarker original",
+        "supersedes": [],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": []
+      },
+      "record_revision": "sha256:5f7804352edb20d060682cdc55f71e05597570a98e5580a6a0a40806098aa41e",
+      "target_revision": "sha256:75df670bbbcaa3e5552efd134cef6afd90cdf0730375f0588a647d6a5b03b029",
+      "content_revision": "sha256:47b04caee4f5dff7b8b739e9366015f218b90413d500853f34094becb711149f",
+      "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1"
+    },
+    {
+      "name": "accepted-v4",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v4",
+        "id": "0000000000000002",
+        "memory_id": "event:0000000000000002",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_status": "approved",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "vfourmarker original",
+        "supersedes": [
+          "0000000000000001"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "record_id": "event:0000000000000001",
+        "source": "human-review/v4",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "accept",
+          "target_id": "0000000000000001",
+          "target_revision": "sha256:75df670bbbcaa3e5552efd134cef6afd90cdf0730375f0588a647d6a5b03b029",
+          "content_revision": "sha256:46c20cad1b44ba818eb0f9ae6dd8db214abb455ff2bf99d812f1195986957d96",
+          "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "test:accept",
+          "request_revision": "sha256:f40a8e62020f472e46be00b67725f2f390120ef9abc6d8c1efc8e38b11444709"
+        }
+      },
+      "record_revision": "sha256:baf57926bcea1109af986c86bb5c9bc0235f532d55aa5248afca8b4e553a10b1",
+      "target_revision": "sha256:345b4e46e9f0b35a4dfad53cc0d1f0d17202d881526cec34f085352ec8b12575",
+      "content_revision": "sha256:46c20cad1b44ba818eb0f9ae6dd8db214abb455ff2bf99d812f1195986957d96",
+      "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1"
+    },
+    {
+      "name": "corrected-unicode",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v4",
+        "id": "0000000000000003",
+        "memory_id": "event:0000000000000003",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_status": "approved",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "vfourmarker 修正 café / café / 😀\r\n",
+        "supersedes": [
+          "0000000000000002",
+          "0000000000000001"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "record_id": "event:0000000000000001",
+        "source": "human-review/v4",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "correct",
+          "target_id": "0000000000000002",
+          "target_revision": "sha256:345b4e46e9f0b35a4dfad53cc0d1f0d17202d881526cec34f085352ec8b12575",
+          "content_revision": "sha256:a6e48dd62a0edfc2e22657b9d6ae1b16266c8853cbc8323ef6d635c4d9955fa0",
+          "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "test:correct",
+          "request_revision": "sha256:b9775e0cd1ab6e530bcff2cd2b918762397da771040de1ccbbecac1715173606"
+        }
+      },
+      "record_revision": "sha256:e5a17e14bfd2e8bd96be16e5d012fdcdaea6bb6f0af7c050810160a4e696fd65",
+      "target_revision": "sha256:972cc9afdcd7ce3c1f4b7f257e2338090e60e1ab00d7e63a493a64c667baffac",
+      "content_revision": "sha256:a6e48dd62a0edfc2e22657b9d6ae1b16266c8853cbc8323ef6d635c4d9955fa0",
+      "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1"
+    },
+    {
+      "name": "withdrawn",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v4",
+        "id": "0000000000000004",
+        "memory_id": "event:0000000000000004",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "disputed",
+        "review_status": "rejected",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "vfourmarker 修正 café / café / 😀\r\n",
+        "supersedes": [
+          "0000000000000003"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "record_id": "event:0000000000000001",
+        "source": "human-review/v4",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "withdraw",
+          "target_id": "0000000000000003",
+          "target_revision": "sha256:972cc9afdcd7ce3c1f4b7f257e2338090e60e1ab00d7e63a493a64c667baffac",
+          "content_revision": "sha256:ca1899c0beeb444c4176f5d5f7f22c6df746ceb8cbfdea7e852ed3fbd60cb031",
+          "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "test:withdraw",
+          "request_revision": "sha256:a89f4491a322a07f3ee5d6a67f1694edb25e229e76f9ee93b240dbf6bccd0516"
+        }
+      },
+      "record_revision": "sha256:370f4e90b42e29cf87eb440676a65a94423c59394f352fe88774758f6d179981",
+      "target_revision": "sha256:c12ce84d4e39a5d75696c283e1b681bea3b4e91ff4b5a3b2a589795eb3835b4c",
+      "content_revision": "sha256:ca1899c0beeb444c4176f5d5f7f22c6df746ceb8cbfdea7e852ed3fbd60cb031",
+      "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1"
+    },
+    {
+      "name": "restored",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v4",
+        "id": "0000000000000005",
+        "memory_id": "event:0000000000000005",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_status": "approved",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "vfourmarker 修正 café / café / 😀\r\n",
+        "supersedes": [
+          "0000000000000004"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "record_id": "event:0000000000000001",
+        "source": "human-review/v4",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "restore",
+          "target_id": "0000000000000004",
+          "target_revision": "sha256:c12ce84d4e39a5d75696c283e1b681bea3b4e91ff4b5a3b2a589795eb3835b4c",
+          "content_revision": "sha256:7d48f7ed47a283b8bfdd31ac5980e0a761047702df0038861b77cafd45ddbc45",
+          "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "test:restore",
+          "request_revision": "sha256:9c1cd9ce6c770a23028d34e83213398738082f510f654701cbe5e77175f6c745"
+        }
+      },
+      "record_revision": "sha256:d035298ba459b6a581fa42d8cfb5f5bba7a98d7cb2fe63e99bfe785043f5574f",
+      "target_revision": "sha256:f495f88ad0aeb4ea371bc5a8280e2936cfd3e0772f47b264a89f72433ab97c76",
+      "content_revision": "sha256:7d48f7ed47a283b8bfdd31ac5980e0a761047702df0038861b77cafd45ddbc45",
+      "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1"
+    },
+    {
+      "name": "classification",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v4",
+        "id": "0000000000000003",
+        "memory_id": "event:0000000000000003",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_status": "approved",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "vfourmarker 修正 café / café / 😀\r\n",
+        "supersedes": [
+          "0000000000000002",
+          "0000000000000001"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [
+          "标签/类别"
+        ],
+        "record_id": "event:0000000000000001",
+        "source": "human-review/v4",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "correct",
+          "target_id": "0000000000000002",
+          "target_revision": "sha256:345b4e46e9f0b35a4dfad53cc0d1f0d17202d881526cec34f085352ec8b12575",
+          "content_revision": "sha256:a6e48dd62a0edfc2e22657b9d6ae1b16266c8853cbc8323ef6d635c4d9955fa0",
+          "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "test:correct",
+          "request_revision": "sha256:b9775e0cd1ab6e530bcff2cd2b918762397da771040de1ccbbecac1715173606"
+        }
+      },
+      "record_revision": "sha256:63dba59406d88ae15f2d51dfc82a0072f9b6c9796530996a25318a2a1bf0298c",
+      "target_revision": "sha256:972cc9afdcd7ce3c1f4b7f257e2338090e60e1ab00d7e63a493a64c667baffac",
+      "content_revision": "sha256:a6e48dd62a0edfc2e22657b9d6ae1b16266c8853cbc8323ef6d635c4d9955fa0",
+      "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1"
+    },
+    {
+      "name": "unknown-tree-binary64",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v3",
+        "id": "0000000000000001",
+        "memory_id": "event:0000000000000001",
+        "actor": {
+          "type": "ai",
+          "id": "codex"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "ai-proposed",
+        "review_status": "pending",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2020-01-01T00:00:00Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "vfourmarker original",
+        "supersedes": [],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "unknown": {
+          "😀": null,
+          "": [
+            true,
+            false,
+            -0.0,
+            1e-07
+          ],
+          "嵌套": {
+            "value": 12
+          }
+        }
+      },
+      "record_revision": "sha256:c6c343571abf688e5666f464aa7b392b934134d66e0222d37f0ad19bd2ae4672",
+      "target_revision": "sha256:1ced7c0bed560f7d48141d3e3ea38054aa48e7f5931f0593ef37087abc4b5390",
+      "content_revision": "sha256:a203203686b158f6aa06b6852f48752a03448de72c826edcf4c028c220c6c55e",
+      "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1"
+    },
+    {
+      "name": "tampered-content",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v4",
+        "id": "0000000000000003",
+        "memory_id": "event:0000000000000003",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_status": "approved",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "vfourmarker 修正 café / café / 😀\r\nchanged",
+        "supersedes": [
+          "0000000000000002",
+          "0000000000000001"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "record_id": "event:0000000000000001",
+        "source": "human-review/v4",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "correct",
+          "target_id": "0000000000000002",
+          "target_revision": "sha256:345b4e46e9f0b35a4dfad53cc0d1f0d17202d881526cec34f085352ec8b12575",
+          "content_revision": "sha256:a6e48dd62a0edfc2e22657b9d6ae1b16266c8853cbc8323ef6d635c4d9955fa0",
+          "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "test:correct",
+          "request_revision": "sha256:b9775e0cd1ab6e530bcff2cd2b918762397da771040de1ccbbecac1715173606"
+        }
+      },
+      "record_revision": "sha256:8161314a534d0381608e484f7413fa9e0c2d59fac8e526d8d4f066ea94ee0652",
+      "target_revision": "sha256:d64114cc9a04bb1abe1a9c810cdecc50b787b1fe8fb9ba39430afa68d330f86f",
+      "content_revision": "sha256:da11b234f72d083ae6bffd188f5709ec2f0086bd636e7ca3ef5fd4f543d9ff15",
+      "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1"
+    }
+  ]
+}

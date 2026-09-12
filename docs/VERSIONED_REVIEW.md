@@ -68,6 +68,9 @@ Large or changing files are denied, never approved from a truncated prefix.
 
 P1 JSONL v3 lifecycle and access checks remain unchanged. Old v3 events do not
 acquire a version-bound approval merely because this Markdown reader exists.
+An independent opt-in [JSONL v4 review command](EVENT_VERSIONED_REVIEW.md) now
+provides append-only content-bound event actions. It is not a product inbox or
+automatic v3 migration; old readers must be upgraded before any v4 activation.
 
 SHA-256 is an integrity binding, not a signature. A process with unrestricted OS
 write access can forge both file contents and metadata. Authentic reviewer

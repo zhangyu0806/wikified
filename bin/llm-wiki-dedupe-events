@@ -65,7 +65,7 @@ def process_file(path: Path, *, check_only: bool) -> dict:
 
     # 冲突标记 = union 策略失效或人工误操作，绝不能静默跳过
     for marker in CONFLICT_MARKERS:
-        for lineno, line in enumerate(raw.splitlines(), 1):
+        for lineno, line in enumerate(raw.split("\n"), 1):
             if line.startswith(marker):
                 raise DedupeError(
                     f"{path}: 第 {lineno} 行存在 git 冲突标记 {marker.strip()!r}；"
@@ -77,7 +77,9 @@ def process_file(path: Path, *, check_only: bool) -> dict:
     no_id: list[int] = []
     total = 0
 
-    for lineno, line in enumerate(raw.splitlines(), 1):
+    # JSONL is LF-delimited. Unicode NEL/line/paragraph separators are valid
+    # JSON string content, not physical records or Git conflict markers.
+    for lineno, line in enumerate(raw.split("\n"), 1):
         if not line.strip():
             continue
         total += 1
@@ -109,7 +111,7 @@ def process_file(path: Path, *, check_only: bool) -> dict:
             continue
         raise DedupeError(
             f"{path}: id={ev_id!r} 出现不同内容（行 {lineno}）；"
-            "拒绝自动选择胜者以免静默丢数据，请人工保留正确记录并为另一条分配新 id"
+            "拒绝自动选择胜者以免静默丢数据；v4 冲突必须经审核解决，不能仅手改 id 或哈希"
         )
 
     if malformed or no_id:
