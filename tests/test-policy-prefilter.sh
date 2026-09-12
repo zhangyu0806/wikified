@@ -404,10 +404,12 @@ python3 -c 'import json,sys; rows=json.load(sys.stdin); assert any(row["memory_i
 python3 -c 'import json,sys; rows=json.load(sys.stdin); assert any(row["memory_id"] == "event:1515151515151515" for row in rows)' \
   <<<"$(search coding crossdomainmarker)"
 
-# Human review can see pending/personal items regardless of their target profile.
+# Human policy can see approved personal pages regardless of target profile.
+# P2 durable-context search no longer doubles as a pending-page human preview;
+# draft inspection belongs to the product's explicit human review surface.
 python3 -c 'import json,sys; rows=json.load(sys.stdin); assert rows and rows[0]["governance"]["domain"] == "personal"' \
   <<<"$(search human personaldeniedmarker)"
-python3 -c 'import json,sys; rows=json.load(sys.stdin); assert rows and rows[0]["governance"]["review_status"] == "pending"' \
+python3 -c 'import json,sys; assert json.load(sys.stdin) == []' \
   <<<"$(search human pendingdeniedmarker)"
 
 # The full-page path shares the same authorization and emits no page detail on denial.

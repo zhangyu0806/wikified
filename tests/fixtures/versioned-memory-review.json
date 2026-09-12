@@ -1,0 +1,1256 @@
+{
+  "schemaVersion": 1,
+  "description": "Synthetic m2o-semantic-v1 / m2o-policy-v1 interoperability vectors; no user data.",
+  "cases": [
+    {
+      "name": "pending",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "ai-proposed",
+        "review_state": "pending",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 1,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "pending",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "",
+          "reviewed-by": ""
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "pending",
+      "expectedTrusted": false,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"ai-proposed\"\nreview_state: \"pending\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":1,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"pending\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"\",\"reviewed-by\":\"\"}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "verified-unicode",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "accept",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "人工确认",
+            "request-id": "golden:accept",
+            "previous-revision": null
+          },
+          "review-history": []
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "verified",
+      "expectedTrusted": true,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},\"review-history\":[]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "verified-indented-flow",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "accept",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "人工确认",
+            "request-id": "golden:accept",
+            "previous-revision": null
+          },
+          "review-history": []
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "verified",
+      "expectedTrusted": true,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one:\n  {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},\"review-history\":[]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "verified-crlf",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "accept",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "人工确认",
+            "request-id": "golden:accept",
+            "previous-revision": null
+          },
+          "review-history": []
+        }
+      },
+      "body": "# 合成审核\r\n\r\nHuman + AI, café / café / 😀 /   /  .\r\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "verified",
+      "expectedTrusted": true,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},\"review-history\":[]}\n---\n# 合成审核\r\n\r\nHuman + AI, café / café / 😀 /   /  .\r\n"
+    },
+    {
+      "name": "mismatch-final-newline",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "accept",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "人工确认",
+            "request-id": "golden:accept",
+            "previous-revision": null
+          },
+          "review-history": []
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:4647f99cf547be6c28c416cf04c906c8ce10918f27578efb358e2878e1e6e554",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "mismatch",
+      "expectedTrusted": false,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},\"review-history\":[]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  ."
+    },
+    {
+      "name": "legacy-unbound",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 1,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human"
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "legacy-unbound",
+      "expectedTrusted": false,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":1,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\"}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "classification-only",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "accept",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "人工确认",
+            "request-id": "golden:accept",
+            "previous-revision": null
+          },
+          "review-history": [],
+          "para": "area",
+          "topics": [
+            "新分类"
+          ],
+          "project-ids": [
+            "new-project"
+          ],
+          "action": null
+        },
+        "tags": [
+          "标签/层级"
+        ]
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "verified",
+      "expectedTrusted": true,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},\"review-history\":[],\"para\":\"area\",\"topics\":[\"新分类\"],\"project-ids\":[\"new-project\"],\"action\":null}\ntags: [\"标签/层级\"]\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "kr-binary64-sources",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "source:one",
+              "label": "原文",
+              "revision": "v2",
+              "relation": "current-derived",
+              "locator": "line:1"
+            },
+            {
+              "kind": "external",
+              "id": "https://example.invalid/synthetic",
+              "revision": "",
+              "label": null,
+              "relation": "historical-citation"
+            }
+          ],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "action": {
+            "level": "key-result",
+            "status": "active",
+            "parent-id": "goal:ignored",
+            "metric": {
+              "start": 0,
+              "current": 1e-7,
+              "target": 1e+21,
+              "unit": "篇 😀",
+              "basis": "合成验收"
+            }
+          },
+          "due-at": "2026-12-31",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:ab37be8444f170bfe4b7d2ac130d4047f3fcf2e9af7b3e910d551db19f7df354",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "accept",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "人工确认",
+            "request-id": "golden:accept",
+            "previous-revision": null
+          },
+          "review-history": []
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        [
+          "key-result",
+          "active",
+          [
+            "0000000000000000",
+            "3e7ad7f29abcaf48",
+            "444b1ae4d6e2ef50",
+            "篇 😀",
+            "合成验收"
+          ]
+        ],
+        null,
+        "2026-12-31",
+        null,
+        [
+          [
+            "document",
+            "source:one",
+            "原文",
+            "v2",
+            "current-derived",
+            "line:1"
+          ],
+          [
+            "external",
+            "https://example.invalid/synthetic",
+            null,
+            null,
+            "historical-citation",
+            null
+          ]
+        ]
+      ],
+      "expectedContentRevision": "sha256:ab37be8444f170bfe4b7d2ac130d4047f3fcf2e9af7b3e910d551db19f7df354",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "verified",
+      "expectedTrusted": true,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[{\"kind\":\"document\",\"id\":\"source:one\",\"label\":\"原文\",\"revision\":\"v2\",\"relation\":\"current-derived\",\"locator\":\"line:1\"},{\"kind\":\"external\",\"id\":\"https://example.invalid/synthetic\",\"revision\":\"\",\"label\":null,\"relation\":\"historical-citation\"}],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"action\":{\"level\":\"key-result\",\"status\":\"active\",\"parent-id\":\"goal:ignored\",\"metric\":{\"start\":0,\"current\":1e-7,\"target\":1e+21,\"unit\":\"篇 😀\",\"basis\":\"合成验收\"}},\"due-at\":\"2026-12-31\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:ab37be8444f170bfe4b7d2ac130d4047f3fcf2e9af7b3e910d551db19f7df354\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},\"review-history\":[]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "mismatch-kr-only",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "source:one",
+              "label": "原文",
+              "revision": "v2",
+              "relation": "current-derived",
+              "locator": "line:1"
+            },
+            {
+              "kind": "external",
+              "id": "https://example.invalid/synthetic",
+              "revision": "",
+              "label": null,
+              "relation": "historical-citation"
+            }
+          ],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "action": {
+            "level": "key-result",
+            "status": "active",
+            "parent-id": "goal:ignored",
+            "metric": {
+              "start": 0,
+              "current": 2e-7,
+              "target": 1e+21,
+              "unit": "篇 😀",
+              "basis": "合成验收"
+            }
+          },
+          "due-at": "2026-12-31",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:ab37be8444f170bfe4b7d2ac130d4047f3fcf2e9af7b3e910d551db19f7df354",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "accept",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "人工确认",
+            "request-id": "golden:accept",
+            "previous-revision": null
+          },
+          "review-history": []
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        [
+          "key-result",
+          "active",
+          [
+            "0000000000000000",
+            "3e8ad7f29abcaf48",
+            "444b1ae4d6e2ef50",
+            "篇 😀",
+            "合成验收"
+          ]
+        ],
+        null,
+        "2026-12-31",
+        null,
+        [
+          [
+            "document",
+            "source:one",
+            "原文",
+            "v2",
+            "current-derived",
+            "line:1"
+          ],
+          [
+            "external",
+            "https://example.invalid/synthetic",
+            null,
+            null,
+            "historical-citation",
+            null
+          ]
+        ]
+      ],
+      "expectedContentRevision": "sha256:37d44a08fb1a733726436084913eb974d0b8b3db71c102b1cd08765624b8dccb",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "mismatch",
+      "expectedTrusted": false,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[{\"kind\":\"document\",\"id\":\"source:one\",\"label\":\"原文\",\"revision\":\"v2\",\"relation\":\"current-derived\",\"locator\":\"line:1\"},{\"kind\":\"external\",\"id\":\"https://example.invalid/synthetic\",\"revision\":\"\",\"label\":null,\"relation\":\"historical-citation\"}],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"action\":{\"level\":\"key-result\",\"status\":\"active\",\"parent-id\":\"goal:ignored\",\"metric\":{\"start\":0,\"current\":2e-7,\"target\":1e+21,\"unit\":\"篇 😀\",\"basis\":\"合成验收\"}},\"due-at\":\"2026-12-31\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:ab37be8444f170bfe4b7d2ac130d4047f3fcf2e9af7b3e910d551db19f7df354\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},\"review-history\":[]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "mismatch-source-only",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "source:one",
+              "label": "原文",
+              "revision": "v3",
+              "relation": "current-derived",
+              "locator": "line:1"
+            },
+            {
+              "kind": "external",
+              "id": "https://example.invalid/synthetic",
+              "revision": "",
+              "label": null,
+              "relation": "historical-citation"
+            }
+          ],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "action": {
+            "level": "key-result",
+            "status": "active",
+            "parent-id": "goal:ignored",
+            "metric": {
+              "start": 0,
+              "current": 1e-7,
+              "target": 1e+21,
+              "unit": "篇 😀",
+              "basis": "合成验收"
+            }
+          },
+          "due-at": "2026-12-31",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:ab37be8444f170bfe4b7d2ac130d4047f3fcf2e9af7b3e910d551db19f7df354",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "accept",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "人工确认",
+            "request-id": "golden:accept",
+            "previous-revision": null
+          },
+          "review-history": []
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        [
+          "key-result",
+          "active",
+          [
+            "0000000000000000",
+            "3e7ad7f29abcaf48",
+            "444b1ae4d6e2ef50",
+            "篇 😀",
+            "合成验收"
+          ]
+        ],
+        null,
+        "2026-12-31",
+        null,
+        [
+          [
+            "document",
+            "source:one",
+            "原文",
+            "v3",
+            "current-derived",
+            "line:1"
+          ],
+          [
+            "external",
+            "https://example.invalid/synthetic",
+            null,
+            null,
+            "historical-citation",
+            null
+          ]
+        ]
+      ],
+      "expectedContentRevision": "sha256:fb37f8a3bbd75868d3f5929bc4af1e9c5646beecb852157eb636ff5096cea237",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "mismatch",
+      "expectedTrusted": false,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[{\"kind\":\"document\",\"id\":\"source:one\",\"label\":\"原文\",\"revision\":\"v3\",\"relation\":\"current-derived\",\"locator\":\"line:1\"},{\"kind\":\"external\",\"id\":\"https://example.invalid/synthetic\",\"revision\":\"\",\"label\":null,\"relation\":\"historical-citation\"}],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"action\":{\"level\":\"key-result\",\"status\":\"active\",\"parent-id\":\"goal:ignored\",\"metric\":{\"start\":0,\"current\":1e-7,\"target\":1e+21,\"unit\":\"篇 😀\",\"basis\":\"合成验收\"}},\"due-at\":\"2026-12-31\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:ab37be8444f170bfe4b7d2ac130d4047f3fcf2e9af7b3e910d551db19f7df354\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},\"review-history\":[]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "mismatch-policy-only",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "other"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "accept",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "人工确认",
+            "request-id": "golden:accept",
+            "previous-revision": null
+          },
+          "review-history": []
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:c109629a0feb7acc7c3fa6f63d6b93d06a094eb316d700ab83c4cf8edf06f901",
+      "expectedState": "mismatch",
+      "expectedTrusted": false,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"other\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},\"review-history\":[]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "withdrawn",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "disputed",
+        "review_state": "rejected",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "withdrawn",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "withdraw",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "过期",
+            "request-id": "golden:withdraw",
+            "previous-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be"
+          },
+          "review-history": [
+            {
+              "version": 1,
+              "algorithm": "m2o-semantic-v1",
+              "record-id": "test:golden",
+              "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+              "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+              "decision": "accept",
+              "actor": {
+                "type": "human",
+                "id": "synthetic-owner"
+              },
+              "at": "2026-09-12T00:00:00Z",
+              "reason": "人工确认",
+              "request-id": "golden:accept",
+              "previous-revision": null
+            }
+          ]
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "withdrawn",
+      "expectedTrusted": false,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"disputed\"\nreview_state: \"rejected\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"withdrawn\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"withdraw\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"过期\",\"request-id\":\"golden:withdraw\",\"previous-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\"},\"review-history\":[{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null}]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "restored-history",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "restore",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "重新核验",
+            "request-id": "golden:restore",
+            "previous-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be"
+          },
+          "review-history": [
+            {
+              "version": 1,
+              "algorithm": "m2o-semantic-v1",
+              "record-id": "test:golden",
+              "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+              "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+              "decision": "accept",
+              "actor": {
+                "type": "human",
+                "id": "synthetic-owner"
+              },
+              "at": "2026-09-12T00:00:00Z",
+              "reason": "人工确认",
+              "request-id": "golden:accept",
+              "previous-revision": null
+            },
+            {
+              "version": 1,
+              "algorithm": "m2o-semantic-v1",
+              "record-id": "test:golden",
+              "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+              "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+              "decision": "withdraw",
+              "actor": {
+                "type": "human",
+                "id": "synthetic-owner"
+              },
+              "at": "2026-09-12T00:00:00Z",
+              "reason": "过期",
+              "request-id": "golden:withdraw",
+              "previous-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be"
+            }
+          ]
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "verified",
+      "expectedTrusted": true,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"restore\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"重新核验\",\"request-id\":\"golden:restore\",\"previous-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\"},\"review-history\":[{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"withdraw\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"过期\",\"request-id\":\"golden:withdraw\",\"previous-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\"}]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "invalid-history-identity",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-09-12T00:00:00Z",
+          "reviewed-by": "human",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "restore",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-09-12T00:00:00Z",
+            "reason": "重新核验",
+            "request-id": "golden:restore",
+            "previous-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be"
+          },
+          "review-history": [
+            {
+              "version": 1,
+              "algorithm": "m2o-semantic-v1",
+              "record-id": "foreign",
+              "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+              "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+              "decision": "accept",
+              "actor": {
+                "type": "human",
+                "id": "synthetic-owner"
+              },
+              "at": "2026-09-12T00:00:00Z",
+              "reason": "人工确认",
+              "request-id": "golden:accept",
+              "previous-revision": null
+            },
+            {
+              "version": 1,
+              "algorithm": "m2o-semantic-v1",
+              "record-id": "test:golden",
+              "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+              "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+              "decision": "withdraw",
+              "actor": {
+                "type": "human",
+                "id": "synthetic-owner"
+              },
+              "at": "2026-09-12T00:00:00Z",
+              "reason": "过期",
+              "request-id": "golden:withdraw",
+              "previous-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be"
+            }
+          ]
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "invalid",
+      "expectedTrusted": false,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-09-12T00:00:00Z\",\"reviewed-by\":\"human\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"restore\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"重新核验\",\"request-id\":\"golden:restore\",\"previous-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\"},\"review-history\":[{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"foreign\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"withdraw\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-09-12T00:00:00Z\",\"reason\":\"过期\",\"request-id\":\"golden:withdraw\",\"previous-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\"}]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "invalid-binding-date",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 2,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "mixed",
+          "review-state": "accepted",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "2026-02-30T00:00:00Z",
+          "reviewed-by": "human",
+          "review": {
+            "version": 1,
+            "algorithm": "m2o-semantic-v1",
+            "record-id": "test:golden",
+            "content-revision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+            "policy-revision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+            "decision": "accept",
+            "actor": {
+              "type": "human",
+              "id": "synthetic-owner"
+            },
+            "at": "2026-02-30T00:00:00Z",
+            "reason": "人工确认",
+            "request-id": "golden:accept",
+            "previous-revision": null
+          },
+          "review-history": []
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "mixed",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "unbound",
+      "expectedTrusted": false,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-confirmed\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":2,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"mixed\",\"review-state\":\"accepted\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"2026-02-30T00:00:00Z\",\"reviewed-by\":\"human\",\"review\":{\"version\":1,\"algorithm\":\"m2o-semantic-v1\",\"record-id\":\"test:golden\",\"content-revision\":\"sha256:558e7aead736feaaade39d3f98cfae585b8bca53331ca7875c029c033df1d3be\",\"policy-revision\":\"sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11\",\"decision\":\"accept\",\"actor\":{\"type\":\"human\",\"id\":\"synthetic-owner\"},\"at\":\"2026-02-30T00:00:00Z\",\"reason\":\"人工确认\",\"request-id\":\"golden:accept\",\"previous-revision\":null},\"review-history\":[]}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    },
+    {
+      "name": "human-authored",
+      "frontmatter": {
+        "memory_id": "test:golden",
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-stated",
+        "review_state": "approved",
+        "target_profiles": [
+          "opencode",
+          "codex"
+        ],
+        "project": "alpha",
+        "mind2one": {
+          "version": 1,
+          "id": "test:golden",
+          "kind": "memory",
+          "origin": "human",
+          "review-state": "not-required",
+          "captured-at": "2026-01-01T00:00:00Z",
+          "agent": "synthetic",
+          "operation-id": "test:operation",
+          "sources": [],
+          "reviewed-at": "",
+          "reviewed-by": ""
+        }
+      },
+      "body": "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+      "projection": [
+        "m2o-semantic-v1",
+        "test:golden",
+        "# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n",
+        "memory",
+        "human",
+        "synthetic",
+        "test:operation",
+        null,
+        null,
+        null,
+        null,
+        []
+      ],
+      "expectedContentRevision": "sha256:e4ec5b4b4411376ddb362eb2bc0b544702219928ae8b53a96507aa08967581df",
+      "expectedPolicyRevision": "sha256:885b301ef64b2c483b3e69de4efb6401a2c054f294ccfc41fed53ba48dcb9a11",
+      "expectedState": "human-authored",
+      "expectedTrusted": true,
+      "source": "---\nmemory_id: \"test:golden\"\ndomain: \"work\"\nsensitivity: \"internal\"\nepistemic_status: \"human-stated\"\nreview_state: \"approved\"\ntarget_profiles: [\"opencode\",\"codex\"]\nproject: \"alpha\"\nmind2one: {\"version\":1,\"id\":\"test:golden\",\"kind\":\"memory\",\"origin\":\"human\",\"review-state\":\"not-required\",\"captured-at\":\"2026-01-01T00:00:00Z\",\"agent\":\"synthetic\",\"operation-id\":\"test:operation\",\"sources\":[],\"reviewed-at\":\"\",\"reviewed-by\":\"\"}\n---\n# 合成审核\n\nHuman + AI, café / café / 😀 /   /  .\n"
+    }
+  ]
+}
