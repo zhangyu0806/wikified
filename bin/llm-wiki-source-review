@@ -80,39 +80,97 @@ def policy(root):
     return document, raw, access
 
 
-def record(root, identity, access):
+def record(root, identity, access, *, require_verified=True):
+    """Inspect one human-authorized snapshot, never expose its body or history.
+
+    Human inspection is deliberately independent of AI reuse eligibility. A
+    pending or held record must remain inspectable, but only after the current
+    human ACL authorizes its header. Mutations retain the stricter P2 gate.
+    """
     manifest = ENGINE["_page_files"](root)
     catalog = ENGINE["page_catalog"](root, manifest)
     entry = next((item for item in catalog if item.metadata.memory_id == identity), None)
-    if entry is None or (entry.metadata.frontmatter or {}).get("memory_id") != identity:
+    if (entry is None or (entry.metadata.frontmatter or {}).get("memory_id") != identity
+        or not ENGINE["is_authorized"](entry.metadata.governance, access)):
         raise ValueError()
-    if entry.path.lstat().st_nlink != 1:
-        raise ValueError()
-    snapshot = ENGINE["authorized_page_snapshot"](entry.path, entry.directory, access, initial_metadata=entry.metadata)
-    if snapshot is None:
-        raise ValueError()
-    fields = snapshot.metadata.frontmatter or {}
-    product = fields.get("mind2one")
-    assessment = ENGINE["assess_memory_review"](fields, snapshot.body)
-    if (not isinstance(product, dict) or product.get("version") != 2 or product.get("origin") not in {"ai", "mixed"}
-        or assessment["state"] != "verified" or not assessment["trusted"]):
-        raise ValueError()
-    binding = assessment["binding"]
+    relative = entry.path.relative_to(root)
+    directories = [root.joinpath(*relative.parts[:index]) for index in range(len(relative.parts))]
+    directory_ids = [(path, CORE["directory_identity"](path)) for path in directories]
     def verify():
-        if (ENGINE["_page_files"](root) != manifest or entry.path.lstat().st_nlink != 1
+        if (ENGINE["_page_files"](root) != manifest
+            or any(CORE["directory_identity"](path) != value for path, value in directory_ids)
+            or CORE["signature"](entry.path.lstat()) != entry.signature
             or ENGINE["_root_identity"](root) != access.root_identity
             or ENGINE["_policy_generation"](root) != access.policy_generation):
             raise ValueError()
     verify()
-    return {"record_id": identity, "record_revision": ENGINE["page_revision"](snapshot),
-            "binding_revision": CORE["binding_revision"](binding), "binding": binding, "product": product,
-            "verify": verify}
+    descriptor = os.open(entry.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(descriptor, "rb") as handle:
+        before = os.fstat(handle.fileno())
+        maximum = ENGINE["MAX_PAGE_SNAPSHOT_BYTES"]
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > maximum
+            or CORE["signature"](before) != entry.signature):
+            raise ValueError()
+        metadata, prefix = ENGINE["_read_page_header"](handle, identity)
+        if (metadata != entry.metadata or not ENGINE["is_authorized"](metadata.governance, access)
+            or len(prefix) > maximum):
+            raise ValueError()
+        verify()
+        raw = prefix + handle.read(maximum - len(prefix) + 1)
+        after = os.fstat(handle.fileno())
+    if (len(raw) != after.st_size or len(raw) > maximum
+        or CORE["signature"](after) != CORE["signature"](before)):
+        raise ValueError()
+    verify()
+    fields = metadata.frontmatter or {}
+    product = fields.get("mind2one")
+    body = raw[len(prefix):].decode("utf-8")
+    assessment = ENGINE["assess_memory_review"](fields, body)
+    verified = (isinstance(product, dict) and product.get("version") == 2 and product.get("id") == identity
+                and assessment["state"] == "verified" and assessment["trusted"])
+    eligible = verified and product.get("origin") in {"ai", "mixed"}
+    if require_verified and not eligible:
+        raise ValueError()
+    binding = assessment["binding"]
+    return {"record_id": identity, "record_revision": CORE["raw_revision"](raw),
+            "binding_revision": CORE["binding_revision"](binding) if binding is not None else None,
+            "binding": binding, "product": product, "review_verified": bool(verified),
+            "eligible": bool(eligible), "verify": verify}
 
 
 def current_relation(target):
-    sources = target["product"].get("sources")
+    product = target["product"]
+    sources = product.get("sources") if isinstance(product, dict) else None
     return isinstance(sources, list) and any(isinstance(source, dict) and source.get("kind") == "document"
         and source.get("relation") == "current-derived" for source in sources)
+
+
+def releasable(target, held):
+    if held is None or not target["eligible"] or not current_relation(target):
+        return False
+    history = target["product"].get("review-history")
+    return (isinstance(history, list) and ENGINE["_valid_review_history"](target["product"])
+        and target["binding_revision"] != held["binding_revision"]
+        and target["record_revision"] != held["record_revision"]
+        and target["binding"]["at"] >= held["at"]
+        and target["binding"]["policy-revision"] == held["policy_revision"]
+        and any(CORE["binding_revision"](binding) == held["binding_revision"] for binding in history))
+
+
+def inspection(snapshot, target):
+    identity = target["record_id"]
+    held = snapshot.holds.get(identity)
+    released = snapshot.releases.get(identity)
+    lineage = None
+    if released is not None:
+        product = target["product"]
+        lineage = bool(target["review_verified"] and ENGINE["_valid_review_history"](product)
+            and any(CORE["binding_revision"](binding) == released["binding_revision"]
+                    for binding in [product["review"], *(product.get("review-history") or [])]))
+    return {**{key: target[key] for key in ("record_id", "record_revision", "binding_revision", "review_verified")},
+        "held": held is not None, "hold_reason": held["reason"] if held else None, "held_at": held["at"] if held else None,
+        "can_hold": bool(snapshot.enabled and held is None and target["eligible"] and current_relation(target)),
+        "can_release": bool(snapshot.enabled and releasable(target, held)), "release_lineage_current": lineage}
 
 
 def status(snapshot):
@@ -255,11 +313,12 @@ def operate(root, request, actor):
         snapshot = CORE["read_snapshot"](root, document)
         response = status(snapshot)
         if action == "inspect":
-            target = record(root, request["record_id"], access)
-            response.update({k: target[k] for k in ("record_id", "record_revision", "binding_revision")})
-            response["held"] = target["record_id"] in snapshot.held_ids
+            target = record(root, request["record_id"], access, require_verified=False)
+            response.update(inspection(snapshot, target))
             target["verify"]()
         snapshot.verify()
+        if action == "inspect":
+            target["verify"]()
         return response
     initial_root = CORE["root_identity"](root)
     with CORE["memory_lock"](root, write=True, create=True) as verify_lock:
@@ -293,11 +352,7 @@ def operate(root, request, actor):
                 raise ValueError()
         else:
             held = snapshot.holds.get(target["record_id"])
-            history = target["product"].get("review-history")
-            if (held is None or not isinstance(history, list) or target["binding_revision"] == held["binding_revision"]
-                or target["binding"]["at"] < held["at"]
-                or target["binding"]["policy-revision"] != held["policy_revision"]
-                or not any(CORE["binding_revision"](binding) == held["binding_revision"] for binding in history)):
+            if not releasable(target, held):
                 raise ValueError()
         row = make_row(request, actor, snapshot.ledger_id, len(snapshot.rows), snapshot.head, target)
         append(root, snapshot, target, row, verify_lock)

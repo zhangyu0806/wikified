@@ -53,9 +53,39 @@ hashes, responses, and persisted entries. These are the remaining fields:
 
 `status` returns `enabled`, `ledger_revision`, and `policy_revision`.
 `inspect` additionally returns the requested `record_id`, `record_revision`,
-`binding_revision`, and `held`. It exposes no body, source identities, source
-labels, or vault-wide counts. Resolve a persisted `memory_id`, never submit a
-filesystem path as record identity.
+`binding_revision`, `held`, `hold_reason`, `held_at`, `can_hold`, `can_release`,
+`review_verified`, and `release_lineage_current`. It exposes no body, source
+identities, source labels, actors, request/review history, or vault-wide counts.
+Resolve a persisted `memory_id`, never submit a filesystem path as record
+identity. Invalid or non-persisted identities are unavailable, not an invitation
+to create or migrate a note.
+
+Inspection applies the current **human ACL**, independently of AI reuse gates.
+This lets an authorized person see a held, pending, unbound, or mismatched
+record's control state without granting AI access. It does not relax domain,
+sensitivity, target, or review-state authorization. In particular, withdrawn
+records have top-level `rejected` governance, so inspecting them requires the
+human profile to explicitly authorize `rejected`; the default policy does not.
+Inspection returns no Markdown and does not write the note or ledger. It reads
+one complete bounded snapshot only after header authorization, with file,
+ancestor-directory, catalog-manifest, root, and policy-generation fences.
+
+- `binding_revision` is null when no validly shaped P2 binding exists. A digest
+  can still be present for a pending or mismatched record; it is not approval.
+- `review_verified` means the complete current bytes pass P2 review validation
+  with the same persisted identity. This alone is not source-current, ACL, or
+  release authorization.
+- `hold_reason` and `held_at` are null without an active hold; otherwise they
+  contain only the fixed reason code and hold timestamp.
+- `can_hold` and `can_release` are current-snapshot UI advice, false while the
+  ledger is disabled. A mutation independently rechecks capability, human ACL,
+  all CAS values, eligibility, and full release-history conditions under lock.
+- `release_lineage_current` is null before any release. Afterwards it is true
+  only if the current record is P2-verified and its complete valid history
+  contains the latest released binding (or that binding is current). It can
+  remain true while held; a hold is a separate gate. A rollback to a previously
+  accepted but pre-release note makes this false even if `review_verified` is
+  true. It does not claim all other reuse gates have passed.
 
 The policy CAS is SHA-256 of the exact current `policy/access.json` bytes; the
 record CAS is SHA-256 of exact Markdown bytes; the ledger CAS is its current
@@ -141,6 +171,9 @@ cross-device conflict resolution, or durable distributed transactions.
 the same 19 golden vectors. `tests/test-source-review.py` uses temporary vaults
 for real CLI capability/CAS/retry, persistence, history-gated release, corruption,
 symlink/hardlink, lock contention, orphan initialization, and injected fsync/
-rollback/activation failures. `tests/test-source-review-retrieval.py` verifies
+rollback/activation failures. Metadata-only inspection also covers pending and
+withdrawn human ACLs, exact response fields, advisory eligibility, latest-release
+lineage, complete bounded snapshots, and record/manifest/directory/root/policy
+drift. `tests/test-source-review-retrieval.py` verifies
 actual request-time held-record and dependency exclusion. No test uses or
 initializes the user's real memory root.

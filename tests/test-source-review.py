@@ -43,7 +43,7 @@ class SourceReviewCLI(unittest.TestCase):
     def write_review(self, previous=None, *, relation="current-derived", keep_history=True, at=None):
         fields = {"memory_id": IDENTITY, "domain": "work", "sensitivity": "internal", "review_state": "approved",
                   "target_profiles": ["codex", "opencode"], "epistemic_status": "human-confirmed"}
-        history = ([*previous["mind2one"]["review-history"], previous["mind2one"]["review"]] if previous and keep_history else [])
+        history = copy.deepcopy([*previous["mind2one"]["review-history"], previous["mind2one"]["review"]] if previous and keep_history else [])
         product = {"version": 2, "id": IDENTITY, "kind": "memory", "origin": "ai", "review-state": "accepted",
                    "reviewed-by": "human", "reviewed-at": at or (datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z") if previous else "2026-01-01T00:00:00.000Z"),
                    "review-history": history, "sources": [{"kind": "document", "id": "source:synthetic",
@@ -72,6 +72,12 @@ class SourceReviewCLI(unittest.TestCase):
         self.assertEqual(completed.stdout, "")
         self.assertEqual(completed.stderr, CLI["ERROR"] + "\n")
         return completed
+
+    def replace_fields(self, fields, body=MARKER + "\n"):
+        self.page.write_text("---\n" + "\n".join(json.dumps(k) + ": " + json.dumps(v) for k, v in fields.items()) + "\n---\n" + body)
+
+    def inspect(self):
+        return self.call("inspect", record_id=IDENTITY)
 
     def initialize(self):
         status = self.call("status")
@@ -106,6 +112,231 @@ class SourceReviewCLI(unittest.TestCase):
         self.assertFalse((self.root / "memory/.memory.lock").exists())
         self.assertFalse((self.root / "memory/source-review").exists())
         self.assertEqual(self.page.read_bytes(), before)
+
+    def test_inspect_exact_metadata_contract_and_disabled_advisories(self):
+        inspected = self.inspect()
+        self.assertEqual(set(inspected), {"enabled", "ledger_revision", "policy_revision", "record_id", "record_revision",
+            "binding_revision", "held", "hold_reason", "held_at", "can_hold", "can_release", "review_verified", "release_lineage_current"})
+        self.assertTrue(inspected["review_verified"])
+        for key in ("held", "can_hold", "can_release"):
+            self.assertFalse(inspected[key])
+        for key in ("hold_reason", "held_at", "release_lineage_current"):
+            self.assertIsNone(inspected[key])
+        self.assertEqual(inspected["record_revision"], CORE["raw_revision"](self.page.read_bytes()))
+        self.assertEqual(inspected["binding_revision"], CORE["binding_revision"](self.fields["mind2one"]["review"]))
+        self.initialize()
+        self.assertTrue(self.inspect()["can_hold"])
+        request = self.mutation("hold", "hold:metadata")
+        self.call("hold", **request)
+        inspected = self.inspect()
+        self.assertTrue(inspected["held"])
+        self.assertEqual(inspected["hold_reason"], "source-change")
+        self.assertEqual(inspected["held_at"], self.snapshot().holds[IDENTITY]["at"])
+        self.assertFalse(inspected["can_hold"])
+        self.assertFalse(inspected["can_release"])
+        response = json.dumps(inspected)
+        for secret in (MARKER, "source:synthetic", "wiki/source.md", "human:synthetic", "hold:metadata", "Synthetic re-review", CAPABILITY):
+            self.assertNotIn(secret, response)
+
+    def test_pending_held_and_unbound_records_are_inspectable_but_not_mutable(self):
+        self.hold()
+        before = (self.root / "memory/source-review/ledger.jsonl").read_bytes()
+        pending = copy.deepcopy(self.fields)
+        pending["review_state"] = "pending"
+        pending["mind2one"]["review-state"] = "pending"
+        pending["mind2one"].pop("review")
+        self.replace_fields(pending)
+        inspected = self.inspect()
+        self.assertTrue(inspected["held"])
+        self.assertIsNone(inspected["binding_revision"])
+        self.assertEqual(inspected["hold_reason"], "source-change")
+        for key in ("review_verified", "can_hold", "can_release"):
+            self.assertFalse(inspected[key])
+        self.call("release", ok=False, **self.mutation("release", "release:pending"))
+        self.call("hold", ok=False, **self.mutation("hold", "hold:pending"))
+        self.assertEqual((self.root / "memory/source-review/ledger.jsonl").read_bytes(), before)
+
+    def test_withdrawn_record_inspection_requires_explicit_rejected_human_acl(self):
+        self.hold()
+        withdrawn = copy.deepcopy(self.fields)
+        withdrawn["review_state"] = "rejected"
+        withdrawn["mind2one"]["review-state"] = "withdrawn"
+        self.replace_fields(withdrawn)
+        self.call("inspect", record_id=IDENTITY, ok=False)
+        path = self.root / "policy/access.json"
+        policy = json.loads(path.read_text())
+        policy["profiles"]["human"]["review_states"].append("rejected")
+        path.write_text(json.dumps(policy))
+        inspected = self.inspect()
+        self.assertTrue(inspected["held"])
+        for key in ("review_verified", "can_hold", "can_release"):
+            self.assertFalse(inspected[key])
+        self.call("release", ok=False, **self.mutation("release", "release:withdrawn"))
+
+    def test_unverified_human_legacy_and_foreign_binding_inspect_without_write_authority(self):
+        self.initialize()
+        for variant in ("mismatch", "human", "legacy", "foreign-binding"):
+            with self.subTest(variant=variant):
+                fields = copy.deepcopy(self.fields)
+                body = MARKER + "\n"
+                if variant == "mismatch":
+                    body += "Unreviewed edit\n"
+                elif variant == "legacy":
+                    fields.pop("mind2one")
+                elif variant == "human":
+                    fields["mind2one"].update({"origin": "human", "review-state": "not-required"})
+                    fields["mind2one"].pop("review")
+                else:
+                    fields["mind2one"]["review"]["record-id"] = "memory:different"
+                self.replace_fields(fields, body)
+                inspected = self.inspect()
+                self.assertFalse(inspected["review_verified"])
+                self.assertFalse(inspected["can_hold"])
+                self.assertFalse(inspected["can_release"])
+                self.call("hold", ok=False, **self.mutation("hold", "hold:" + variant))
+
+    def test_release_advisory_tracks_all_current_review_requirements(self):
+        self.hold()
+        self.assertFalse(self.inspect()["can_release"])
+        for variant in ("missing-history", "early-review", "independent", "policy-changed", "invalid-history"):
+            with self.subTest(variant=variant):
+                reviewed = self.write_review(self.fields, keep_history=variant != "missing-history",
+                    at="2026-01-02T00:00:00.000Z" if variant == "early-review" else None,
+                    relation="independent-judgment" if variant == "independent" else "current-derived")
+                if variant == "policy-changed":
+                    reviewed["sensitivity"] = "confidential"
+                    reviewed["mind2one"]["review"]["policy-revision"] = ENGINE["compute_policy_revision"](reviewed)
+                    self.replace_fields(reviewed)
+                elif variant == "invalid-history":
+                    reviewed["mind2one"]["review-history"][0]["previous-revision"] = "sha256:" + "0" * 64
+                    self.replace_fields(reviewed)
+                inspected = self.inspect()
+                self.assertEqual(inspected["review_verified"], variant != "invalid-history")
+                self.assertFalse(inspected["can_release"])
+                self.call("release", ok=False, **self.mutation("release", "release:" + variant))
+        self.write_review(self.fields)
+        inspected = self.inspect()
+        self.assertTrue(inspected["review_verified"])
+        self.assertTrue(inspected["can_release"])
+        target = CLI["record"](self.root, IDENTITY, ENGINE["access_context"](self.root, "human"))
+        held = dict(self.snapshot().holds[IDENTITY])
+        held["record_revision"] = target["record_revision"]
+        self.assertFalse(CLI["releasable"](target, held))
+
+    def test_latest_release_lineage_is_visible_even_for_held_or_rolled_back_records(self):
+        original = self.page.read_bytes()
+        self.hold()
+        released_fields = self.write_review(self.fields)
+        self.call("release", **self.mutation("release", "release:lineage"))
+        self.assertTrue(self.inspect()["release_lineage_current"])
+        self.write_review(released_fields)
+        self.assertTrue(self.inspect()["release_lineage_current"])
+        self.page.write_bytes(original)
+        inspected = self.inspect()
+        self.assertTrue(inspected["review_verified"])
+        self.assertFalse(inspected["release_lineage_current"])
+        self.write_review(released_fields)
+        self.call("hold", **self.mutation("hold", "hold:again"))
+        inspected = self.inspect()
+        self.assertTrue(inspected["held"])
+        self.assertTrue(inspected["release_lineage_current"])
+        self.assertFalse(inspected["can_release"])
+        pending = copy.deepcopy(released_fields)
+        pending["review_state"] = "pending"
+        pending["mind2one"]["review-state"] = "pending"
+        self.replace_fields(pending)
+        self.assertFalse(self.inspect()["release_lineage_current"])
+
+    def test_record_symlink_hardlink_collision_and_parent_alias_inspection_fail_closed(self):
+        original = self.page.read_bytes()
+        outside = self.root / "elsewhere.md"
+        outside.write_bytes(original)
+        self.page.unlink(); self.page.symlink_to(outside)
+        self.call("inspect", record_id=IDENTITY, ok=False)
+        self.page.unlink(); os.link(outside, self.page)
+        self.call("inspect", record_id=IDENTITY, ok=False)
+        self.page.unlink(); self.page.write_bytes(original)
+        other = self.root / "notes/duplicate.md"
+        other.write_bytes(original)
+        self.call("inspect", record_id=IDENTITY, ok=False)
+        other.unlink()
+        notes = self.root / "notes"
+        notes.rename(self.root / "moved-notes")
+        notes.symlink_to(self.root / "moved-notes", target_is_directory=True)
+        self.call("inspect", record_id=IDENTITY, ok=False)
+
+    def test_record_inspection_is_bounded_and_requires_persisted_identity(self):
+        original = self.page.read_bytes()
+        self.page.write_bytes(original + b"x" * ENGINE["MAX_PAGE_SNAPSHOT_BYTES"])
+        self.call("inspect", record_id=IDENTITY, ok=False)
+        self.page.write_bytes(original + b"\xff")
+        self.call("inspect", record_id=IDENTITY, ok=False)
+        fields = copy.deepcopy(self.fields)
+        fields.pop("memory_id")
+        self.replace_fields(fields)
+        self.call("inspect", record_id=IDENTITY, ok=False)
+
+    def test_inspect_rejects_record_manifest_directory_root_and_policy_drift(self):
+        original = self.page.read_bytes()
+        request = {"action": "inspect", "record_id": IDENTITY}
+        for kind in ("record", "manifest", "directory", "root", "policy"):
+            with self.subTest(kind=kind):
+                self.page.write_bytes(original)
+                real_read = ENGINE["_read_page_header"]
+                changed = False
+                def read_and_mutate(handle, identity):
+                    nonlocal changed
+                    metadata, prefix = real_read(handle, identity)
+                    # Catalog uses a path-derived fallback; this exact ID is
+                    # only used when the selected descriptor is reauthorized.
+                    if identity == IDENTITY and not changed:
+                        changed = True
+                        if kind == "record":
+                            self.page.write_bytes(original + b"changed")
+                        elif kind == "manifest":
+                            (self.root / "wiki/addition.md").write_text("new\n")
+                        elif kind == "directory":
+                            self.page.parent.rename(self.root / "old-notes")
+                            (self.root / "notes").mkdir()
+                            self.page.write_bytes(original)
+                        elif kind == "root":
+                            self.root.rename(self.root.with_name(self.root.name + "-replaced"))
+                            shutil.copytree(self.root.with_name(self.root.name + "-replaced"), self.root)
+                        else:
+                            path = self.root / "policy/access.json"
+                            path.write_bytes(path.read_bytes() + b"\n")
+                    return metadata, prefix
+                with mock.patch.dict(ENGINE, {"_read_page_header": read_and_mutate}):
+                    with self.assertRaises(ValueError):
+                        CLI["operate"](self.root, request, "human:synthetic")
+                self.assertTrue(changed)
+                if kind == "manifest":
+                    (self.root / "wiki/addition.md").unlink()
+                elif kind == "directory":
+                    shutil.rmtree(self.root / "old-notes")
+                elif kind == "root":
+                    shutil.rmtree(self.root.with_name(self.root.name + "-replaced"))
+
+    def test_human_acl_denial_precedes_selected_body_read(self):
+        path = self.root / "policy/access.json"
+        policy = json.loads(path.read_text())
+        policy["profiles"]["human"]["domains"] = ["personal"]
+        path.write_text(json.dumps(policy))
+        real_fdopen = os.fdopen
+        page_inode = self.page.stat().st_ino
+        class GuardedPage:
+            def __init__(self, handle): self.handle = handle
+            def __enter__(self): return self
+            def __exit__(self, *args): return self.handle.__exit__(*args)
+            def __getattr__(self, name): return getattr(self.handle, name)
+            def read(self, *args): raise AssertionError("unauthorized selected body read")
+        def guarded_fdopen(descriptor, *args, **kwargs):
+            is_page = os.fstat(descriptor).st_ino == page_inode
+            handle = real_fdopen(descriptor, *args, **kwargs)
+            return GuardedPage(handle) if is_page else handle
+        with mock.patch.object(CLI["os"], "fdopen", side_effect=guarded_fdopen):
+            with self.assertRaises(ValueError):
+                CLI["operate"](self.root, {"action": "inspect", "record_id": IDENTITY}, "human:synthetic")
 
     def test_initialize_hold_restart_and_exact_retries(self):
         request = self.hold()
