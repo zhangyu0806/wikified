@@ -161,7 +161,13 @@ class CatalogTests(unittest.TestCase):
             path = self.write([pending()]); path.write_text(path.read_text() + tail)
             self.cli(success=False)
         legacy = {"id": "0000000000000001", "summary": "No explicit actor"}
-        self.write([legacy]); self.cli(success=False)
+        self.write([legacy]); before = self.files()
+        entry = self.cli()["entries"][0]
+        self.assertIsNone(entry["actor"])
+        self.assertEqual(entry["reviewBinding"], "legacy")
+        self.assertEqual(self.files(), before)
+        for actor in [None, {}, {"type": "human", "id": ""}]:
+            self.write([{**legacy, "actor": actor}]); self.cli(success=False)
 
     def test_search_uses_redacted_body_and_unicode_codepoint_offsets(self):
         proposal = pending()

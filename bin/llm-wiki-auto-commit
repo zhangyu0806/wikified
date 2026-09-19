@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Opt-in private Git mirror. No pull, merge, force, reset or concurrent writers."""
+import argparse
+from datetime import datetime, timezone
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+PATHS = ['memory/events', 'raw/notes', 'raw/sessions', 'notes', 'wiki', 'policy']
+
+def mirror(config):
+    root = Path(config['root']).resolve(strict=True)
+    status_path = Path(config['statusFile'])
+    status_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    status = {'schema': 1, 'checkedAt': datetime.now(timezone.utc).isoformat(), 'state': 'paused'}
+    env = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_NO_REPLACE_OBJECTS='1', PYTHONDONTWRITEBYTECODE='1')
+    def run(args, **kwargs):
+        result = subprocess.run(args, cwd=root, env=env, capture_output=True, text=True, timeout=90, **kwargs)
+        if result.returncode: raise RuntimeError('command-failed')
+        return result.stdout.strip()
+    def git(*args): return run(['git', '-C', str(root), *args])
+    staged = []
+    def perform():
+        if config.get('role') != 'writer' or config.get('enabled') is not True: raise RuntimeError('not-enabled-writer')
+        repo, branch = config['repository'], config.get('branch', 'main')
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not re.fullmatch(r'[A-Za-z0-9_./-]+', branch): raise RuntimeError('invalid-target')
+        if git('rev-parse', '--show-toplevel') != str(root) or git('branch', '--show-current') != branch: raise RuntimeError('wrong-workspace-or-branch')
+        remote = git('remote', 'get-url', 'origin')
+        if remote not in {f'https://github.com/{repo}.git', f'https://github.com/{repo}', f'git@github.com:{repo}.git', f'git@github.com:{repo}'}:
+            raise RuntimeError('unverified-remote')
+        visibility = json.loads(run(['gh', 'api', f'repos/{repo}']))
+        if visibility.get('private') is not True or visibility.get('full_name', '').lower() != repo.lower(): raise RuntimeError('remote-not-private')
+        if git('diff', '--cached', '--name-only'): raise RuntimeError('existing-staged-changes')
+        if git('ls-files', '-u'): raise RuntimeError('unmerged-files')
+        git('fetch', '--no-tags', 'origin', branch)
+        head, remote_head = git('rev-parse', 'HEAD'), git('rev-parse', 'FETCH_HEAD')
+        # A home device that wrote independently is an explicit stop, never auto-merged.
+        check = subprocess.run(['git', '-C', str(root), 'merge-base', '--is-ancestor', remote_head, head], env=env, capture_output=True)
+        if check.returncode: raise RuntimeError('remote-ahead-or-diverged')
+        paths = [item for item in PATHS if (root / item).exists()]
+        if not paths: raise RuntimeError('no-memory-paths')
+        git('add', '--', *paths)
+        staged.extend(git('diff', '--cached', '--name-only', '-z').split('\0'))
+        if any(p and not any(p == base or p.startswith(base + '/') for base in PATHS) for p in staged): raise RuntimeError('staging-conflict')
+        scanner = Path(__file__).resolve().with_name('llm-wiki-secret-scan')
+        if not scanner.is_file(): raise RuntimeError('secret-gate-missing')
+        run([str(scanner), '--all'])
+        run([str(scanner), '--staged'])
+        if git('diff', '--cached', '--name-only'):
+            git('commit', '-m', 'chore: mirror reviewed and pending memory records')
+        current = git('rev-parse', 'HEAD')
+        # Normal push is CAS-like at Git ref level: no force and never merge remote changes.
+        git('push', 'origin', f'HEAD:refs/heads/{branch}')
+        actual = git('ls-remote', '--exit-code', 'origin', f'refs/heads/{branch}').split()[0]
+        if actual != current: raise RuntimeError('remote-confirmation-mismatch')
+        status.update(state='synced', remoteHead=actual, confirmedAt=datetime.now(timezone.utc).isoformat())
+    with (status_path.parent / '.mirror.lock').open('a+') as lock:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: return {'state': 'busy'}
+        try: perform()
+        except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
+            # Do not erase staging or user edits on failure; inspection/recovery remains possible.
+            status['reason'] = str(exc) if type(exc) is RuntimeError else 'configuration-network-or-storage-failure'
+        fd, name = tempfile.mkstemp(prefix='.status-', dir=status_path.parent)
+        with os.fdopen(fd, 'w') as output:
+            json.dump(status, output); output.write('\n'); output.flush(); os.fsync(output.fileno())
+        os.replace(name, status_path)
+    return status
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', default=str(Path.home() / '.config/wikified/mirror.json'))
+    parser.add_argument('--sync', action='store_true', help='Compatibility flag; this implementation only mirrors the chosen writer.')
+    args = parser.parse_args()
+    try: result = mirror(json.loads(Path(args.config).read_text()))
+    except Exception: result = {'state': 'paused', 'reason': 'configuration-unavailable'}
+    print(json.dumps(result))
+    return 0 if result.get('state') in {'synced', 'busy'} else 1
+
+if __name__ == '__main__': sys.exit(main())

@@ -103,7 +103,8 @@ def entry_for(event: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
             or not isinstance(object_id, str) or not ENGINE["MEMORY_ID_RE"].fullmatch(object_id)):
         raise ValueError("legacy event lacks persistent identity")
     actor = event.get("actor")
-    if (not isinstance(actor, dict) or set(actor) != {"type", "id"}
+    unknown_legacy_actor = "actor" not in event and event.get("schema_version") != CORE["SCHEMA"]
+    if not unknown_legacy_actor and (not isinstance(actor, dict) or set(actor) != {"type", "id"}
             or actor["type"] not in ENGINE["KNOWN_ACTOR_TYPES"]
             or not isinstance(actor["id"], str) or not CORE["IDENTIFIER"].fullmatch(actor["id"])):
         raise ValueError("legacy event lacks explicit actor")
@@ -118,7 +119,7 @@ def entry_for(event: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     entry = {
         "kind": "event", "objectId": object_id, "eventId": event_id,
         "revision": CORE["record_revision"](event), "identity": "persistent",
-        "title": summary[:120], "type": kind, "actor": dict(actor),
+        "title": summary[:120], "type": kind, "actor": None if unknown_legacy_actor else dict(actor),
         "reviewStatus": governance["review_status"], "reviewBinding": "v4" if versioned else "legacy",
         "decision": event["review"]["decision"] if versioned else None,
         "domain": governance["domain"], "sensitivity": governance["sensitivity"],

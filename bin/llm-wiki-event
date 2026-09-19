@@ -590,12 +590,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Required when approving a proposal that would supersede existing events.",
     )
+    parser.add_argument("--capture-key", help="64 hex idempotency key; restricted to AI pending capture proposals.")
     parser.add_argument("--print", action="store_true", help="Print the redacted event JSON after writing.")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.capture_key and (not re.fullmatch(r"[a-f0-9]{64}", args.capture_key)
+            or args.actor_type != "ai" or args.review_status != "pending"
+            or args.epistemic_status != "ai-proposed" or args.approve or args.reject):
+        print("llm-wiki-event: invalid capture request", file=sys.stderr)
+        return 2
     cwd = Path.cwd()
     now = datetime.now(timezone.utc)
     root = memory_root()
@@ -736,7 +742,8 @@ def main(argv: list[str]) -> int:
     except ValueError as exc:
         print(f"llm-wiki-event: {exc}", file=sys.stderr)
         return 2
-    event_id_seed = f"{now.isoformat()}\0{event_type}\0{summary}\0{uuid.uuid4()}"
+    event_id_seed = (f"wikified-capture-v1:{args.capture_key}" if args.capture_key
+                     else f"{now.isoformat()}\0{event_type}\0{summary}\0{uuid.uuid4()}")
     event_id = hashlib.sha256(event_id_seed.encode("utf-8")).hexdigest()[:16]
 
     event: dict[str, Any] = {
@@ -770,6 +777,8 @@ def main(argv: list[str]) -> int:
     if evidence_refs:
         event["evidence_refs"] = evidence_refs
     event = redact(event)
+    if args.capture_key:
+        event["capture_key"] = args.capture_key
 
     path = month_path(root, now)
     lock_path = root / ".memory.lock"
@@ -777,6 +786,21 @@ def main(argv: list[str]) -> int:
         lock_memory(lock_handle)
         try:
             locked_index, locked_duplicate_ids = load_event_state(root)
+            if args.capture_key:
+                if event_id in locked_duplicate_ids:
+                    print("llm-wiki-event: ambiguous capture identity", file=sys.stderr)
+                    return 2
+                existing = locked_index.get(event_id)
+                if existing is not None:
+                    # Compare the immutable request, not timestamps/cwd generated on retry.
+                    fields = ("capture_key", "summary", "details", "type", "project", "source", "actor",
+                              "domain", "sensitivity", "epistemic_status", "review_status", "target_agents",
+                              "evidence_refs", "supersedes")
+                    if any(existing.get(key) != event.get(key) for key in fields):
+                        print("llm-wiki-event: capture identity conflict", file=sys.stderr)
+                        return 2
+                    print(json.dumps(existing, ensure_ascii=False) if args.print else f"already recorded {event_id}")
+                    return 0
             if review_target_id:
                 try:
                     locked_target = current_pending_proposal(
