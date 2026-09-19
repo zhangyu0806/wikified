@@ -69,6 +69,8 @@ MAX_READ_PAGE_BYTES = 256 * 1024
 MAX_PAGE_SNAPSHOT_BYTES = 2 * 1024 * 1024
 MAX_WIKI_FILES = 2000
 MAX_WIKI_TOTAL_BYTES = 8 * 1024 * 1024
+MAX_PAGE_DIRECTORY_ENTRIES = 8000
+MAX_PAGE_CHUNK_CHARS = 32000
 MAX_POLICY_BYTES = 64 * 1024
 MAX_FRONTMATTER_BYTES = 16 * 1024
 MIN_GROUP_MATCH_RATIO = 1.0 / 3.0
@@ -155,6 +157,23 @@ class PageSnapshot:
     metadata: PageMetadata
     raw: bytes
     body: str
+
+
+@dataclass(frozen=True)
+class PageCatalogEntry:
+    path: Path
+    directory: Path
+    relative: str
+    metadata: PageMetadata
+    signature: tuple[Any, ...]
+
+
+class PageSnapshotError(ValueError):
+    """A complete Markdown catalog cannot be served; never expose page names."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
 
 
 class PolicyError(ValueError):
@@ -896,17 +915,130 @@ def page_metadata(path: Path, wiki_dir: Path) -> PageMetadata | None:
         return None
     try:
         path.resolve(strict=True).relative_to(wiki_dir.resolve(strict=True))
-        relative = path.relative_to(wiki_dir).as_posix()
+        relative_path = path.relative_to(wiki_dir)
+        if any(wiki_dir.joinpath(*relative_path.parts[:index]).is_symlink()
+               for index in range(1, len(relative_path.parts) + 1)):
+            return None
+        relative = relative_path.as_posix()
     except (OSError, ValueError):
         return None
     try:
         with path.open("rb") as handle:
-            metadata, _ = _read_page_header(handle, stable_memory_id("wiki", relative))
+            metadata, _ = _read_page_header(handle, stable_memory_id(wiki_dir.name, relative))
+        if wiki_dir.name == "notes" and not notes_opted_in(metadata):
+            return None
         return metadata
     except (OSError, UnicodeError, PolicyError):
         # Do not include source paths, field values or page text in diagnostics.
         print("llm-wiki-enrich: invalid or unsupported page governance", file=sys.stderr)
     return None
+
+
+def notes_opted_in(metadata: PageMetadata) -> bool:
+    """An ordinary notes directory never inherits wiki's legacy default grant."""
+    fields = metadata.frontmatter or {}
+    return (
+        metadata.has_frontmatter and {"domain", "sensitivity", "epistemic_status"} <= fields.keys()
+        and bool({"review_state", "review_status"} & fields.keys())
+        and bool({"target_profiles", "target_agents"} & fields.keys())
+        and fields.get("epistemic_status") != "ai-proposed"
+    )
+
+
+def _page_files(root: Path) -> list[tuple[Path, Path, str, tuple[Any, ...]]]:
+    """Complete bounded filesystem manifest, including not-yet-governed notes."""
+    manifest: list[tuple[Path, Path, str, tuple[Any, ...]]] = []
+    file_count = 0
+    directory_entries = 0
+    for collection in ("wiki", "notes"):
+        directory = root / collection
+        try:
+            directory_stat = directory.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise PageSnapshotError("directory-unavailable") from exc
+        if stat.S_ISLNK(directory_stat.st_mode):
+            continue
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            raise PageSnapshotError("directory-unavailable")
+        def walk_error(_: OSError) -> None:
+            raise PageSnapshotError("directory-unavailable")
+        for parent, dirs, files in os.walk(directory, followlinks=False, onerror=walk_error):
+            directory_entries += len(dirs) + len(files)
+            if directory_entries > MAX_PAGE_DIRECTORY_ENTRIES:
+                raise PageSnapshotError("directory-entry-limit")
+            dirs[:] = sorted(name for name in dirs if not (Path(parent) / name).is_symlink())
+            for name in sorted(files):
+                if not name.lower().endswith(".md"):
+                    continue
+                file_count += 1
+                if file_count > MAX_WIKI_FILES:
+                    raise PageSnapshotError("file-count-limit")
+                path = Path(parent) / name
+                if path.is_symlink():
+                    continue
+                relative = path.relative_to(root).as_posix()
+                try:
+                    current = path.stat()
+                    if not stat.S_ISREG(current.st_mode):
+                        continue
+                    signature = _event_stat_signature(current)
+                except OSError as exc:
+                    raise PageSnapshotError("snapshot-changed") from exc
+                manifest.append((path, directory, relative, signature))
+    return manifest
+
+
+def page_catalog(root: Path, manifest: list[tuple[Path, Path, str, tuple[Any, ...]]] | None = None) -> list[PageCatalogEntry]:
+    """Complete bounded, header-only catalog; collisions never pick a winner."""
+    entries: list[PageCatalogEntry] = []
+    identities: set[str] = set()
+    paths: set[str] = set()
+    for path, directory, relative, signature in manifest if manifest is not None else _page_files(root):
+        metadata = page_metadata(path, directory)
+        if metadata is None:
+            continue
+        # Qualified paths permit wiki/a.md and notes/a.md, but reject
+        # portable-filesystem aliases and duplicate explicit stable IDs.
+        if relative.casefold() in paths or metadata.memory_id in identities:
+            raise PageSnapshotError("identity-conflict")
+        paths.add(relative.casefold())
+        identities.add(metadata.memory_id)
+        entries.append(PageCatalogEntry(path, directory, relative, metadata, signature))
+    return entries
+
+
+def page_snapshots(root: Path, access: AccessContext, project: str | None) -> list[tuple[PageCatalogEntry, PageSnapshot]]:
+    manifest = _page_files(root)
+    catalog = page_catalog(root, manifest)
+    snapshots: list[tuple[PageCatalogEntry, PageSnapshot]] = []
+    total_bytes = 0
+    for entry in catalog:
+        metadata = entry.metadata
+        if not is_authorized(metadata.governance, access) or not matches_project(metadata.governance, project) or not _review_can_read_body(metadata):
+            continue
+        try:
+            if entry.path.stat().st_size > MAX_PAGE_SNAPSHOT_BYTES:
+                raise PageSnapshotError("page-byte-limit")
+        except OSError as exc:
+            raise PageSnapshotError("snapshot-changed") from exc
+        snapshot = authorized_page_snapshot(entry.path, entry.directory, access, project, initial_metadata=metadata)
+        if snapshot is None:
+            continue
+        if snapshot.metadata.memory_id != metadata.memory_id or snapshot.metadata.frontmatter != metadata.frontmatter:
+            raise PageSnapshotError("snapshot-changed")
+        total_bytes += len(snapshot.raw)
+        if total_bytes > MAX_WIKI_TOTAL_BYTES:
+            raise PageSnapshotError("total-byte-limit")
+        snapshots.append((entry, snapshot))
+    if manifest != _page_files(root):
+        raise PageSnapshotError("snapshot-changed")
+    return snapshots
+
+
+def page_revision(snapshot: PageSnapshot) -> str:
+    return "sha256:" + hashlib.sha256(snapshot.raw).hexdigest()
 
 
 def _review_can_read_body(metadata: PageMetadata) -> bool:
@@ -921,13 +1053,14 @@ def _review_can_read_body(metadata: PageMetadata) -> bool:
 def authorized_page_snapshot(
     path: Path, wiki_dir: Path, access: AccessContext, project: str | None = None,
     max_bytes: int = MAX_PAGE_SNAPSHOT_BYTES,
+    *, initial_metadata: PageMetadata | None = None,
 ) -> PageSnapshot | None:
     """Authorize before body access, then verify one complete bounded snapshot.
 
     Stat observations detect changes but are not a transaction against arbitrary
     same-OS writers. No file content is emitted on drift or an invalid binding.
     """
-    initial = page_metadata(path, wiki_dir)
+    initial = initial_metadata if initial_metadata is not None else page_metadata(path, wiki_dir)
     if (initial is None or not is_authorized(initial.governance, access)
         or not matches_project(initial.governance, project) or not _review_can_read_body(initial)):
         return None
@@ -1519,23 +1652,12 @@ def _legacy_wiki_candidates(
     access: AccessContext,
     project: str | None = None,
 ) -> list[Candidate]:
-    wiki_dir = root / "wiki"
-    if not wiki_dir.exists():
-        return []
     candidates: list[Candidate] = []
-    paths = sorted(path for path in wiki_dir.rglob("*.md") if path.is_file())
-    total_bytes = 0
-    for path in paths[:80]:
-        snapshot = authorized_page_snapshot(path, wiki_dir, access, project)
-        if snapshot is None:
-            continue
-        if total_bytes + len(snapshot.raw) > MAX_WIKI_TOTAL_BYTES:
-            break
-        total_bytes += len(snapshot.raw)
+    for entry, snapshot in page_snapshots(root, access, project):
         metadata = snapshot.metadata
-        text = snapshot.body.encode("utf-8")[:MAX_WIKI_BYTES].decode("utf-8", errors="ignore")
-        title = path.relative_to(wiki_dir).as_posix()
-        tokens = legacy_tokenize([title, text[:12000]])
+        text = snapshot.body
+        title = entry.path.relative_to(entry.directory).as_posix() if entry.directory.name == "wiki" else entry.relative
+        tokens = legacy_tokenize([title, text])
         overlap = len(query_tokens & tokens)
         if overlap <= 0:
             continue
@@ -1544,10 +1666,11 @@ def _legacy_wiki_candidates(
         candidates.append(
             Candidate(
                 score=float(overlap + title_bonus),
-                source="wiki-page",
+                source="wiki-page" if entry.directory.name == "wiki" else "note-page",
                 title=title,
                 text=excerpt,
-                signals={"legacy_overlap": overlap, "title_bonus": title_bonus},
+                signals={"legacy_overlap": overlap, "title_bonus": title_bonus,
+                         "path": entry.relative, "revision": page_revision(snapshot)},
                 memory_id=metadata.memory_id,
                 governance=metadata.governance,
             )
@@ -1563,36 +1686,28 @@ def wiki_candidates(
     access: AccessContext,
     project: str | None = None,
 ) -> list[Candidate]:
-    wiki_dir = root / "wiki"
-    if not wiki_dir.exists() or not query_terms:
+    if not query_terms:
         return []
 
-    documents: list[tuple[str, str, list[str], list[str], PageMetadata]] = []
-    total_bytes = 0
-    for path in sorted(item for item in wiki_dir.rglob("*.md") if item.is_file())[:MAX_WIKI_FILES]:
-        snapshot = authorized_page_snapshot(path, wiki_dir, access, project)
-        if snapshot is None:
-            continue
+    documents: list[tuple[str, str, list[str], list[str], PageMetadata, PageCatalogEntry, str]] = []
+    for entry, snapshot in page_snapshots(root, access, project):
         metadata = snapshot.metadata
-        if total_bytes + len(snapshot.raw) > MAX_WIKI_TOTAL_BYTES:
-            break
-        total_bytes += len(snapshot.raw)
-        text = snapshot.body.encode("utf-8")[:MAX_WIKI_BYTES].decode("utf-8", errors="ignore")
-        title = path.relative_to(wiki_dir).as_posix()
-        documents.append((title, text, token_terms([title, text]), token_terms([title]), metadata))
+        text = snapshot.body
+        title = entry.path.relative_to(entry.directory).as_posix() if entry.directory.name == "wiki" else entry.relative
+        documents.append((title, text, token_terms([title, text]), token_terms([title]), metadata, entry, page_revision(snapshot)))
 
     if not documents:
         return []
     document_frequency: Counter[str] = Counter()
-    for _, _, terms, _, _ in documents:
+    for _, _, terms, _, _, _, _ in documents:
         document_frequency.update(set(terms))
-    average_length = sum(len(terms) for _, _, terms, _, _ in documents) / len(documents)
+    average_length = sum(len(terms) for _, _, terms, _, _, _, _ in documents) / len(documents)
     average_length = max(1.0, average_length)
     query_counts = Counter(query_terms)
     normalized_query = " ".join(query.lower().split())
     candidates: list[Candidate] = []
 
-    for title, text, terms, title_terms, metadata in documents:
+    for title, text, terms, title_terms, metadata, entry, revision in documents:
         frequencies = Counter(terms)
         bm25 = 0.0
         matched: list[str] = []
@@ -1626,10 +1741,11 @@ def wiki_candidates(
         candidates.append(
             Candidate(
                 score=score,
-                source="wiki-page",
+                source="wiki-page" if entry.directory.name == "wiki" else "note-page",
                 title=title,
                 text=excerpt,
                 signals={
+                    "path": entry.relative, "revision": revision,
                     "bm25": round(bm25, 6),
                     "title_bonus": title_bonus,
                     "title_identity_bonus": title_identity_bonus,
@@ -1871,8 +1987,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--read-page",
-        help="Policy-checked full-page read; accepts only a relative wiki/**/*.md path.",
+        help="Policy-checked read of wiki/**/*.md or explicitly governed notes/**/*.md.",
     )
+    parser.add_argument("--offset", type=int, help="Return a JSON chunk at a Unicode code-point offset into the fully redacted page.")
+    parser.add_argument("--length", type=int, help="Chunk length in Unicode code points (1..32000; default 8000).")
+    parser.add_argument("--revision", help="Pin a chunk to the full page SHA-256 revision; required for offset > 0.")
     parser.add_argument("--limit", type=int, default=8, help="Maximum candidates to print.")
     parser.add_argument("--max-chars", type=int, default=3500, help="Maximum output characters.")
     parser.add_argument("--json", action="store_true", help="Output machine-readable JSON instead of Markdown.")
@@ -1944,6 +2063,8 @@ def render_markdown(candidates: list[Candidate], max_chars: int, ambient: bool =
             f"epistemic_status={governance.get('epistemic_status', '')} · "
             f"review_status={governance.get('review_status', '')} · target_agents={targets}"
         )
+        if "path" in candidate.signals:
+            chunks.append(f"> page: path={candidate.signals['path']} · revision={candidate.signals['revision']}")
         chunks.append(redact(text))
         chunks.append("")
     output = "\n".join(chunks).strip() + "\n"
@@ -1966,6 +2087,8 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
             "memory_id": candidate.memory_id,
             "governance": candidate.governance,
         }
+        if "path" in candidate.signals:
+            base.update({"path": candidate.signals["path"], "revision": candidate.signals["revision"]})
         trial = payload + [base]
         serialized = json.dumps(trial, ensure_ascii=False, indent=2)
         if len(serialized) <= budget:
@@ -1992,27 +2115,57 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
 
 
 def read_page(
-    root: Path, requested: str, access: AccessContext, project: str | None
+    root: Path, requested: str, access: AccessContext, project: str | None,
+    *, offset: int | None = None, length: int | None = None, revision: str | None = None,
 ) -> str | None:
     relative = Path(requested)
     if (
         not requested or relative.is_absolute() or relative.suffix.lower() != ".md"
-        or not relative.parts or relative.parts[0] != "wiki"
+        or not relative.parts or relative.parts[0] not in {"wiki", "notes"}
         or any(part in {"", ".", ".."} or ":" in part for part in relative.parts)
     ):
         return None
-    wiki_dir = root / "wiki"
+    chunked = offset is not None or length is not None or revision is not None
+    start, size = offset if offset is not None else 0, length if length is not None else 8000
+    if (type(start) is not int or type(size) is not int or start < 0 or not 1 <= size <= MAX_PAGE_CHUNK_CHARS
+        or (start > 0 and revision is None)
+        or (revision is not None and (not isinstance(revision, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", revision)))):
+        return None
+    wiki_dir = root / relative.parts[0]
     candidate = root.joinpath(*relative.parts)
     try:
         resolved_wiki = wiki_dir.resolve(strict=True)
         resolved = candidate.resolve(strict=True)
         resolved.relative_to(resolved_wiki)
-        if not resolved.is_file() or resolved.stat().st_size > MAX_READ_PAGE_BYTES:
+        maximum = MAX_PAGE_SNAPSHOT_BYTES if chunked else MAX_READ_PAGE_BYTES
+        if not resolved.is_file() or resolved.stat().st_size > maximum:
             return None
+        manifest = _page_files(root)
+        catalog = page_catalog(root, manifest)
+        entry = next((item for item in catalog if item.relative == relative.as_posix()), None)
+        if entry is None:
+            return None
+        snapshot = authorized_page_snapshot(candidate, wiki_dir, access, project, maximum, initial_metadata=entry.metadata)
+        if snapshot is None or snapshot.metadata.frontmatter != entry.metadata.frontmatter:
+            return None
+        if manifest != _page_files(root):
+            return None
+        current_revision = page_revision(snapshot)
+        if revision is not None and revision != current_revision:
+            return None
+        # Redact before slicing: a secret cannot evade detection across chunks.
+        text = redact(snapshot.raw.decode("utf-8"))
+        if not chunked:
+            return text
+        if start > len(text):
+            return None
+        end = min(len(text), start + size)
+        return json.dumps({"path": relative.as_posix(), "memory_id": snapshot.metadata.memory_id,
+                           "revision": current_revision, "offset": start,
+                           "nextOffset": end if end < len(text) else None, "totalChars": len(text),
+                           "truncated": end < len(text), "text": text[start:end]}, ensure_ascii=False)
     except (OSError, ValueError):
         return None
-    snapshot = authorized_page_snapshot(candidate, wiki_dir, access, project, MAX_READ_PAGE_BYTES)
-    return redact(snapshot.raw.decode("utf-8")) if snapshot is not None else None
 
 
 def main(argv: list[str]) -> int:
@@ -2027,7 +2180,7 @@ def main(argv: list[str]) -> int:
         if args.files or args.query or args.session_start:
             print("llm-wiki-enrich: page unavailable", file=sys.stderr)
             return 3
-        page = read_page(root, args.read_page, access, args.project)
+        page = read_page(root, args.read_page, access, args.project, offset=args.offset, length=args.length, revision=args.revision)
         if page is None:
             print("llm-wiki-enrich: page unavailable", file=sys.stderr)
             return 3
@@ -2035,6 +2188,9 @@ def main(argv: list[str]) -> int:
         if page and not page.endswith("\n"):
             sys.stdout.write("\n")
         return 0
+    if args.offset is not None or args.length is not None or args.revision is not None:
+        print("llm-wiki-enrich: page unavailable", file=sys.stderr)
+        return 3
     if args.session_start:
         sys.stdout.write(
             render_session_start(
@@ -2061,10 +2217,14 @@ def main(argv: list[str]) -> int:
         print(f"llm-wiki-enrich: event snapshot unavailable [{exc.code}]; {recovery}", file=sys.stderr)
         return 4
     candidates = event_candidates(events, query_tokens, query_groups, touched_files, args.project)
-    if args.ranking == "legacy":
-        candidates.extend(_legacy_wiki_candidates(root, legacy_tokenize([args.query, *touched_files]), access, args.project))
-    else:
-        candidates.extend(wiki_candidates(root, args.query, query_terms, query_groups, access, args.project))
+    try:
+        if args.ranking == "legacy":
+            candidates.extend(_legacy_wiki_candidates(root, legacy_tokenize([args.query, *touched_files]), access, args.project))
+        else:
+            candidates.extend(wiki_candidates(root, args.query, query_terms, query_groups, access, args.project))
+    except PageSnapshotError as exc:
+        print(f"llm-wiki-enrich: page snapshot unavailable [{exc.code}]; no partial search results", file=sys.stderr)
+        return 4
     hint = graph_hint(root, query_tokens, query_groups, access)
     if hint is not None:
         candidates.append(hint)

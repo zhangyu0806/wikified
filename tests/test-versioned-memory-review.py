@@ -129,7 +129,7 @@ with tempfile.TemporaryDirectory(prefix="wikified-versioned-review-") as directo
     shutil.copyfile(REPO / "templates/access-policy.json", root / "policy/access.json")
     page = root / "wiki/context/CRITICAL_FACTS.md"
 
-    def surfaces(name, frontmatter, body=BODY, *, allowed=False, marker=MARKER, raw=None, mcp=False, **render_options):
+    def surfaces(name, frontmatter, body=BODY, *, allowed=False, marker=MARKER, raw=None, mcp=False, query_error=None, **render_options):
         global checked
         original = raw if raw is not None else render(frontmatter, body, **render_options)
         page.write_bytes(original)
@@ -141,6 +141,9 @@ with tempfile.TemporaryDirectory(prefix="wikified-versioned-review-") as directo
                 assert "Traceback" not in result.stderr and marker not in result.stderr, (name, result.stderr)
                 if "--read-page" in args:
                     assert (result.returncode == 0) == allowed, (name, result.stderr)
+                elif "--query" in args and query_error:
+                    assert result.returncode == 4 and query_error in result.stderr, (name, result.stderr)
+                    assert result.stdout == "", (name, result.stdout)
                 else:
                     assert result.returncode == 0, (name, result.stderr)
             if mcp:
@@ -250,7 +253,7 @@ with tempfile.TemporaryDirectory(prefix="wikified-versioned-review-") as directo
     long_record = approve(source(), long_body)
     surfaces("complete long-body approval", long_record, long_body, allowed=True)
     surfaces("edit beyond search prefix", long_record, long_body.replace("last-line", "unapproved-tail"))
-    surfaces("oversized complete body", base, BODY + "x" * engine.MAX_PAGE_SNAPSHOT_BYTES)
+    surfaces("oversized complete body", base, BODY + "x" * engine.MAX_PAGE_SNAPSHOT_BYTES, query_error="page-byte-limit")
 
     # Unauthorized metadata prevents every full-body read, even with a syntactically
     # valid review object. A second open is used only after metadata authorization.

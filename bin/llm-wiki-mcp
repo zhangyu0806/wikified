@@ -65,7 +65,7 @@ const runRequired = async (file, args, timeoutMs = 8000) => {
 const tools = [
   {
     name: 'search_pages',
-    description: 'Search Wikified memory by natural-language query. Returns top relevant wiki pages and memory events, ranked by llm-wiki-enrich.',
+    description: 'Search authorized wiki pages, explicitly governed notes and memory events. Page results include a root-relative path and full-page revision. Bounded catalog failures never return a silent partial corpus.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -79,12 +79,15 @@ const tools = [
   },
   {
     name: 'read_page',
-    description: 'Read one authorized Markdown page below wiki/. Path safety and the server-fixed Agent profile policy are enforced before the body is returned.',
+    description: 'Read authorized wiki/ or explicitly opted-in notes/ Markdown. Optional offset/length returns JSON chunks of the fully redacted page; offset > 0 requires the first chunk revision to prevent mixing versions. Policy remains server-fixed.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path relative to the Wikified data root.' },
         project: { type: 'string', description: 'Optional project id that further narrows an explicitly scoped page.' },
+        offset: { type: 'integer', minimum: 0, description: 'Unicode code-point offset in the fully redacted page; sets JSON chunk mode.' },
+        length: { type: 'integer', minimum: 1, maximum: 32000, description: 'Chunk code points (default 8000). Without chunk parameters the legacy 256 KiB full-page limit remains.' },
+        revision: { type: 'string', pattern: '^sha256:[0-9a-f]{64}$', description: 'Full raw-page revision returned by search or the first chunk; mandatory after offset zero.' },
       },
       required: ['path'],
     },
@@ -150,13 +153,25 @@ async function dispatch(name, args) {
     // properties here would let an unauthorized caller enumerate private pages.
     const rel = String(args.path || '');
     const normalized = rel.replaceAll('\\', '/');
-    if (!normalized.startsWith('wiki/') || !normalized.endsWith('.md')) {
-      throw new Error('read_page only permits wiki/**/*.md');
+    if (!/^(wiki|notes)\//.test(normalized) || !normalized.toLowerCase().endsWith('.md')) {
+      throw new Error('read_page only permits wiki/**/*.md or notes/**/*.md');
     }
     // Delegate semantic authorization to the same policy engine used by search
     // so read_page cannot become an ACL bypass.
     const readArgs = ['--agent-profile', AGENT_PROFILE, '--read-page', normalized];
     if (args.project) readArgs.push('--project', String(args.project));
+    if (args.offset !== undefined) {
+      if (!Number.isSafeInteger(args.offset) || args.offset < 0) throw new Error('page unavailable');
+      readArgs.push('--offset', String(args.offset));
+    }
+    if (args.length !== undefined) {
+      if (!Number.isSafeInteger(args.length) || args.length < 1 || args.length > 32000) throw new Error('page unavailable');
+      readArgs.push('--length', String(args.length));
+    }
+    if (args.revision !== undefined) {
+      if (typeof args.revision !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(args.revision)) throw new Error('page unavailable');
+      readArgs.push('--revision', args.revision);
+    }
     return await runRequired(ENRICH(), readArgs);
   }
   if (name === 'find_related') {

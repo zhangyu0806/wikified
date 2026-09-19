@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Bounded read-only event catalog for a server-fixed local human review scope.
+
+This is not an MCP tool or an authentication mechanism. A Web bridge must fix
+root/profile/purpose from operator configuration, never from browser input.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import runpy
+import stat
+import sys
+from typing import Any
+
+sys.dont_write_bytecode = True
+BIN = Path(__file__).resolve().parent
+PURPOSE = "local-human-review"
+MAX_OUTPUT_BYTES = 2 * 1024 * 1024
+MAX_ENTRIES = 1000
+SAFE_FAILURE = "llm-wiki-event-catalog: catalog unavailable or record no longer accessible; refresh the authorized view"
+try:
+    ENGINE = runpy.run_path(str(BIN / "llm-wiki-enrich"), run_name="event_catalog_reader")
+    CORE = ENGINE["EVENT_REVIEW"]
+except Exception:
+    # Missing/incompatible companion code must not leak loader paths or stacks.
+    print(SAFE_FAILURE, file=sys.stderr)
+    raise SystemExit(2)
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse normally echoes user-supplied arguments into stderr.
+        raise ValueError("invalid catalog arguments")
+
+
+def bounded_text(value: Any, limit: int, *, blank: bool = True) -> str:
+    if not isinstance(value, str) or len(value) > limit or (not blank and not value.strip()) or "\x00" in value:
+        raise ValueError("unsupported catalog text")
+    value.encode("utf-8")
+    return value
+
+
+def signature(value):
+    return ENGINE["_event_stat_signature"](value)
+
+
+def assert_safe_metadata(value: Any) -> None:
+    """Never rewrite persistent identities or export secret-shaped metadata.
+
+    Check every projected string recursively, including future metadata fields.
+    Body text has a separate redact-before-search/display contract. A rejected
+    authorized entry aborts the whole response before any JSON is written.
+    """
+    if isinstance(value, str):
+        if ENGINE["redact"](value) != value:
+            raise ValueError("sensitive catalog metadata")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("unsupported catalog metadata")
+            assert_safe_metadata(key)
+            assert_safe_metadata(item)
+    elif isinstance(value, list):
+        for item in value:
+            assert_safe_metadata(item)
+    elif value is not None and not isinstance(value, (bool, int, float)):
+        raise ValueError("unsupported catalog metadata")
+
+
+def policy_generation(root: Path):
+    """Bound and identify policy bytes without following a redirected parent."""
+    directory = root / "policy"
+    before_directory = directory.lstat()
+    if not stat.S_ISDIR(before_directory.st_mode) or directory.resolve(strict=True) != directory:
+        raise ValueError("unsafe policy directory")
+    path = directory / "access.json"
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb") as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > ENGINE["MAX_POLICY_BYTES"]:
+            raise ValueError("unsafe policy file")
+        content = handle.read(ENGINE["MAX_POLICY_BYTES"] + 1)
+        after = os.fstat(handle.fileno())
+    if (len(content) != before.st_size or signature(before) != signature(after)
+            or signature(after) != signature(path.lstat())
+            or signature(before_directory) != signature(directory.lstat())):
+        raise ValueError("policy changed")
+    return signature(before_directory), signature(after), hashlib.sha256(content).hexdigest()
+
+
+def entry_for(event: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+    """Called only for rows already authorized by the pinned engine."""
+    event_id = event.get("id")
+    memory_id = event.get("memory_id", event.get("__memory_id"))
+    object_id = event.get("record_id", memory_id)
+    if (not isinstance(event_id, str) or not CORE["EVENT_ID"].fullmatch(event_id)
+            or not isinstance(object_id, str) or not ENGINE["MEMORY_ID_RE"].fullmatch(object_id)):
+        raise ValueError("legacy event lacks persistent identity")
+    actor = event.get("actor")
+    if (not isinstance(actor, dict) or set(actor) != {"type", "id"}
+            or actor["type"] not in ENGINE["KNOWN_ACTOR_TYPES"]
+            or not isinstance(actor["id"], str) or not CORE["IDENTIFIER"].fullmatch(actor["id"])):
+        raise ValueError("legacy event lacks explicit actor")
+    summary = ENGINE["redact"](bounded_text(event.get("summary"), 10000, blank=False))
+    details = ENGINE["redact"](bounded_text(event.get("details", ""), 50000))
+    kind = bounded_text(event.get("type", "event"), 100, blank=False)
+    modified = event.get("timestamp")
+    if modified is not None and (not isinstance(modified, str) or len(modified) > 64 or ENGINE["parse_time"](modified) is None):
+        raise ValueError("invalid event time")
+    governance = event["__governance"]
+    versioned = event.get("schema_version") == CORE["SCHEMA"]
+    entry = {
+        "kind": "event", "objectId": object_id, "eventId": event_id,
+        "revision": CORE["record_revision"](event), "identity": "persistent",
+        "title": summary[:120], "type": kind, "actor": dict(actor),
+        "reviewStatus": governance["review_status"], "reviewBinding": "v4" if versioned else "legacy",
+        "decision": event["review"]["decision"] if versioned else None,
+        "domain": governance["domain"], "sensitivity": governance["sensitivity"],
+        "targetProfiles": sorted(governance["target_profiles"]), "modifiedAt": modified,
+    }
+    assert_safe_metadata(entry)
+    return entry, summary, details
+
+
+def search_match(query: str, summary: str, details: str):
+    """Case-folded matching with offsets in the redacted source's code points."""
+    needle = query.casefold()
+    for field, text in (("summary", summary), ("details", details)):
+        folded, positions = [], []
+        for index, character in enumerate(text):
+            expansion = character.casefold()
+            folded.append(expansion)
+            positions.extend([index] * len(expansion))
+        found = "".join(folded).find(needle)
+        if found >= 0:
+            offset = positions[found]
+            start = max(0, offset - 60)
+            return {"field": field, "offset": offset, "offsetUnit": "unicode-codepoint", "excerpt": text[start:start + 240]}
+    return None
+
+
+def catalog(root: Path, *, event_id: str | None = None, revision: str | None = None, query: str = ""):
+    root = root.absolute()
+    if root.resolve(strict=True) != root or not stat.S_ISDIR(root.lstat().st_mode):
+        raise ValueError("unsafe root")
+    root_identity = (root.stat().st_dev, root.stat().st_ino)
+    generation = policy_generation(root)
+    access = ENGINE["access_context"](root, "human")
+    # load_events validates the complete snapshot and closes all terminal edges
+    # before ACL filtering. Never reproduce that algorithm in this projection.
+    with contextlib.redirect_stderr(io.StringIO()):
+        events = ENGINE["load_events"](root, access)
+    projected = [entry_for(event) for event in events]
+    projected.sort(key=lambda item: (item[0]["objectId"], item[0]["eventId"]))
+    identities: set[str] = set()
+    for entry, _, _ in projected:
+        if entry["objectId"] in identities:
+            raise ValueError("conflicting current object identity")
+        identities.add(entry["objectId"])
+    def assert_authority():
+        if generation != policy_generation(root) or root_identity != (root.stat().st_dev, root.stat().st_ino):
+            raise ValueError("authority changed")
+    if event_id is not None:
+        selected = next((item for item in projected if item[0]["eventId"] == event_id), None)
+        if selected is None or selected[0]["revision"] != revision:
+            raise ValueError("record unavailable")
+        entry, summary, details = selected
+        assert_authority()
+        return {"schemaVersion": 1, "entry": entry, "summary": summary, "details": details}
+    # Generation excludes hidden rows and their counts, but includes all
+    # authorized record revisions rather than only this query's first page.
+    material = ["wikified-event-catalog/v1", generation[2], [[entry["objectId"], entry["eventId"], entry["revision"]] for entry, _, _ in projected]]
+    aggregate = "sha256:" + hashlib.sha256(json.dumps(material, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+    entries = []
+    eligible = 0
+    for entry, summary, details in projected:
+        match = search_match(query, summary, details) if query else None
+        if query and match is None:
+            continue
+        eligible += 1
+        if len(entries) < MAX_ENTRIES:
+            entries.append({**entry, **({"match": match} if match is not None else {})})
+    incomplete = eligible > len(entries)
+    assert_authority()
+    return {"schemaVersion": 1, "purpose": PURPOSE, "revision": aggregate, "entries": entries,
+        "coverage": {"status": "incomplete" if incomplete else "complete", "scope": "authorized-active-events",
+            "indexed": len(entries), "eligible": eligible, "reasons": ["entry-limit"] if incomplete else []}}
+
+
+def main(argv):
+    parser = Parser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--profile", choices=["human"], required=True)
+    parser.add_argument("--purpose", choices=[PURPOSE], required=True)
+    parser.add_argument("--event-id")
+    parser.add_argument("--revision")
+    parser.add_argument("--query", default="")
+    for flag in ("--root", "--profile", "--purpose", "--event-id", "--revision", "--query"):
+        if sum(arg == flag or arg.startswith(flag + "=") for arg in argv) > 1:
+            raise ValueError("duplicate argument")
+    args = parser.parse_args(argv)
+    root_value = bounded_text(args.root, 4096, blank=False)
+    root = Path(root_value)
+    if not root.is_absolute() or (args.event_id is None) != (args.revision is None):
+        raise ValueError("invalid locator")
+    if args.event_id is not None and (not CORE["EVENT_ID"].fullmatch(args.event_id)
+            or not CORE["HASH"].fullmatch(args.revision) or args.query):
+        raise ValueError("invalid event locator")
+    query = bounded_text(args.query, 500).strip()
+    result = catalog(root, event_id=args.event_id, revision=args.revision, query=query)
+    output = (json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(output) > MAX_OUTPUT_BYTES:
+        raise ValueError("catalog output limit")
+    sys.stdout.buffer.write(output)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except (ValueError, TypeError, KeyError, OSError, UnicodeError, OverflowError, RecursionError, ENGINE["EventSnapshotError"]):
+        print(SAFE_FAILURE, file=sys.stderr)
+        raise SystemExit(2)
