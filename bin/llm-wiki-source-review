@@ -16,6 +16,9 @@ import uuid
 BIN = Path(__file__).resolve().parent
 ERROR = "llm-wiki-source-review: unavailable or conflicted; re-inspect current state and authority"
 UNCERTAIN = "llm-wiki-source-review: write outcome uncertain; stop reuse and inspect durable state before retrying"
+MAX_QUEUE_READ_BYTES = 64 * 1024 * 1024
+MAX_QUEUE_ITEMS = 100
+MAX_QUEUE_OUTPUT_BYTES = 512 * 1024
 try:
     CORE = runpy.run_path(str(BIN / "llm_wiki_source_review.py"))
     ENGINE = runpy.run_path(str(BIN / "llm-wiki-enrich"), run_name="source_review_reader")
@@ -46,7 +49,7 @@ def authority(request):
 def validate_request(request):
     action = request.get("action")
     fields = {"action", "capability"}
-    if action == "status":
+    if action in {"status", "queue"}:
         pass
     elif action == "inspect":
         fields |= {"record_id"}
@@ -80,29 +83,99 @@ def policy(root):
     return document, raw, access
 
 
-def record(root, identity, access, *, require_verified=True):
-    """Inspect one human-authorized snapshot, never expose its body or history.
+class ReadBudget:
+    """Bound actual Markdown header plus complete-candidate reads, not a prefix."""
+    def __init__(self):
+        self.used = 0
 
-    Human inspection is deliberately independent of AI reuse eligibility. A
-    pending or held record must remain inspectable, but only after the current
-    human ACL authorizes its header. Mutations retain the stricter P2 gate.
-    """
-    manifest = ENGINE["_page_files"](root)
-    catalog = ENGINE["page_catalog"](root, manifest)
-    entry = next((item for item in catalog if item.metadata.memory_id == identity), None)
-    if (entry is None or (entry.metadata.frontmatter or {}).get("memory_id") != identity
-        or not ENGINE["is_authorized"](entry.metadata.governance, access)):
-        raise ValueError()
-    relative = entry.path.relative_to(root)
-    directories = [root.joinpath(*relative.parts[:index]) for index in range(len(relative.parts))]
-    directory_ids = [(path, CORE["directory_identity"](path)) for path in directories]
-    def verify():
-        if (ENGINE["_page_files"](root) != manifest
-            or any(CORE["directory_identity"](path) != value for path, value in directory_ids)
-            or CORE["signature"](entry.path.lstat()) != entry.signature
-            or ENGINE["_root_identity"](root) != access.root_identity
-            or ENGINE["_policy_generation"](root) != access.policy_generation):
+    def consume(self, size):
+        self.used += size
+        if self.used > MAX_QUEUE_READ_BYTES:
             raise ValueError()
+
+
+def human_manifest(root):
+    """Complete strict scan: an unsafe/unreadable tree is never an empty queue."""
+    identity = CORE["root_identity"](root)
+    manifest, directories = [], []
+    seen_paths = set()
+    entry_count = 0
+    def walk(directory, collection):
+        nonlocal entry_count
+        directory_id = CORE["directory_identity"](directory)
+        directories.append((directory, directory_id))
+        children = []
+        with os.scandir(directory) as iterator:
+            for child in iterator:
+                entry_count += 1
+                if entry_count > ENGINE["MAX_PAGE_DIRECTORY_ENTRIES"]:
+                    raise ValueError()
+                children.append(child)
+        for child in sorted(children, key=lambda item: item.name):
+            path = directory / child.name
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError()
+            if stat.S_ISDIR(info.st_mode):
+                walk(path, collection)
+            elif child.name.lower().endswith(".md"):
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or len(manifest) >= ENGINE["MAX_WIKI_FILES"]:
+                    raise ValueError()
+                relative = path.relative_to(root).as_posix()
+                if relative.casefold() in seen_paths:
+                    raise ValueError()
+                seen_paths.add(relative.casefold())
+                manifest.append((path, collection, relative, CORE["signature"](info)))
+        if CORE["directory_identity"](directory) != directory_id:
+            raise ValueError()
+    for name in ("wiki", "notes"):
+        collection = root / name
+        try:
+            collection.lstat()
+        except FileNotFoundError:
+            continue
+        walk(collection, collection)
+    if CORE["root_identity"](root) != identity:
+        raise ValueError()
+    return manifest, directories
+
+
+def human_catalog(manifest, budget):
+    """Header-only human catalog; AI's notes_opted_in gate must not hide pending."""
+    catalog, identities = [], set()
+    for path, directory, relative, signature in manifest:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            if CORE["signature"](before) != signature or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise ValueError()
+            fallback = ENGINE["stable_memory_id"](directory.name, path.relative_to(directory).as_posix())
+            metadata, prefix = ENGINE["_read_page_header"](handle, fallback)
+            budget.consume(len(prefix))
+            after = os.fstat(handle.fileno())
+        if CORE["signature"](after) != signature or CORE["signature"](path.lstat()) != signature:
+            raise ValueError()
+        fields = metadata.frontmatter or {}
+        if "memory_id" not in fields:
+            continue  # Legacy/path-derived IDs are not persistent review identities.
+        if fields["memory_id"] != metadata.memory_id or metadata.memory_id in identities:
+            raise ValueError()
+        identities.add(metadata.memory_id)
+        catalog.append(ENGINE["PageCatalogEntry"](path, directory, relative, metadata, signature))
+    return catalog
+
+
+def verify_access(root, access):
+    if (ENGINE["_root_identity"](root) != access.root_identity
+        or ENGINE["_policy_generation"](root) != access.policy_generation):
+        raise ValueError()
+
+
+def record_from_entry(entry, access, verify, budget, *, require_verified):
+    """Read one complete human-authorized record; mutations additionally need P2."""
+    identity = entry.metadata.memory_id
+    if not ENGINE["is_authorized"](entry.metadata.governance, access):
+        raise ValueError()
     verify()
     descriptor = os.open(entry.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(descriptor, "rb") as handle:
@@ -116,6 +189,9 @@ def record(root, identity, access, *, require_verified=True):
             or len(prefix) > maximum):
             raise ValueError()
         verify()
+        # Reserve the complete snapshot before any body read. Header parsing is
+        # separately bounded and has already been counted in the catalog pass.
+        budget.consume(before.st_size)
         raw = prefix + handle.read(maximum - len(prefix) + 1)
         after = os.fstat(handle.fileno())
     if (len(raw) != after.st_size or len(raw) > maximum
@@ -136,6 +212,20 @@ def record(root, identity, access, *, require_verified=True):
             "binding_revision": CORE["binding_revision"](binding) if binding is not None else None,
             "binding": binding, "product": product, "review_verified": bool(verified),
             "eligible": bool(eligible), "verify": verify}
+
+
+def record(root, identity, access, *, require_verified=True):
+    generation = human_manifest(root)
+    catalog = human_catalog(generation[0], ReadBudget())
+    entry = next((item for item in catalog if item.metadata.memory_id == identity), None)
+    if entry is None:
+        raise ValueError()
+    def verify():
+        verify_access(root, access)
+        if human_manifest(root) != generation:
+            raise ValueError()
+        verify_access(root, access)
+    return record_from_entry(entry, access, verify, ReadBudget(), require_verified=require_verified)
 
 
 def current_relation(target):
@@ -171,6 +261,69 @@ def inspection(snapshot, target):
         "held": held is not None, "hold_reason": held["reason"] if held else None, "held_at": held["at"] if held else None,
         "can_hold": bool(snapshot.enabled and held is None and target["eligible"] and current_relation(target)),
         "can_release": bool(snapshot.enabled and releasable(target, held)), "release_lineage_current": lineage}
+
+
+def safe_queue_path(path):
+    parts = path.split("/")
+    return (len(path.encode("utf-16-le")) // 2 <= 1024 and len(parts) >= 2 and parts[0] in {"wiki", "notes"}
+        and path.lower().endswith(".md") and not any(ord(char) < 32 or ord(char) == 127 or char == "\\" for char in path)
+        and not any(not part or part.startswith(".") or ":" in part for part in parts)
+        and ENGINE["redact"](path) == path)
+
+
+def queue(root, document, access):
+    """One bounded current-human-scope snapshot, never a ledger identity dump."""
+    if CORE["validate_marker"](document) is None:
+        snapshot = CORE["read_snapshot"](root, document)
+        snapshot.verify()
+        return {**status(snapshot), "coverage": "not-enabled", "items": []}
+    with CORE["memory_lock"](root) as verify_lock:
+        snapshot = CORE["_read_snapshot_unlocked"](root, document)
+        verify_access(root, access)
+        generation = human_manifest(root)
+        budget = ReadBudget()
+        catalog = human_catalog(generation[0], budget)
+        directory_ids = dict(generation[1])
+        def verify_generation():
+            verify_access(root, access)
+            if human_manifest(root) != generation:
+                raise ValueError()
+            snapshot._verify_unlocked()
+            verify_lock()
+            verify_access(root, access)
+        verify_generation()
+        items, matched = [], 0
+        for entry in sorted(catalog, key=lambda item: item.relative):
+            # Authorize first; unknown/hidden/missing ledger-only IDs never
+            # become rows, placeholders, counts, or a limited-coverage signal.
+            identity = entry.metadata.memory_id
+            if not ENGINE["is_authorized"](entry.metadata.governance, access):
+                continue
+            if identity not in snapshot.held_ids and identity not in snapshot.releases:
+                continue
+            parents = [root.joinpath(*entry.path.relative_to(root).parts[:index])
+                       for index in range(1, len(entry.path.relative_to(root).parts))]
+            def verify_record():
+                verify_access(root, access)
+                if (CORE["signature"](entry.path.lstat()) != entry.signature
+                    or any(CORE["directory_identity"](path) != directory_ids[path] for path in parents)):
+                    raise ValueError()
+                verify_lock()
+            target = record_from_entry(entry, access, verify_record, budget, require_verified=False)
+            state = inspection(snapshot, target)
+            if not state["held"] and state["release_lineage_current"] is not False:
+                continue
+            if (not safe_queue_path(entry.relative) or not CORE["matches"](CORE["ID"], identity)
+                or ENGINE["redact"](identity) != identity):
+                raise ValueError()
+            matched += 1
+            if len(items) < MAX_QUEUE_ITEMS:
+                items.append({"path": entry.relative, **state})
+        verify_generation()
+        response = {**status(snapshot), "coverage": "limited" if matched > MAX_QUEUE_ITEMS else "complete", "items": items}
+        if len(json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")) + 1 > MAX_QUEUE_OUTPUT_BYTES:
+            raise ValueError()
+        return response
 
 
 def status(snapshot):
@@ -309,6 +462,8 @@ def append(root, snapshot, target, row, verify_lock):
 def operate(root, request, actor):
     document, _, access = policy(root)
     action = request["action"]
+    if action == "queue":
+        return queue(root, document, access)
     if action in {"status", "inspect"}:
         snapshot = CORE["read_snapshot"](root, document)
         response = status(snapshot)

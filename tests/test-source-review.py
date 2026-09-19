@@ -143,6 +143,9 @@ class SourceReviewCLI(unittest.TestCase):
         before = (self.root / "memory/source-review/ledger.jsonl").read_bytes()
         pending = copy.deepcopy(self.fields)
         pending["review_state"] = "pending"
+        # Ordinary product edits genuinely mark the proposal as ai-proposed;
+        # human inspection must not inherit the AI retrieval opt-in filter.
+        pending["epistemic_status"] = "ai-proposed"
         pending["mind2one"]["review-state"] = "pending"
         pending["mind2one"].pop("review")
         self.replace_fields(pending)

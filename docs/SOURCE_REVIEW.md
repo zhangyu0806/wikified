@@ -47,6 +47,7 @@ hashes, responses, and persisted entries. These are the remaining fields:
 | --- | --- |
 | `status` | none |
 | `inspect` | `record_id` |
+| `queue` | none |
 | `initialize` | `request_id`, `expected_policy_revision` |
 | `hold` | `record_id`, `request_id`, `reason`, `expected_ledger_revision`, `expected_record_revision`, `expected_policy_revision` |
 | `release` | the same fields as hold |
@@ -93,6 +94,70 @@ entry digest. Re-inspect before forming a new operation. Exact request retries
 are idempotent without appending again, but they still recheck current record
 authorization; an old successful request does not grant permanent visibility.
 Conflicting reuse of a request ID is rejected.
+
+### Current human review queue
+
+`queue` is a single read-only command using the same independent capability.
+It accepts only `action` and `capability`: no caller-supplied root, profile,
+filter, cursor, or limit. Its exact top-level response is:
+
+```json
+{"enabled": true, "policy_revision": "sha256:...", "ledger_revision": "sha256:...", "coverage": "complete", "items": []}
+```
+
+Each item contains `path` plus the ten record-specific `inspect` fields:
+`record_id`, `record_revision`, `binding_revision`, `held`, `hold_reason`,
+`held_at`, `can_hold`, `can_release`, `review_verified`, and
+`release_lineage_current`. Shared policy/ledger/enabled values are returned
+once at the top, not repeated per item. The queue returns only currently
+human-authorized records that are held or have stale released-review lineage.
+Rows contain no title, Markdown, source identity, actor, request/review history,
+or vault-wide count. Queue entries are advice, not mutation authority: opening
+a row must re-inspect its current selected version before an explicit action.
+
+Coverage has three meanings:
+
+- `not-enabled`: the access policy has no ledger marker. Items are empty, the
+  ledger revision is null, and the command neither scans Markdown nor creates
+  a lock or ledger. This is not a claim that reuse is safe.
+- `complete`: the bounded scan covered the current human-visible persisted
+  Markdown scope, and all matching records fit in the result.
+- `limited`: more than 100 **authorized matching** records were confirmed; the
+  first 100 in deterministic current-path order are returned. No total or
+  hidden-record count is exposed. This is not an exhaustive review queue.
+
+Deleted records and ledger-only identities with no current authorized Markdown
+locator are not rows or placeholders and do not change coverage to `limited`.
+Consequently, a complete empty result means only “no matches in the current
+visible persisted-Markdown scope,” never “the entire ledger has no holds.”
+Legacy/path-derived identities are not synthesized into persisted identities.
+The queue is not a general ledger repair/orphan inventory or a source-change
+observer. It never writes an inferred hold or release.
+
+An enabled queue holds one nonblocking shared memory lock through its snapshot.
+It captures one strict header catalog, authorizes before reading candidate
+bodies, then checks root, policy, complete manifest, ancestor directories,
+record generations, and authoritative ledger before returning. Only authorized
+records referenced by a hold/release need complete body reads. A pending
+`ai-proposed` record remains visible to its authorized human; AI retrieval's
+separate opt-in and P2 gates are unchanged. Selected human inspection uses this
+same strict catalog, while hold/release mutations still require verified P2.
+
+This strict human scan rejects malformed headers, duplicate persistent IDs,
+portable path collisions, symlinked trees, hardlinked/nonregular Markdown,
+unreadable directories, generation changes, or resource overflow as the fixed
+unavailable error. It never returns an empty/partial success for a broken scan,
+including when a later candidate fails after earlier matches. All header and
+candidate Markdown reads have a combined 64 MiB budget, in addition to the
+existing 2,000-file, 8,000-directory-entry, 16 KiB frontmatter, and 2 MiB per
+complete-record bounds. Policy and ledger retain their own existing bounds.
+The complete JSON output, including its newline, is bounded to 512 KiB.
+
+Returned paths are safe relative `notes/` or `wiki/` Markdown paths, bounded to
+1,024 UTF-16 code units to match the shared Web contract. Neither paths nor
+record IDs may change under redaction. An authorized matching record with an
+unsupported path is unavailable rather than silently omitted. These strict
+coverage failures expose no failing path, identity, or count.
 
 Mutation responses contain `action`, `entry_revision`, current
 `ledger_revision` and `policy_revision`, `record_id`, `held`, and `idempotent`.
@@ -177,3 +242,8 @@ lineage, complete bounded snapshots, and record/manifest/directory/root/policy
 drift. `tests/test-source-review-retrieval.py` verifies
 actual request-time held-record and dependency exclusion. No test uses or
 initializes the user's real memory root.
+
+`tests/test-source-review-queue.py` verifies the real fixed request/response,
+disabled no-I/O behavior, current human-only scope, visible-only result limits,
+strict coverage refusal, no unauthorized body reads, budget and corruption
+failures, bounded scan counts, and single-generation drift rejection.
