@@ -53,10 +53,7 @@ def product(*, domain="work", sensitivity="internal", review="not-required", tar
         f'  "review-state": "{review}"\n'
         '  "agent": "codex"\n'
         '  "operation-id": "operation-phase1"\n'
-        '  "sources":\n'
-        '    - "kind": "document"\n'
-        '      "id": "source-phase1"\n'
-        '      "label": "domain: personal is unrelated source text"'
+        '  "sources": []'
     )
 
 with tempfile.TemporaryDirectory(prefix="wikified-page-governance-") as temporary:
@@ -153,6 +150,9 @@ with tempfile.TemporaryDirectory(prefix="wikified-page-governance-") as temporar
         ("legacy AI accepted is unbound", product(review="accepted")),
         ("legacy AI corrected is unbound", product(review="corrected")),
         ("nested cannot widen", product(targets=["human"]) + "\nsource:\n  target_profiles: [codex, opencode]"),
+        ("nonempty v1 sources cannot silently disappear", product().replace('  "sources": []',
+            '  "sources":\n    - "kind": "document"\n      "id": "source-phase1"\n'
+            '      "label": "domain: personal is unrelated source text"')),
     ):
         write(header)
         assert metadata() is not None, name

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -35,7 +36,7 @@ def source() -> dict:
             "agent": "synthetic-agent", "operation-id": "synthetic-operation",
             "review-state": "accepted", "reviewed-at": AT, "reviewed-by": "human",
             "sources": [{"kind": "document", "id": "source:synthetic", "label": "Synthetic evidence",
-                         "revision": "source-revision-1", "relation": "current-derived", "locator": "section-1"}],
+                         "revision": "source-revision-1", "relation": "historical-citation", "locator": "section-1"}],
             "action": {"level": "key-result", "status": "active", "parent-id": "objective:one",
                        "metric": {"start": 0, "current": 0.1, "target": 10, "unit": "units", "basis": "fixture"}},
             "scheduled-for": "2026-09-12T09:00:00.000Z", "due-at": "2026-09-13T09:00:00.000Z",
@@ -100,7 +101,7 @@ semantic_changes = [
     (("mind2one", "due-at"), "2026-09-14T09:00:00.000Z"),
     (("mind2one", "sources", 0, "kind"), "external"), (("mind2one", "sources", 0, "id"), "source:two"),
     (("mind2one", "sources", 0, "label"), "Different source"), (("mind2one", "sources", 0, "revision"), "rev-2"),
-    (("mind2one", "sources", 0, "relation"), "historical-citation"),
+    (("mind2one", "sources", 0, "relation"), "current-derived"),
     (("mind2one", "sources", 0, "locator"), "section-2"),
 ]
 for path, value in semantic_changes:
@@ -141,7 +142,7 @@ with tempfile.TemporaryDirectory(prefix="wikified-versioned-review-") as directo
                 assert "Traceback" not in result.stderr and marker not in result.stderr, (name, result.stderr)
                 if "--read-page" in args:
                     assert (result.returncode == 0) == allowed, (name, result.stderr)
-                elif "--query" in args and query_error:
+                elif ("--query" in args or "--session-start" in args) and query_error:
                     assert result.returncode == 4 and query_error in result.stderr, (name, result.stderr)
                     assert result.stdout == "", (name, result.stdout)
                 else:
@@ -280,7 +281,13 @@ with tempfile.TemporaryDirectory(prefix="wikified-versioned-review-") as directo
         assert assessment["state"] == case["expectedState"], (case["name"], assessment)
         assert assessment["trusted"] == case["expectedTrusted"], (case["name"], assessment)
         assert engine._projection_hash(case["projection"]) == case["expectedContentRevision"], case["name"]
-        surfaces("golden " + case["name"], frontmatter, body, allowed=case["expectedTrusted"],
+        # These immutable golden vectors test P2 semantic binding. Some contain
+        # deliberately nonexistent current sources; P3 must still deny export.
+        freshness = engine.SOURCE_FRESHNESS["assess"](frontmatter["memory_id"], [{
+            "id": frontmatter["memory_id"], "revision": "sha256:" + hashlib.sha256(case["source"].encode("utf-8")).hexdigest(),
+            "sources": frontmatter["mind2one"].get("sources"),
+        }])
+        surfaces("golden " + case["name"], frontmatter, body, allowed=case["expectedTrusted"] and freshness["reuseAllowed"],
                  marker="Human", raw=case["source"].encode("utf-8"), mcp=True)
 
     # Metadata changed between prefilter and the body-open must not be reused.

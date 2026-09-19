@@ -92,6 +92,7 @@ EVENT_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 LEGACY_EVENT_SCHEMAS = {"llm-wiki-memory-event/v1", "llm-wiki-memory-event/v2"}
 CURRENT_EVENT_SCHEMA = "llm-wiki-memory-event/v3"
 EVENT_REVIEW = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_event_review.py")))
+SOURCE_FRESHNESS = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_source_freshness.py")))
 REVIEW_EVENT_SCHEMA = EVENT_REVIEW["SCHEMA"]
 LEGACY_GOVERNANCE: dict[str, Any] = {
     "domain": "work",
@@ -142,6 +143,8 @@ class AccessContext:
     accepted_targets: frozenset[str]
     allow_raw: bool
     allow_direct_graph: bool
+    root_identity: tuple[Any, ...] | None = None
+    policy_generation: tuple[Any, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -196,11 +199,11 @@ def access_context(root: Path, profile_name: str) -> AccessContext:
     if not policy_path.is_file() or policy_path.is_symlink():
         raise PolicyError("missing policy/access.json; run llm-wiki-init to install the access policy")
     try:
-        if policy_path.stat().st_size > MAX_POLICY_BYTES:
-            raise PolicyError(f"policy is larger than {MAX_POLICY_BYTES} bytes")
-        policy = json.loads(policy_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise PolicyError(f"cannot parse {policy_path}: {exc}") from exc
+        root_identity = _root_identity(root)
+        policy_generation = _policy_generation(root)
+        policy = json.loads(policy_generation[-1].decode("utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise PolicyError("policy unavailable or changed") from exc
     if not isinstance(policy, dict) or policy.get("schema_version") != POLICY_SCHEMA:
         raise PolicyError(f"policy schema_version must be {POLICY_SCHEMA}")
     if set(policy) != {"schema_version", "sensitivity_order", "profiles"}:
@@ -248,7 +251,63 @@ def access_context(root: Path, profile_name: str) -> AccessContext:
     return AccessContext(
         name, frozenset(domains), tuple(sensitivity_order), sensitivity_order.index(maximum),
         frozenset(reviews), mode, frozenset(targets), allow_raw, allow_graph,
+        root_identity, policy_generation,
     )
+
+
+def _root_identity(root: Path) -> tuple[Any, ...]:
+    value = root.lstat()
+    if not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode):
+        raise PageSnapshotError("snapshot-changed")
+    return (str(root.resolve(strict=True)), value.st_dev, value.st_ino)
+
+
+def _policy_generation(root: Path) -> tuple[Any, ...]:
+    directory, path = root / "policy", root / "policy/access.json"
+    before_directory = directory.lstat()
+    if not stat.S_ISDIR(before_directory.st_mode) or stat.S_ISLNK(before_directory.st_mode):
+        raise PageSnapshotError("snapshot-changed")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(descriptor, "rb") as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_POLICY_BYTES:
+            raise PageSnapshotError("snapshot-changed")
+        raw = handle.read(MAX_POLICY_BYTES + 1)
+        after = os.fstat(handle.fileno())
+    after_directory = directory.lstat()
+    if (len(raw) != after.st_size or len(raw) > MAX_POLICY_BYTES
+        or _event_stat_signature(before) != _event_stat_signature(after)
+        or _event_stat_signature(after) != _event_stat_signature(path.lstat())
+        or (before_directory.st_dev, before_directory.st_ino) != (after_directory.st_dev, after_directory.st_ino)):
+        raise PageSnapshotError("snapshot-changed")
+    return (after_directory.st_dev, after_directory.st_ino, _event_stat_signature(after), raw)
+
+
+class PageGeneration:
+    """Request-local observation fence; not a transaction against same-OS writers."""
+
+    def __init__(self, root: Path, access: AccessContext):
+        self.root, self.access = root, access
+        self.manifest = _page_files(root)
+        self.verify()
+
+    def verify(self) -> None:
+        try:
+            if (_root_identity(self.root) != self.access.root_identity
+                or _policy_generation(self.root) != self.access.policy_generation
+                or _page_files(self.root) != self.manifest):
+                raise PageSnapshotError("snapshot-changed")
+        except OSError as exc:
+            raise PageSnapshotError("snapshot-changed") from exc
+
+
+class PageSnapshots(list):
+    def __init__(self, values: list[Any], generation: PageGeneration):
+        super().__init__(values)
+        self.generation = generation
+
+    def verify(self) -> None:
+        self.generation.verify()
 
 
 def stable_memory_id(kind: str, material: str) -> str:
@@ -585,6 +644,14 @@ def _page_governance_fields(lines: list[str]) -> dict[str, Any]:
                     if nested:
                         raise PolicyError("nested product governance scalar")
                     product[child_key] = _yaml_scalar(child_value)
+                elif child_key == "sources":
+                    # The v1 parser cannot establish typed provenance from a
+                    # general YAML block. Do not silently turn it into no edges.
+                    if not nested and re.fullmatch(r"\[\s*\](?:\s+#.*)?", child_value):
+                        product["sources"] = []
+                    else:
+                        fields["__m2o_opaque_sources"] = True
+                    _validate_opaque_yaml_value(child_value)
                 else:
                     _validate_opaque_yaml_value(child_value)
         else:
@@ -1010,20 +1077,23 @@ def page_catalog(root: Path, manifest: list[tuple[Path, Path, str, tuple[Any, ..
 
 
 def page_snapshots(root: Path, access: AccessContext, project: str | None) -> list[tuple[PageCatalogEntry, PageSnapshot]]:
-    manifest = _page_files(root)
+    generation = PageGeneration(root, access)
+    manifest = generation.manifest
     catalog = page_catalog(root, manifest)
     snapshots: list[tuple[PageCatalogEntry, PageSnapshot]] = []
     total_bytes = 0
     for entry in catalog:
         metadata = entry.metadata
-        if not is_authorized(metadata.governance, access) or not matches_project(metadata.governance, project) or not _review_can_read_body(metadata):
+        # Dependencies can belong to a different project. Build the complete
+        # authorized/P2-trusted set first; the caller's project is not an ACL.
+        if not is_authorized(metadata.governance, access) or not _review_can_read_body(metadata):
             continue
         try:
             if entry.path.stat().st_size > MAX_PAGE_SNAPSHOT_BYTES:
                 raise PageSnapshotError("page-byte-limit")
         except OSError as exc:
             raise PageSnapshotError("snapshot-changed") from exc
-        snapshot = authorized_page_snapshot(entry.path, entry.directory, access, project, initial_metadata=metadata)
+        snapshot = authorized_page_snapshot(entry.path, entry.directory, access, initial_metadata=metadata)
         if snapshot is None:
             continue
         if snapshot.metadata.memory_id != metadata.memory_id or snapshot.metadata.frontmatter != metadata.frontmatter:
@@ -1032,9 +1102,33 @@ def page_snapshots(root: Path, access: AccessContext, project: str | None) -> li
         if total_bytes > MAX_WIKI_TOTAL_BYTES:
             raise PageSnapshotError("total-byte-limit")
         snapshots.append((entry, snapshot))
-    if manifest != _page_files(root):
-        raise PageSnapshotError("snapshot-changed")
-    return snapshots
+    generation.verify()
+    nodes = []
+    for _, snapshot in snapshots:
+        fields = snapshot.metadata.frontmatter or {}
+        if not fields.get("memory_id"):
+            # Path-derived fallback IDs are useful legacy result identities, but
+            # cannot establish rename-stable typed document dependencies.
+            continue
+        product = fields.get("mind2one")
+        nodes.append({"id": snapshot.metadata.memory_id, "revision": page_revision(snapshot),
+                      "sources": product.get("sources") if isinstance(product, dict) else None,
+                      "opaqueSources": bool(fields.get("__m2o_opaque_sources"))})
+    reusable = []
+    for entry, snapshot in snapshots:
+        if not matches_project(snapshot.metadata.governance, project):
+            continue
+        assessment = (SOURCE_FRESHNESS["assess"](snapshot.metadata.memory_id, nodes)
+                      if (snapshot.metadata.frontmatter or {}).get("memory_id")
+                      else {"state": "unassessed", "reuseAllowed": True})
+        if not assessment["reuseAllowed"]:
+            continue
+        metadata = snapshot.metadata
+        governed = PageMetadata(metadata.memory_id, {**metadata.governance, "source_freshness": assessment["state"]},
+                                metadata.has_frontmatter, metadata.frontmatter)
+        reusable.append((entry, PageSnapshot(governed, snapshot.raw, snapshot.body)))
+    generation.verify()
+    return PageSnapshots(reusable, generation)
 
 
 def page_revision(snapshot: PageSnapshot) -> str:
@@ -1653,7 +1747,8 @@ def _legacy_wiki_candidates(
     project: str | None = None,
 ) -> list[Candidate]:
     candidates: list[Candidate] = []
-    for entry, snapshot in page_snapshots(root, access, project):
+    snapshots = page_snapshots(root, access, project)
+    for entry, snapshot in snapshots:
         metadata = snapshot.metadata
         text = snapshot.body
         title = entry.path.relative_to(entry.directory).as_posix() if entry.directory.name == "wiki" else entry.relative
@@ -1675,6 +1770,7 @@ def _legacy_wiki_candidates(
                 governance=metadata.governance,
             )
         )
+    snapshots.verify()
     return candidates
 
 
@@ -1690,13 +1786,15 @@ def wiki_candidates(
         return []
 
     documents: list[tuple[str, str, list[str], list[str], PageMetadata, PageCatalogEntry, str]] = []
-    for entry, snapshot in page_snapshots(root, access, project):
+    snapshots = page_snapshots(root, access, project)
+    for entry, snapshot in snapshots:
         metadata = snapshot.metadata
         text = snapshot.body
         title = entry.path.relative_to(entry.directory).as_posix() if entry.directory.name == "wiki" else entry.relative
         documents.append((title, text, token_terms([title, text]), token_terms([title]), metadata, entry, page_revision(snapshot)))
 
     if not documents:
+        snapshots.verify()
         return []
     document_frequency: Counter[str] = Counter()
     for _, _, terms, _, _, _, _ in documents:
@@ -1757,6 +1855,7 @@ def wiki_candidates(
                 governance=metadata.governance,
             )
         )
+    snapshots.verify()
     return candidates
 
 
@@ -1786,7 +1885,27 @@ def graph_hint(
     memory_id, governance = governance_from_mapping({}, stable_memory_id("graph", report.name))
     if not is_authorized(governance, access):
         return None
-    text = report.read_text(encoding="utf-8", errors="replace")
+    try:
+        descriptor = os.open(report, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_PAGE_SNAPSHOT_BYTES:
+                return None
+            metadata, prefix = _read_page_header(handle, memory_id)
+            # graphify-out is not part of the governed document catalog. Never
+            # let a typed/governed report use the legacy hint as a read bypass.
+            if metadata.has_frontmatter:
+                return None
+            raw = prefix + handle.read(MAX_PAGE_SNAPSHOT_BYTES - len(prefix) + 1)
+            after = os.fstat(handle.fileno())
+        if (len(raw) != after.st_size or len(raw) > MAX_PAGE_SNAPSHOT_BYTES
+            or _event_stat_signature(before) != _event_stat_signature(after)
+            or _event_stat_signature(after) != _event_stat_signature(report.lstat())
+            or report.parent.is_symlink()):
+            return None
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError, PolicyError):
+        return None
     matching_lines = [
         line.rstrip()
         for line in text.splitlines()
@@ -1805,15 +1924,17 @@ def graph_hint(
         text="\n".join(matching_lines),
         signals={"token_overlap": len(matched_terms), "lexical_evidence": evidence},
         memory_id=memory_id,
-        governance=governance,
+        governance={**governance, "source_freshness": "unassessed"},
     )
 
 
-def read_text_head(path: Path, root: Path, access: AccessContext, max_bytes: int = MAX_WIKI_BYTES) -> str:
-    snapshot = authorized_page_snapshot(path, root / "wiki", access)
-    if snapshot is None:
-        return ""
-    return snapshot.body.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+def read_text_head(path: Path, root: Path, access: AccessContext, max_bytes: int = MAX_WIKI_BYTES,
+                   *, snapshots: PageSnapshots | None = None) -> str:
+    pages = snapshots if snapshots is not None else page_snapshots(root, access, None)
+    snapshot = next((value for entry, value in pages if entry.path == path), None)
+    result = snapshot.body.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore") if snapshot else ""
+    pages.verify()
+    return result
 
 
 def take_lines(text: str, max_lines: int, *, skip_blank_runs: bool = True) -> str:
@@ -1885,15 +2006,20 @@ def session_start_sections(
     """
     context_dir = root / "wiki" / "context"
     parts: list[str] = []
+    snapshots = page_snapshots(root, access, None)
 
-    critical = read_text_head(context_dir / "CRITICAL_FACTS.md", root, access)
+    def read_head(path: Path) -> str:
+        return read_text_head(path, root, access, snapshots=snapshots)
+
+    critical = read_head(context_dir / "CRITICAL_FACTS.md")
     block = section("Critical Facts", take_lines(critical, LAYER_LINES_CRITICAL)) if critical else None
     if block:
         parts.append(block)
     if scope == "critical":
+        snapshots.verify()
         return parts
 
-    active = read_text_head(context_dir / "active-projects.md", root, access)
+    active = read_head(context_dir / "active-projects.md")
     if active:
         status_only, dropped = strip_next_actions(take_lines(active, LAYER_LINES_PROJECTS))
         status_only = drop_done_lines(status_only)
@@ -1904,7 +2030,7 @@ def session_start_sections(
             )
         block = section("Active Projects (status only)", status_only)
     else:
-        index_text = read_text_head(root / "wiki" / "index.md", root, access)
+        index_text = read_head(root / "wiki" / "index.md")
         project_lines = [
             line.rstrip()
             for line in index_text.splitlines()
@@ -1914,9 +2040,10 @@ def session_start_sections(
     if block:
         parts.append(block)
     if scope == "status":
+        snapshots.verify()
         return parts
 
-    loops = read_text_head(context_dir / "open-loops.md", root, access)
+    loops = read_head(context_dir / "open-loops.md")
     if loops:
         loops_status, _ = strip_next_actions(take_lines(loops, LAYER_LINES_LOOPS))
         loops_status = drop_done_lines(loops_status)
@@ -1927,25 +2054,28 @@ def session_start_sections(
         parts.append(block)
 
     if not (context_dir / "open-loops.md").exists():
-        today = read_text_head(root / "Today.md", root, access)
+        today = read_head(root / "Today.md")
         block = section("Today (latest session)", take_lines(today, LAYER_LINES_TODAY)) if today else None
         if block:
             parts.append(block)
 
     report = root / "graphify-out" / "GRAPH_REPORT.md"
-    graph_text = read_text_head(report, root, access) if report.exists() and access.allow_direct_graph else ""
+    graph_text = read_head(report) if report.exists() and access.allow_direct_graph else ""
     block = section("Knowledge Graph (overview)", take_lines(graph_text, LAYER_LINES_GRAPH)) if graph_text else None
     if block:
         parts.append(block)
 
+    snapshots.verify()
     return parts
 
 
 def render_session_start(
     root: Path, max_chars: int, max_projects: int, access: AccessContext, scope: str = "full"
 ) -> str:
+    generation = PageGeneration(root, access)
     parts = session_start_sections(root, max_projects, access, scope)
     if not parts:
+        generation.verify()
         return "## Wikified — Session Memory\n\nNo wiki content found yet.\n"
     body = redact("\n\n".join(parts).strip())
     scope_note = {
@@ -1972,6 +2102,7 @@ def render_session_start(
     if len(output) > max_chars:
         budget = max(0, max_chars - len(prefix) - 40)
         output = prefix + body[:budget].rstrip() + "\n\n[truncated by llm-wiki-enrich]\n"
+    generation.verify()
     return output
 
 
@@ -2114,6 +2245,55 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def projected_page_text(snapshot: PageSnapshot) -> str:
+    """Redacted export, not a storage rewrite or a new authoritative revision.
+
+    Source labels/IDs/locators may refer to inaccessible records. Always remove
+    the entire sources property, including historical/legacy references; neither
+    hidden counts nor per-reference authorization decisions enter the output.
+    """
+    text = snapshot.raw.decode("utf-8")
+    product = (snapshot.metadata.frontmatter or {}).get("mind2one")
+    if not isinstance(product, dict):
+        return text
+    projected = {key: value for key, value in product.items() if key != "sources"}
+    # Frontmatter is physically LF-delimited. Unicode NEL/U+2028/U+2029 can
+    # legitimately occur inside a strict JSON string and are not new keys.
+    parts = text.split("\n")
+    lines = [line + "\n" for line in parts[:-1]] + [parts[-1]]
+    start = end = None
+    for index, line in enumerate(lines[1:], 1):
+        if line.rstrip("\r\n") == "---":
+            if start is not None:
+                end = index
+            break
+        if not line.strip() or line[0].isspace() or line.lstrip().startswith("#"):
+            continue
+        key, _ = _yaml_entry(line.rstrip("\r\n"))
+        if start is not None:
+            end = index
+            break
+        if key == "mind2one":
+            start = index
+    if start is None or end is None:
+        raise PageSnapshotError("snapshot-changed")
+    if (snapshot.metadata.frontmatter or {}).get("__m2o_partial_v1"):
+        # Only an empty v1 declaration is reusable; preserve unrelated legacy
+        # fields instead of serializing the deliberately partial v1 parser.
+        children = lines[start + 1:end]
+        indent = min((len(line) - len(line.lstrip(" ")) for line in children if line.strip() and not line.lstrip().startswith("#")), default=0)
+        filtered = []
+        for line in children:
+            if line.strip() and not line.lstrip().startswith("#") and len(line) - len(line.lstrip(" ")) == indent:
+                key, _ = _yaml_entry(line[indent:].rstrip("\r\n"))
+                if key == "sources":
+                    continue
+            filtered.append(line)
+        return "".join(lines[:start + 1] + filtered + lines[end:])
+    replacement = "mind2one: " + json.dumps(projected, ensure_ascii=False, separators=(",", ":")) + "\n"
+    return "".join(lines[:start]) + replacement + "".join(lines[end:])
+
+
 def read_page(
     root: Path, requested: str, access: AccessContext, project: str | None,
     *, offset: int | None = None, length: int | None = None, revision: str | None = None,
@@ -2140,30 +2320,27 @@ def read_page(
         maximum = MAX_PAGE_SNAPSHOT_BYTES if chunked else MAX_READ_PAGE_BYTES
         if not resolved.is_file() or resolved.stat().st_size > maximum:
             return None
-        manifest = _page_files(root)
-        catalog = page_catalog(root, manifest)
-        entry = next((item for item in catalog if item.relative == relative.as_posix()), None)
-        if entry is None:
-            return None
-        snapshot = authorized_page_snapshot(candidate, wiki_dir, access, project, maximum, initial_metadata=entry.metadata)
-        if snapshot is None or snapshot.metadata.frontmatter != entry.metadata.frontmatter:
-            return None
-        if manifest != _page_files(root):
+        snapshots = page_snapshots(root, access, project)
+        snapshot = next((value for item, value in snapshots if item.relative == relative.as_posix()), None)
+        if snapshot is None or len(snapshot.raw) > maximum:
             return None
         current_revision = page_revision(snapshot)
         if revision is not None and revision != current_revision:
             return None
         # Redact before slicing: a secret cannot evade detection across chunks.
-        text = redact(snapshot.raw.decode("utf-8"))
+        text = redact(projected_page_text(snapshot))
         if not chunked:
+            snapshots.verify()
             return text
         if start > len(text):
             return None
         end = min(len(text), start + size)
-        return json.dumps({"path": relative.as_posix(), "memory_id": snapshot.metadata.memory_id,
+        result = json.dumps({"path": relative.as_posix(), "memory_id": snapshot.metadata.memory_id,
                            "revision": current_revision, "offset": start,
                            "nextOffset": end if end < len(text) else None, "totalChars": len(text),
                            "truncated": end < len(text), "text": text[start:end]}, ensure_ascii=False)
+        snapshots.verify()
+        return result
     except (OSError, ValueError):
         return None
 
@@ -2176,12 +2353,22 @@ def main(argv: list[str]) -> int:
     except PolicyError as exc:
         print(f"llm-wiki-enrich: access denied ({exc})", file=sys.stderr)
         return 3
+    try:
+        generation = PageGeneration(root, access)
+    except PageSnapshotError as exc:
+        print(f"llm-wiki-enrich: page snapshot unavailable [{exc.code}]; no partial export", file=sys.stderr)
+        return 4
     if args.read_page is not None:
         if args.files or args.query or args.session_start:
             print("llm-wiki-enrich: page unavailable", file=sys.stderr)
             return 3
         page = read_page(root, args.read_page, access, args.project, offset=args.offset, length=args.length, revision=args.revision)
         if page is None:
+            print("llm-wiki-enrich: page unavailable", file=sys.stderr)
+            return 3
+        try:
+            generation.verify()
+        except PageSnapshotError:
             print("llm-wiki-enrich: page unavailable", file=sys.stderr)
             return 3
         sys.stdout.write(page)
@@ -2192,15 +2379,19 @@ def main(argv: list[str]) -> int:
         print("llm-wiki-enrich: page unavailable", file=sys.stderr)
         return 3
     if args.session_start:
-        sys.stdout.write(
-            render_session_start(
+        try:
+            output = render_session_start(
                 root,
                 max(200, args.max_chars),
                 max(1, args.max_projects),
                 access,
                 args.session_start_scope,
             )
-        )
+            generation.verify()
+        except PageSnapshotError as exc:
+            print(f"llm-wiki-enrich: page snapshot unavailable [{exc.code}]; no partial export", file=sys.stderr)
+            return 4
+        sys.stdout.write(output)
         return 0
     if not args.files and not args.query:
         print("llm-wiki-enrich: provide --file or --query (or --session-start)", file=sys.stderr)
@@ -2229,10 +2420,13 @@ def main(argv: list[str]) -> int:
     if hint is not None:
         candidates.append(hint)
     candidates = sorted(candidates, key=lambda item: item.score, reverse=True)[: max(1, args.limit)]
-    if args.json:
-        print(render_json(candidates, args.max_chars))
-    else:
-        sys.stdout.write(render_markdown(candidates, max(200, args.max_chars), args.ambient))
+    output = render_json(candidates, args.max_chars) + "\n" if args.json else render_markdown(candidates, max(200, args.max_chars), args.ambient)
+    try:
+        generation.verify()
+    except PageSnapshotError as exc:
+        print(f"llm-wiki-enrich: page snapshot unavailable [{exc.code}]; no partial export", file=sys.stderr)
+        return 4
+    sys.stdout.write(output)
     return 0
 
 
