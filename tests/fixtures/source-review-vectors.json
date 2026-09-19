@@ -1,0 +1,803 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "name": "genesis",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        }
+      ],
+      "expectedValid": true,
+      "expectedHead": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+      "expectedHolds": []
+    },
+    {
+      "name": "hold",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f"
+        }
+      ],
+      "expectedValid": true,
+      "expectedHead": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f",
+      "expectedHolds": [
+        "memory:synthetic"
+      ]
+    },
+    {
+      "name": "release",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 2,
+          "previous": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f",
+          "action": "release",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "binding_revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:2",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "human-reverified",
+          "entry_revision": "sha256:da85f9d018811deb70e004f4fb9e28fa7a140d0a2136c47eac7151a04c1f9762"
+        }
+      ],
+      "expectedValid": true,
+      "expectedHead": "sha256:da85f9d018811deb70e004f4fb9e28fa7a140d0a2136c47eac7151a04c1f9762",
+      "expectedHolds": []
+    },
+    {
+      "name": "new-hold-after-release",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 2,
+          "previous": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f",
+          "action": "release",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "binding_revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:2",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "human-reverified",
+          "entry_revision": "sha256:da85f9d018811deb70e004f4fb9e28fa7a140d0a2136c47eac7151a04c1f9762"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 3,
+          "previous": "sha256:da85f9d018811deb70e004f4fb9e28fa7a140d0a2136c47eac7151a04c1f9762",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:3",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:48fd4359b26f85a52652d22a026c73663a2dfdea9eb520149bdfe2994f368d5f"
+        }
+      ],
+      "expectedValid": true,
+      "expectedHead": "sha256:48fd4359b26f85a52652d22a026c73663a2dfdea9eb520149bdfe2994f368d5f",
+      "expectedHolds": [
+        "memory:synthetic"
+      ]
+    },
+    {
+      "name": "empty",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [],
+      "expectedValid": false
+    },
+    {
+      "name": "missing-genesis",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "duplicate-hold",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 2,
+          "previous": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:2",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:6c2f4a04298a6f94db61057febedcdf92b8fff9e9a1b58ad9e0c910510035c95"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "release-without-hold",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "release",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "human-reverified",
+          "entry_revision": "sha256:9deb186eecc332bed80fc890a1a00df4c96528bf55f0e3c52731946ef9def881"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "same-binding-release",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 2,
+          "previous": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f",
+          "action": "release",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:2",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "human-reverified",
+          "entry_revision": "sha256:1e525ab05b7714fcd5b3db2718d395b4ccddaa7bd7ce29f5d4e91c2fc9b22cf5"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "same-record-release",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 2,
+          "previous": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f",
+          "action": "release",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:2",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "human-reverified",
+          "entry_revision": "sha256:313244832d4115fbfb3fbd1f71e372898baa724ed99f90db64c6301fd2e5d8c7"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "policy-changed-release",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 2,
+          "previous": "sha256:c3c95f1d9347fee0c6c8c530d51328c6f0340594d4d4ad958d7f510516e3671f",
+          "action": "release",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "binding_revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "policy_revision": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:2",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "human-reverified",
+          "entry_revision": "sha256:06dcd98c95ecc0dd79c419465587fd753c522f13918da63b1619f02dde41417c"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "duplicate-request",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:1fa7c4018390c84a11632e7e24c6a726b5193d9bcf7ab2c64a422d667cd31bd8"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "time-reversed",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-17T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:b8634cc6feae56758bcc3d018640d7c183637e80e510ded7fd38fd7b5387a89d"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "unknown-field",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "injected": "no"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "wrong-digest",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "wrong-previous",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "source-change",
+          "entry_revision": "sha256:d58136a8528bd331ff4dc8ec5c4c8e39c3fef58dd754d1982b9f4c582e87f645"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "fractional-sequence",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0.5,
+          "previous": null,
+          "action": "initialize",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0.5",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "human-reverified",
+          "entry_revision": "sha256:c8ed8e56911172886f3305ff7d49f86ac5f261a714b986937b864521378c6b67"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "boolean-sequence",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": false,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        }
+      ],
+      "expectedValid": false
+    },
+    {
+      "name": "unknown-reason",
+      "ledgerId": "11111111111111111111111111111111",
+      "entries": [
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 0,
+          "previous": null,
+          "action": "initialize",
+          "record_id": null,
+          "record_revision": null,
+          "binding_revision": null,
+          "policy_revision": null,
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:0",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "initialize",
+          "entry_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5"
+        },
+        {
+          "schema_version": "llm-wiki-source-review/v1",
+          "ledger_id": "11111111111111111111111111111111",
+          "sequence": 1,
+          "previous": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+          "action": "hold",
+          "record_id": "memory:synthetic",
+          "record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "binding_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "actor_id": "human:synthetic",
+          "at": "2026-09-18T08:00:00.000Z",
+          "request_id": "request:1",
+          "request_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "free text is forbidden",
+          "entry_revision": "sha256:1bdf5fbcbcb6977a6b031aa555b3048621a250eedf27e38611629b4a43b8b63b"
+        }
+      ],
+      "expectedValid": false
+    }
+  ],
+  "digests": {
+    "binding": {
+      "version": 1,
+      "actor": {
+        "type": "human",
+        "id": "human:synthetic"
+      },
+      "reason": "人类重新审核",
+      "at": "2026-09-18T08:00:00.000Z",
+      "previous-revision": null
+    },
+    "expectedBindingRevision": "sha256:356ba595eebeeec37d0c7b278cae674acfa607c32445bda5ec06a3a5f935c4fc",
+    "request": {
+      "action": "hold",
+      "record_id": "memory:synthetic",
+      "request_id": "request:hold",
+      "reason": "source-change",
+      "expected_ledger_revision": "sha256:24ee6b983e4ce458091a86d8a4b1ca7c4fd229ca23b9702d201f1ee3dff854a5",
+      "expected_record_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_policy_revision": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "capability": "synthetic-not-a-real-credential"
+    },
+    "expectedRequestRevision": "sha256:78d681ca0c3e9edd56d3ee45a50845dd27f43cdcc8a29c89e7b3890c7f3d630a"
+  }
+}

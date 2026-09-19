@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""Explicit local human source-review authority. JSON stdin only; never an MCP tool."""
+from __future__ import annotations
+from datetime import datetime, timezone
+import contextlib
+import hmac
+import io
+import json
+import os
+from pathlib import Path
+import runpy
+import stat
+import sys
+import uuid
+
+BIN = Path(__file__).resolve().parent
+ERROR = "llm-wiki-source-review: unavailable or conflicted; re-inspect current state and authority"
+UNCERTAIN = "llm-wiki-source-review: write outcome uncertain; stop reuse and inspect durable state before retrying"
+try:
+    CORE = runpy.run_path(str(BIN / "llm_wiki_source_review.py"))
+    ENGINE = runpy.run_path(str(BIN / "llm-wiki-enrich"), run_name="source_review_reader")
+except Exception:
+    print(ERROR, file=sys.stderr)
+    raise SystemExit(2)
+
+
+class UncertainWrite(RuntimeError):
+    pass
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def authority(request):
+    configured = os.environ.get("LLM_WIKI_SOURCE_REVIEW_CAPABILITY", "")
+    actor = os.environ.get("LLM_WIKI_SOURCE_REVIEW_ACTOR", "")
+    supplied = request.get("capability") if isinstance(request, dict) else None
+    if (not 32 <= len(configured) <= 512 or not configured.isascii() or not all(33 <= ord(c) <= 126 for c in configured)
+        or not CORE["matches"](CORE["IDENTIFIER"], actor) or not isinstance(supplied, str)
+        or ENGINE["redact"](actor) != actor or not supplied.isascii() or not hmac.compare_digest(configured, supplied)):
+        raise ValueError()
+    return actor
+
+
+def validate_request(request):
+    action = request.get("action")
+    fields = {"action", "capability"}
+    if action == "status":
+        pass
+    elif action == "inspect":
+        fields |= {"record_id"}
+    elif action == "initialize":
+        fields |= {"request_id", "expected_policy_revision"}
+    elif action in {"hold", "release"}:
+        fields |= {"request_id", "record_id", "reason", "expected_ledger_revision", "expected_record_revision", "expected_policy_revision"}
+        if request["reason"] not in (CORE["HOLD_REASONS"] if action == "hold" else {"human-reverified"}):
+            raise ValueError()
+    else:
+        raise ValueError()
+    if set(request) != fields:
+        raise ValueError()
+    for key in fields - {"action", "capability", "reason"}:
+        pattern = CORE["HASH"] if key.startswith("expected_") else CORE["ID"] if key == "record_id" else CORE["IDENTIFIER"]
+        if not CORE["matches"](pattern, request[key]):
+            raise ValueError()
+        if key in {"record_id", "request_id"} and ENGINE["redact"](request[key]) != request[key]:
+            raise ValueError()
+
+
+def policy(root):
+    CORE["root_identity"](root)
+    CORE["directory_identity"](root / "policy")
+    raw, _ = CORE["read_file"](root / "policy/access.json", CORE["MAX_POLICY_BYTES"])
+    document = CORE["decode"](raw)
+    # Reuse all existing strict access-policy checks, including the human scope.
+    access = ENGINE["access_context"](root, "human")
+    if access.policy_generation[-1] != raw:
+        raise ValueError()
+    return document, raw, access
+
+
+def record(root, identity, access):
+    manifest = ENGINE["_page_files"](root)
+    catalog = ENGINE["page_catalog"](root, manifest)
+    entry = next((item for item in catalog if item.metadata.memory_id == identity), None)
+    if entry is None or (entry.metadata.frontmatter or {}).get("memory_id") != identity:
+        raise ValueError()
+    if entry.path.lstat().st_nlink != 1:
+        raise ValueError()
+    snapshot = ENGINE["authorized_page_snapshot"](entry.path, entry.directory, access, initial_metadata=entry.metadata)
+    if snapshot is None:
+        raise ValueError()
+    fields = snapshot.metadata.frontmatter or {}
+    product = fields.get("mind2one")
+    assessment = ENGINE["assess_memory_review"](fields, snapshot.body)
+    if (not isinstance(product, dict) or product.get("version") != 2 or product.get("origin") not in {"ai", "mixed"}
+        or assessment["state"] != "verified" or not assessment["trusted"]):
+        raise ValueError()
+    binding = assessment["binding"]
+    def verify():
+        if (ENGINE["_page_files"](root) != manifest or entry.path.lstat().st_nlink != 1
+            or ENGINE["_root_identity"](root) != access.root_identity
+            or ENGINE["_policy_generation"](root) != access.policy_generation):
+            raise ValueError()
+    verify()
+    return {"record_id": identity, "record_revision": ENGINE["page_revision"](snapshot),
+            "binding_revision": CORE["binding_revision"](binding), "binding": binding, "product": product,
+            "verify": verify}
+
+
+def current_relation(target):
+    sources = target["product"].get("sources")
+    return isinstance(sources, list) and any(isinstance(source, dict) and source.get("kind") == "document"
+        and source.get("relation") == "current-derived" for source in sources)
+
+
+def status(snapshot):
+    return {"enabled": snapshot.enabled, "ledger_revision": snapshot.head, "policy_revision": snapshot.policy_revision}
+
+
+def result(snapshot, row, *, idempotent=False):
+    identity = row["record_id"]
+    return {"action": row["action"], "entry_revision": row["entry_revision"], "ledger_revision": snapshot.head,
+            "policy_revision": snapshot.policy_revision, "record_id": identity,
+            "held": identity in snapshot.held_ids if identity is not None else None, "idempotent": idempotent}
+
+
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def make_row(request, actor, ledger_id, sequence, previous, target=None):
+    row = {"schema_version": CORE["SCHEMA"], "ledger_id": ledger_id, "sequence": sequence,
+        "previous": previous, "action": request["action"], "record_id": target["record_id"] if target else None,
+        "record_revision": target["record_revision"] if target else None,
+        "binding_revision": target["binding_revision"] if target else None,
+        "policy_revision": target["binding"]["policy-revision"] if target else None,
+        "actor_id": actor, "at": now(), "request_id": request["request_id"],
+        "request_revision": CORE["request_revision"](request), "reason": request.get("reason", "initialize")}
+    row["entry_revision"] = CORE["entry_revision"](row)
+    return row
+
+
+def initialize(root, document, request, actor, snapshot, verify_lock):
+    if snapshot.policy_revision != request["expected_policy_revision"]:
+        raise ValueError()
+    directory = root / "memory/source-review"
+    try:
+        directory.mkdir(mode=0o700)
+        fsync_directory(root / "memory")
+    except FileExistsError:
+        pass
+    directory_id = CORE["directory_identity"](directory)
+    path = directory / "ledger.jsonl"
+    if path.exists() or path.is_symlink():
+        raw, _ = CORE["read_file"](path, CORE["MAX_BYTES"])
+        first = CORE["decode"](raw.split(b"\n", 1)[0])
+        rows = CORE["parse"](raw, first.get("ledger_id"))
+        if (len(rows) != 1 or rows[0]["request_id"] != request["request_id"]
+            or rows[0]["request_revision"] != CORE["request_revision"](request) or rows[0]["actor_id"] != actor):
+            raise ValueError()
+        row = rows[0]
+    else:
+        row = make_row(request, actor, uuid.uuid4().hex, 0, None)
+        CORE["validate"]([row], row["ledger_id"])
+        snapshot._verify_unlocked(); verify_lock()
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(CORE["encode"](row)); output.flush(); os.fsync(output.fileno())
+        fsync_directory(directory)
+    snapshot._verify_unlocked(); verify_lock()
+    if CORE["directory_identity"](directory) != directory_id:
+        raise ValueError()
+    # An orphan genesis is not enabled. Activate only after its complete durable
+    # creation. Exact retries may finish this step; no conflicting file is reset.
+    updated = {**document, "source_review": {"version": 1, "ledger_id": row["ledger_id"]}}
+    updated_raw = (json.dumps(updated, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    if len(updated_raw) > CORE["MAX_POLICY_BYTES"]:
+        raise ValueError()
+    temporary = root / "policy" / (".source-review-" + uuid.uuid4().hex + ".tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(updated_raw); output.flush(); os.fsync(output.fileno())
+        snapshot._verify_unlocked(); verify_lock()
+        if CORE["directory_identity"](directory) != directory_id or CORE["read_file"](path, CORE["MAX_BYTES"])[0] != CORE["encode"](row):
+            raise ValueError()
+        os.replace(temporary, root / "policy/access.json")
+        try:
+            fsync_directory(root / "policy")
+        except OSError:
+            raise UncertainWrite() from None
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    try:
+        current = CORE["_read_snapshot_unlocked"](root, updated)
+    except (OSError, ValueError):
+        raise UncertainWrite() from None
+    return result(current, row)
+
+
+def append(root, snapshot, target, row, verify_lock):
+    rows = [*snapshot.rows, row]
+    CORE["validate"](rows, snapshot.ledger_id)
+    line = CORE["encode"](row)
+    if len(snapshot.raw) + len(line) > CORE["MAX_BYTES"]:
+        raise ValueError()
+    snapshot._verify_unlocked(); target["verify"](); verify_lock()
+    path = root / "memory/source-review/ledger.jsonl"
+    directory_id = CORE["directory_identity"](path.parent)
+    descriptor = os.open(path, os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "r+b", buffering=0) as output:
+        before = os.fstat(output.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or CORE["signature"](before) != CORE["signature"](path.lstat())
+            or output.read(CORE["MAX_BYTES"] + 1) != snapshot.raw):
+            raise ValueError()
+        try:
+            written = output.write(line)
+            if written != len(line):
+                raise OSError()
+            os.fsync(output.fileno())
+            target["verify"](); verify_lock()
+            if (CORE["directory_identity"](path.parent) != directory_id
+                or (path.lstat().st_dev, path.lstat().st_ino) != (before.st_dev, before.st_ino)):
+                raise ValueError()
+            output.seek(0)
+            if output.read(CORE["MAX_BYTES"] + 1) != snapshot.raw + line:
+                raise ValueError()
+        except (OSError, ValueError):
+            # Readers share the memory lock, so they cannot observe a tentative
+            # release. Roll back only this writer's exact tail on the same inode.
+            try:
+                output.seek(0)
+                observed = output.read(CORE["MAX_BYTES"] + 1)
+                if (not observed.startswith(snapshot.raw) or not line.startswith(observed[len(snapshot.raw):])
+                    or (path.lstat().st_dev, path.lstat().st_ino) != (before.st_dev, before.st_ino)):
+                    raise OSError()
+                output.truncate(len(snapshot.raw)); os.fsync(output.fileno())
+            except (OSError, ValueError):
+                raise UncertainWrite() from None
+            raise ValueError() from None
+
+
+def operate(root, request, actor):
+    document, _, access = policy(root)
+    action = request["action"]
+    if action in {"status", "inspect"}:
+        snapshot = CORE["read_snapshot"](root, document)
+        response = status(snapshot)
+        if action == "inspect":
+            target = record(root, request["record_id"], access)
+            response.update({k: target[k] for k in ("record_id", "record_revision", "binding_revision")})
+            response["held"] = target["record_id"] in snapshot.held_ids
+            target["verify"]()
+        snapshot.verify()
+        return response
+    initial_root = CORE["root_identity"](root)
+    with CORE["memory_lock"](root, write=True, create=True) as verify_lock:
+        if CORE["root_identity"](root) != initial_root:
+            raise ValueError()
+        document, _, access = policy(root)
+        snapshot = CORE["_read_snapshot_unlocked"](root, document)
+        prior = next((row for row in snapshot.rows if row["request_id"] == request["request_id"]), None)
+        if prior is not None:
+            if prior["request_revision"] != CORE["request_revision"](request) or prior["actor_id"] != actor:
+                raise ValueError()
+            if prior["action"] in {"hold", "release"}:
+                # A historical capability/request is not permanent permission
+                # to inspect this record's current state after ACL narrowing.
+                replay_target = record(root, prior["record_id"], access)
+                replay_target["verify"]()
+            snapshot._verify_unlocked()
+            return result(snapshot, prior, idempotent=True)
+        if action == "initialize":
+            if snapshot.enabled:
+                raise ValueError()
+            return initialize(root, document, request, actor, snapshot, verify_lock)
+        if (not snapshot.enabled or snapshot.head != request["expected_ledger_revision"]
+            or snapshot.policy_revision != request["expected_policy_revision"]):
+            raise ValueError()
+        target = record(root, request["record_id"], access)
+        if target["record_revision"] != request["expected_record_revision"] or not current_relation(target):
+            raise ValueError()
+        if action == "hold":
+            if target["record_id"] in snapshot.held_ids:
+                raise ValueError()
+        else:
+            held = snapshot.holds.get(target["record_id"])
+            history = target["product"].get("review-history")
+            if (held is None or not isinstance(history, list) or target["binding_revision"] == held["binding_revision"]
+                or target["binding"]["at"] < held["at"]
+                or target["binding"]["policy-revision"] != held["policy_revision"]
+                or not any(CORE["binding_revision"](binding) == held["binding_revision"] for binding in history)):
+                raise ValueError()
+        row = make_row(request, actor, snapshot.ledger_id, len(snapshot.rows), snapshot.head, target)
+        append(root, snapshot, target, row, verify_lock)
+        try:
+            current = CORE["_read_snapshot_unlocked"](root, document)
+        except (OSError, ValueError):
+            raise UncertainWrite() from None
+        return result(current, row)
+
+
+def main(argv):
+    if argv:
+        raise ValueError()
+    raw = sys.stdin.buffer.read(16 * 1024 + 1)
+    if len(raw) > 16 * 1024:
+        raise ValueError()
+    request = CORE["decode"](raw)
+    actor = authority(request)
+    validate_request(request)
+    root_value = os.environ.get("LLM_WIKI_ROOT")
+    if not root_value:
+        raise ValueError()
+    root = Path(root_value)
+    CORE["root_identity"](root)
+    # No secret/capability is returned, logged, hashed, or retained in the ledger.
+    with contextlib.redirect_stderr(io.StringIO()):
+        response = operate(root, request, actor)
+    print(json.dumps(response, ensure_ascii=False, allow_nan=False))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except UncertainWrite:
+        print(UNCERTAIN, file=sys.stderr)
+        raise SystemExit(3)
+    except (ValueError, TypeError, KeyError, OSError, UnicodeError, OverflowError, RecursionError):
+        print(ERROR, file=sys.stderr)
+        raise SystemExit(2)

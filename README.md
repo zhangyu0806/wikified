@@ -26,6 +26,10 @@
 remote、凭据和索引中；本阶段不导入日记、不建图数据库、不实现完整 OKR / task 系统。
 设计边界见 [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md)。
 
+显式人工暂停 AI 记忆复用的可选本地协议见
+[`docs/SOURCE_REVIEW.md`](docs/SOURCE_REVIEW.md)：暂停与解除独立授权、版本比较与审核历史校验，
+读取不写账本。此功能需手动启用，当前仅 POSIX／WSL CLI；不是自动失效观察器、Web 按钮或跨设备发布声明。
+
 ---
 
 ## 目录

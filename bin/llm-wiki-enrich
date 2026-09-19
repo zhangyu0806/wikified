@@ -93,6 +93,7 @@ LEGACY_EVENT_SCHEMAS = {"llm-wiki-memory-event/v1", "llm-wiki-memory-event/v2"}
 CURRENT_EVENT_SCHEMA = "llm-wiki-memory-event/v3"
 EVENT_REVIEW = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_event_review.py")))
 SOURCE_FRESHNESS = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_source_freshness.py")))
+SOURCE_REVIEW = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_source_review.py")))
 REVIEW_EVENT_SCHEMA = EVENT_REVIEW["SCHEMA"]
 LEGACY_GOVERNANCE: dict[str, Any] = {
     "domain": "work",
@@ -145,6 +146,7 @@ class AccessContext:
     allow_direct_graph: bool
     root_identity: tuple[Any, ...] | None = None
     policy_generation: tuple[Any, ...] | None = None
+    policy_document: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -206,8 +208,13 @@ def access_context(root: Path, profile_name: str) -> AccessContext:
         raise PolicyError("policy unavailable or changed") from exc
     if not isinstance(policy, dict) or policy.get("schema_version") != POLICY_SCHEMA:
         raise PolicyError(f"policy schema_version must be {POLICY_SCHEMA}")
-    if set(policy) != {"schema_version", "sensitivity_order", "profiles"}:
+    required_policy = {"schema_version", "sensitivity_order", "profiles"}
+    if set(policy) not in (required_policy, required_policy | {"source_review"}):
         raise PolicyError("policy contains missing or unknown top-level fields")
+    try:
+        SOURCE_REVIEW["validate_marker"](policy)
+    except SOURCE_REVIEW["SourceReviewError"] as exc:
+        raise PolicyError("source review policy invalid") from exc
     sensitivity_order = _string_list(policy.get("sensitivity_order"), "sensitivity_order")
     if sensitivity_order != ["public", "internal", "confidential", "restricted"]:
         raise PolicyError("sensitivity_order must be public, internal, confidential, restricted")
@@ -251,7 +258,7 @@ def access_context(root: Path, profile_name: str) -> AccessContext:
     return AccessContext(
         name, frozenset(domains), tuple(sensitivity_order), sensitivity_order.index(maximum),
         frozenset(reviews), mode, frozenset(targets), allow_raw, allow_graph,
-        root_identity, policy_generation,
+        root_identity, policy_generation, policy,
     )
 
 
@@ -288,6 +295,16 @@ class PageGeneration:
 
     def __init__(self, root: Path, access: AccessContext):
         self.root, self.access = root, access
+        try:
+            if access.policy_document is None:
+                raise PageSnapshotError("source-review-unavailable")
+            # Opt-in only: an old vault keeps its existing root/policy fence
+            # without acquiring new lock or ledger filesystem requirements.
+            self.source_review = (SOURCE_REVIEW["read_snapshot"](root, access.policy_document)
+                                  if "source_review" in access.policy_document else None)
+        except (SOURCE_REVIEW["SourceReviewError"], OSError) as exc:
+            # The ledger contains governance, never user-facing diagnostics.
+            raise PageSnapshotError("source-review-unavailable") from exc
         self.manifest = _page_files(root)
         self.verify()
 
@@ -297,6 +314,10 @@ class PageGeneration:
                 or _policy_generation(self.root) != self.access.policy_generation
                 or _page_files(self.root) != self.manifest):
                 raise PageSnapshotError("snapshot-changed")
+            if self.source_review is not None:
+                self.source_review.verify()
+        except SOURCE_REVIEW["SourceReviewError"] as exc:
+            raise PageSnapshotError("source-review-unavailable") from exc
         except OSError as exc:
             raise PageSnapshotError("snapshot-changed") from exc
 
@@ -1088,6 +1109,10 @@ def page_snapshots(root: Path, access: AccessContext, project: str | None) -> li
         # authorized/P2-trusted set first; the caller's project is not an ACL.
         if not is_authorized(metadata.governance, access) or not _review_can_read_body(metadata):
             continue
+        if not _source_review_can_read_header(metadata, generation.source_review):
+            # Holds and released review lineage are identity-level gates. Do
+            # not read a denied body or make it available as a dependency node.
+            continue
         try:
             if entry.path.stat().st_size > MAX_PAGE_SNAPSHOT_BYTES:
                 raise PageSnapshotError("page-byte-limit")
@@ -1098,6 +1123,11 @@ def page_snapshots(root: Path, access: AccessContext, project: str | None) -> li
             continue
         if snapshot.metadata.memory_id != metadata.memory_id or snapshot.metadata.frontmatter != metadata.frontmatter:
             raise PageSnapshotError("snapshot-changed")
+        if (generation.source_review is not None and metadata.memory_id in generation.source_review.releases
+            and snapshot.metadata.governance.get("review_binding") != "verified"):
+            # Generic human/legacy trust is not enough to satisfy a released
+            # P2 lineage. Verify the complete body before adding any graph node.
+            continue
         total_bytes += len(snapshot.raw)
         if total_bytes > MAX_WIKI_TOTAL_BYTES:
             raise PageSnapshotError("total-byte-limit")
@@ -1133,6 +1163,31 @@ def page_snapshots(root: Path, access: AccessContext, project: str | None) -> li
 
 def page_revision(snapshot: PageSnapshot) -> str:
     return "sha256:" + hashlib.sha256(snapshot.raw).hexdigest()
+
+
+def _source_review_can_read_header(metadata: PageMetadata, source_review: Any) -> bool:
+    if source_review is None:
+        return True
+    identity = metadata.memory_id
+    if identity in source_review.held_ids:
+        return False
+    released = source_review.releases.get(identity)
+    if released is None:
+        return True
+    fields = metadata.frontmatter or {}
+    product = fields.get("mind2one")
+    if (fields.get("memory_id") != identity or not isinstance(product, dict) or product.get("version") != 2
+        or product.get("review-state") not in {"accepted", "corrected"}
+        or product.get("id") != identity or not _valid_review_history(product)):
+        return False
+    # A release authorizes this reviewed lineage, not any historical accepted
+    # snapshot with the same ID. Semantic/P2/body validation still follows.
+    bindings = [product.get("review"), *(product.get("review-history") or [])]
+    try:
+        return any(binding is not None and SOURCE_REVIEW["binding_revision"](binding) == released["binding_revision"]
+                   for binding in bindings)
+    except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
+        return False
 
 
 def _review_can_read_body(metadata: PageMetadata) -> bool:
