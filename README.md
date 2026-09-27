@@ -13,7 +13,8 @@
 
 核心主张：**知识是编译出来的，不是检索出来的。**
 原始材料落 `raw/`，经人工审校编译进 `wiki/`，轻量事实走 `memory/events/` 的 typed event。
-写入靠手动触发而非全量自动捕获——这是为了保信噪比，不是为了省事。
+默认由用户或助手显式提出记录；也可按工作区启用有界、脱敏的自动捕获。
+自动捕获只生成待人工审核的提案，不保存完整会话，不自动晋升知识。
 
 思路上受 Andrej Karpathy 关于 "LLM wiki" 的讨论启发，但本仓库是独立实现，
 与其没有关联，也不代表其观点。
@@ -29,6 +30,9 @@ remote、凭据和索引中；本阶段不导入日记、不建图数据库、�
 显式人工暂停 AI 记忆复用的可选本地协议见
 [`docs/SOURCE_REVIEW.md`](docs/SOURCE_REVIEW.md)：暂停与解除独立授权、版本比较与审核历史校验，
 读取不写账本。此功能需手动启用，当前仅 POSIX／WSL CLI；不是自动失效观察器、Web 按钮或跨设备发布声明。
+
+可选的本机捕获、队列与单写入端私库镜像见
+[`docs/AUTOMATIC_MEMORY.md`](docs/AUTOMATIC_MEMORY.md)。只安装本工具集不会自动开启这些功能。
 
 ---
 
@@ -835,8 +839,9 @@ OpenCode/Cursor 的同名结构以及 CLAUDE/AGENTS/hooks 中 BEGIN/END 受管�
 可以。CLI 是完整的，MCP 只是把同样的能力换个接口暴露。
 
 **为什么写入要手动触发，不自动捕获全部对话？**
-自动全量捕获会让信噪比崩掉——agent 淹在无关细节里反而更难抓要点。
-手动触发是这套设计的核心取舍，不是未实现的功能。
+默认仍是显式记录；需要减少手动操作时，可按工作区启用有界、脱敏的输出摘录捕获。
+摘录进入 pending 队列，人工审核后才能作为认可记忆召回；完整会话始终不进入这条捕获链。
+配置与当前平台限制见 [自动记忆说明](docs/AUTOMATIC_MEMORY.md)。
 
 **多机同步会冲突吗？**
 append-only 的 JSONL 走 `merge=union` 保留双方所有行，再按 event id 去重，
@@ -869,16 +874,21 @@ append-only 的 JSONL 走 `merge=union` 保留双方所有行，再按 event id 
 
 ## 测试
 
-完整门禁：
+完整门禁（Linux / WSL，Python 3.10+、Node.js 22+、Bash、Git）：
 
 ```bash
-bash -n install.sh bin/llm-wiki-remote-sync .githooks/pre-commit tests/test-*.sh
-python3 -m py_compile <仓库中带 python3 shebang 的 llm-wiki 文件>
-node --check bin/llm-wiki-mcp
-node --check plugins/llm-wiki-recall.js
-for t in tests/test-*.sh; do timeout 120 bash "$t"; done
-bin/llm-wiki-secret-scan --all
+python3 -B scripts/check.py
+# 只查看将执行的套件
+python3 -B scripts/check.py --list
 ```
+
+同一入口用于 GitHub PR 和 main 的 CI，覆盖 Python 3.10 与 3.12。
+它自动发现 `tests/test-*.sh`、`test-*.py`、`test-*.mjs` 与 `test-*.js`，
+执行语法检查、全部合成测试和公有仓库 secret scan；任一失败或超时都会返回非零。
+遇到未支持的测试后缀也会失败，避免悄悄漏跑。每条命令默认限时 120 秒，
+可用 `--timeout` 调整。测试使用临时 HOME/XDG/Codex 目录，清除继承的资料库、
+Git 和凭据配置；Python 不在源码目录生成字节码缓存。
+这是公开机制的验证入口，不会安装或升级真实运行服务。
 
 重点套件：
 
