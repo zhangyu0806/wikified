@@ -88,7 +88,7 @@ if record --type fact --project alpha --domain work --supersedes 222222222222222
 fi
 printf 'PASS  v2 missing domain defaults to work, while missing project cannot cross scope\n'
 
-cat >>"$ROOT/memory/events/legacy.jsonl" <<'EOF'
+cat >"$ROOT/memory/events/duplicate-fixture.jsonl" <<'EOF'
 {"schema_version":"llm-wiki-memory-event/v2","id":"3333333333333333","timestamp":"2026-08-01T00:00:00+00:00","type":"fact","project":"alpha","summary":"first row for duplicate id","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2026-08-01T00:00:00+00:00"}
 {"schema_version":"llm-wiki-memory-event/v2","id":"3333333333333333","timestamp":"2026-08-02T00:00:00+00:00","type":"fact","project":"alpha","summary":"second row for duplicate id","confidence":0.7,"half_life_days":90,"lifecycle":"active","valid_from":"2026-08-02T00:00:00+00:00"}
 EOF
@@ -97,6 +97,12 @@ if record --type fact --project alpha --domain work --supersedes 333333333333333
   printf 'FAIL: ambiguous duplicate supersedes target accepted\n'; exit 1
 fi
 printf 'PASS  duplicate supersedes target IDs fail closed\n'
+if env LLM_WIKI_ROOT="$ROOT" python3 "$ENRICH" --query editorchoice --json >"$WORK/conflict.out" 2>"$WORK/conflict.err"; then
+  printf 'FAIL: ambiguous event snapshot returned a partial result\n'; exit 1
+fi
+[ ! -s "$WORK/conflict.out" ] && grep -q 'identity-conflict' "$WORK/conflict.err"
+mv "$ROOT/memory/events/duplicate-fixture.jsonl" "$WORK/quarantined-duplicates.jsonl"
+printf 'PASS  identity conflict blocks recall explicitly; remaining tests use a complete valid fixture\n'
 
 NEW=$(record --type preference --project alpha --supersedes "$OLD_ID" 'editorchoice helix replacement')
 NEW_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$NEW")

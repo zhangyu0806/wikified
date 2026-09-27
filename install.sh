@@ -171,7 +171,10 @@ printf '\n[1/5] CLI -> %s\n' "$BIN_TARGET"
 shopt -s nullglob
 for src in "$REPO"/bin/*; do
   [[ -f "$src" ]] || continue
-  [[ "$MODE" == install ]] && chmod 0755 "$src"
+  # Import-only Python modules need links but must retain their source permissions.
+  if [[ "$MODE" == install && "$(head -c 2 "$src")" == '#!' ]]; then
+    chmod 0755 "$src"
+  fi
   link_one "$src" "$BIN_TARGET/$(basename "$src")"
 done
 

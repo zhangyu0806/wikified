@@ -79,6 +79,20 @@ if record --approve 9999999999999999 >/dev/null 2>&1 \
 fi
 printf 'PASS  duplicate IDs and non-string target agents fail closed\n'
 
+if recall proposalmarker >"$WORK/duplicate.out" 2>"$WORK/duplicate.err"; then
+  printf 'FAIL: conflicting proposal identities produced a partial recall\n'; exit 1
+fi
+[ ! -s "$WORK/duplicate.out" ] && grep -q 'identity-conflict' "$WORK/duplicate.err"
+python3 - "$ROOT/memory/events/forged.jsonl" <<'PY_QUARANTINE'
+import json
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+rows = [line for line in path.read_text().splitlines() if json.loads(line).get("id") != "abababababababab"]
+path.write_text("\n".join(rows) + "\n")
+PY_QUARANTINE
+printf 'PASS  conflicting identities invalidate recall; known-invalid governance remains individually rejected\n'
+
 APPROVED=$(record --approve "$PENDING_ID")
 APPROVED_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$APPROVED")
 python3 -c '

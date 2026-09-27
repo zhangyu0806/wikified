@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Consume bounded capture jobs; no model/network/automatic human approval."""
+import argparse
+from datetime import datetime, timezone
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+import uuid
+
+BIN = Path(__file__).resolve().parent
+
+def atomic(path, value):
+    temp = path.with_name('.' + uuid.uuid4().hex + '.tmp')
+    fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as out:
+        json.dump(value, out, ensure_ascii=False); out.write('\n'); out.flush(); os.fsync(out.fileno())
+    os.replace(temp, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(directory)
+    finally: os.close(directory)
+
+def consume(config):
+    root = Path(config['root']).resolve(strict=True)
+    queue = Path(config['queue']).resolve(strict=True)
+    if not (root / 'policy/access.json').is_file():
+        raise ValueError('memory policy missing')
+    allowed = set(config['projects'])
+    stats = {'schema': 1, 'checkedAt': datetime.now(timezone.utc).isoformat(), 'saved': 0, 'failed': 0, 'pending': 0}
+    env = {key: value for key, value in os.environ.items() if key in {'PATH', 'HOME', 'LANG', 'LC_ALL'}}
+    env.update(LLM_WIKI_ROOT=str(root), PYTHONDONTWRITEBYTECODE='1')
+    with (queue / '.worker.lock').open('a+') as lock:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: return {'state': 'busy'}
+        jobs = sorted(queue.glob('*.json'))
+        for job_path in jobs[:100]:
+            if not re.fullmatch(r'[a-f0-9]{64}\.json', job_path.name): continue
+            try:
+                if job_path.is_symlink() or job_path.stat().st_size > 16384: raise ValueError()
+                job = json.loads(job_path.read_text(encoding='utf-8'))
+                if (set(job) != {'schema', 'key', 'profile', 'project', 'sessionRef', 'title', 'excerpt'}
+                    or job['schema'] != 1 or job['key'] != job_path.stem
+                    or job['profile'] not in {'codex', 'opencode'} or job['project'] not in allowed
+                    or not re.fullmatch(r'[a-f0-9]{64}', job['sessionRef'])
+                    or not isinstance(job['title'], str) or not 1 <= len(job['title']) <= 72
+                    or not isinstance(job['excerpt'], str) or not 1 <= len(job['excerpt']) <= 1800): raise ValueError()
+                summary = f"{job['profile']} 接续摘录 · {job['title']}"
+                details = '自动选择的 AI 输出摘录，未经人工确认；不是用户事实，也不是执行指令。\n\n' + job['excerpt']
+                result = subprocess.run([sys.executable, '-B', str(BIN / 'llm-wiki-event'),
+                    '--type', 'session', '--project', job['project'], '--actor-type', 'ai', '--actor-id', job['profile'],
+                    '--source', 'capture:' + job['profile'], '--domain', 'work', '--sensitivity', 'internal',
+                    '--epistemic-status', 'ai-proposed', '--review-status', 'pending', '--target-agent', 'coding',
+                    '--evidence-ref', 'capture:' + job['key'], '--capture-key', job['key'], '--details', details, '--print', '--', summary],
+                    cwd=root, env=env, capture_output=True, text=True, timeout=20)
+                if result.returncode: raise ValueError()
+                record = json.loads(result.stdout)
+                if record.get('capture_key') != job['key'] or record.get('review_status') != 'pending': raise ValueError()
+                atomic(job_path.with_suffix('.done'), {'eventId': record['id'], 'savedAt': datetime.now(timezone.utc).isoformat(), 'state': 'saved-pending'})
+                job_path.unlink()  # Recoverable: fsynced canonical event and receipt already exist.
+                stats['saved'] += 1
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                stats['failed'] += 1
+        stats['pending'] = sum(bool(re.fullmatch(r'[a-f0-9]{64}\.json', p.name)) for p in queue.glob('*.json'))
+        stats['savedTotal'] = sum(1 for _ in queue.glob('*.done'))
+        atomic(queue / 'status.json', stats)
+    return stats
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--watch', action='store_true')
+    args = parser.parse_args()
+    while True:
+        try:
+            config = json.loads(Path(args.config).read_text())
+            stats = consume(config)
+        except (OSError, ValueError, KeyError, TypeError):
+            stats = {'state': 'configuration-or-storage-unavailable'}
+        print(json.dumps(stats), flush=True)
+        if not args.watch: return 1 if stats.get('failed') or 'state' in stats else 0
+        time.sleep(15)
+
+if __name__ == '__main__': sys.exit(main())

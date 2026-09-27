@@ -122,7 +122,11 @@ EOF_OPENCODE_STUB
 
 # A. Fresh install: links only, no optional harness config, and absent is not failure.
 A="$WORK/absent"; AH="$A/home"; AB="$A/managed bin"; mkdir -p "$AH"
+module_permissions_before=$(stat -c '%a' "$REPO/bin/llm_wiki_source_freshness.py" "$REPO/bin/llm_wiki_source_review.py")
 install_env "$AH" "$AB" "$A/state" "$A/cache" "$A/skills" "$REPO/install.sh" > "$A/install.out"
+module_permissions_after=$(stat -c '%a' "$REPO/bin/llm_wiki_source_freshness.py" "$REPO/bin/llm_wiki_source_review.py")
+[[ "$module_permissions_before" == "$module_permissions_after" ]] || fail 'install changed import-only module permissions'
+pass 'install preserves import-only Python module permissions'
 [[ ! -e "$AH/.claude/settings.json" && ! -e "$AH/.grok/config.toml" && ! -e "$AH/.config/opencode/opencode.json" ]] \
   || fail 'normal install wrote optional harness configuration'
 [[ -L "$AH/.config/opencode/plugins/llm-wiki-recall.js" ]] || fail 'normal install missed official OpenCode plugin link'

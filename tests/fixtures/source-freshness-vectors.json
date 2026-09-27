@@ -1,0 +1,472 @@
+{
+  "schemaVersion": 1,
+  "revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "alternateRevision": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "description": "Synthetic public vectors. Nodes/ref revision defaults are fixture conveniences expanded by both test suites, not storage schema. Core receives full SHA revisions.",
+  "cases": [
+    {
+      "name": "empty-is-not-source-free",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": []
+        }
+      ],
+      "state": "unassessed",
+      "reuseAllowed": true
+    },
+    {
+      "name": "missing-sources-is-legacy",
+      "nodes": [
+        {
+          "id": "root"
+        }
+      ],
+      "state": "unassessed",
+      "reuseAllowed": true
+    },
+    {
+      "name": "legacy-untyped-reference",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "missing"
+            }
+          ]
+        }
+      ],
+      "state": "unassessed",
+      "reuseAllowed": true
+    },
+    {
+      "name": "current-leaf",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "leaf",
+              "relation": "current-derived",
+              "useDefaultRevision": true
+            }
+          ]
+        },
+        {
+          "id": "leaf",
+          "sources": []
+        }
+      ],
+      "state": "current",
+      "reuseAllowed": true
+    },
+    {
+      "name": "renamed-locator-is-advisory",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "leaf",
+              "relation": "current-derived",
+              "useDefaultRevision": true,
+              "locator": "notes/old-name.md"
+            }
+          ]
+        },
+        {
+          "id": "leaf",
+          "sources": [],
+          "path": "wiki/new-name.md"
+        }
+      ],
+      "state": "current",
+      "reuseAllowed": true
+    },
+    {
+      "name": "missing-current-source",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "missing",
+              "relation": "current-derived",
+              "useDefaultRevision": true
+            }
+          ]
+        }
+      ],
+      "state": "unavailable",
+      "reuseAllowed": false
+    },
+    {
+      "name": "changed-current-source",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "leaf",
+              "relation": "current-derived",
+              "useDefaultRevision": true
+            }
+          ]
+        },
+        {
+          "id": "leaf",
+          "useAlternateRevision": true,
+          "sources": []
+        }
+      ],
+      "state": "stale",
+      "reuseAllowed": false
+    },
+    {
+      "name": "historical-missing-no-revocation",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "missing",
+              "relation": "historical-citation",
+              "useDefaultRevision": true
+            }
+          ]
+        }
+      ],
+      "state": "unassessed",
+      "reuseAllowed": true
+    },
+    {
+      "name": "independent-missing-no-revocation",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "missing",
+              "relation": "independent-judgment",
+              "useDefaultRevision": true
+            }
+          ]
+        }
+      ],
+      "state": "unassessed",
+      "reuseAllowed": true
+    },
+    {
+      "name": "mixed-legacy-not-fully-assessed",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "leaf",
+              "relation": "current-derived",
+              "useDefaultRevision": true
+            },
+            {
+              "kind": "task",
+              "id": "untyped"
+            }
+          ]
+        },
+        {
+          "id": "leaf",
+          "sources": []
+        }
+      ],
+      "state": "unassessed",
+      "reuseAllowed": true
+    },
+    {
+      "name": "unsupported-current-kind",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "external",
+              "id": "leaf",
+              "relation": "current-derived",
+              "useDefaultRevision": true
+            }
+          ]
+        },
+        {
+          "id": "leaf"
+        }
+      ],
+      "state": "unavailable",
+      "reuseAllowed": false
+    },
+    {
+      "name": "current-missing-version",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "leaf",
+              "relation": "current-derived"
+            }
+          ]
+        },
+        {
+          "id": "leaf"
+        }
+      ],
+      "state": "unavailable",
+      "reuseAllowed": false
+    },
+    {
+      "name": "unknown-relation",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "leaf",
+              "relation": "self-report"
+            }
+          ]
+        }
+      ],
+      "state": "unavailable",
+      "reuseAllowed": false
+    },
+    {
+      "name": "locator-traversal",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "leaf",
+              "relation": "current-derived",
+              "useDefaultRevision": true,
+              "locator": "notes/../private.md"
+            }
+          ]
+        },
+        {
+          "id": "leaf"
+        }
+      ],
+      "state": "unavailable",
+      "reuseAllowed": false
+    },
+    {
+      "name": "locator-unicode",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "leaf",
+              "relation": "current-derived",
+              "useDefaultRevision": true,
+              "locator": "notes/记录😀.md"
+            }
+          ]
+        },
+        {
+          "id": "leaf"
+        }
+      ],
+      "state": "current",
+      "reuseAllowed": true
+    },
+    {
+      "name": "locator-lone-surrogate",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            {
+              "kind": "document",
+              "id": "leaf",
+              "relation": "current-derived",
+              "useDefaultRevision": true,
+              "locator": "notes/\ud800.md"
+            }
+          ]
+        },
+        {
+          "id": "leaf"
+        }
+      ],
+      "state": "unavailable",
+      "reuseAllowed": false
+    },
+    {
+      "name": "duplicate-identities",
+      "nodes": [
+        {
+          "id": "root"
+        },
+        {
+          "id": "root"
+        }
+      ],
+      "state": "unavailable",
+      "reuseAllowed": false
+    },
+    {
+      "name": "opaque-block-sources",
+      "nodes": [
+        {
+          "id": "root",
+          "opaqueSources": true
+        }
+      ],
+      "state": "incomplete",
+      "reuseAllowed": false
+    },
+    {
+      "name": "malformed-source-array",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": {
+            "kind": "document",
+            "id": "leaf"
+          }
+        }
+      ],
+      "state": "unavailable",
+      "reuseAllowed": false
+    },
+    {
+      "name": "malformed-array-member",
+      "nodes": [
+        {
+          "id": "root",
+          "sources": [
+            null
+          ]
+        }
+      ],
+      "state": "unavailable",
+      "reuseAllowed": false
+    },
+    {
+      "name": "self-cycle",
+      "generate": {
+        "shape": "chain",
+        "count": 1,
+        "cycle": true
+      },
+      "state": "incomplete",
+      "reuseAllowed": false
+    },
+    {
+      "name": "chain",
+      "generate": {
+        "shape": "chain",
+        "count": 6
+      },
+      "state": "current",
+      "reuseAllowed": true
+    },
+    {
+      "name": "recursive-stale",
+      "generate": {
+        "shape": "chain",
+        "count": 6,
+        "changedLeaf": true
+      },
+      "state": "stale",
+      "reuseAllowed": false
+    },
+    {
+      "name": "recursive-missing",
+      "generate": {
+        "shape": "chain",
+        "count": 6,
+        "missingLeaf": true
+      },
+      "state": "unavailable",
+      "reuseAllowed": false
+    },
+    {
+      "name": "cycle",
+      "generate": {
+        "shape": "chain",
+        "count": 6,
+        "cycle": true
+      },
+      "state": "incomplete",
+      "reuseAllowed": false
+    },
+    {
+      "name": "depth-32-is-supported",
+      "generate": {
+        "shape": "chain",
+        "count": 33
+      },
+      "state": "current",
+      "reuseAllowed": true
+    },
+    {
+      "name": "depth-33-is-incomplete",
+      "generate": {
+        "shape": "chain",
+        "count": 34
+      },
+      "state": "incomplete",
+      "reuseAllowed": false
+    },
+    {
+      "name": "256-nodes-are-supported",
+      "generate": {
+        "shape": "star",
+        "count": 256
+      },
+      "state": "current",
+      "reuseAllowed": true
+    },
+    {
+      "name": "257-visited-nodes-incomplete",
+      "generate": {
+        "shape": "star",
+        "count": 257
+      },
+      "state": "incomplete",
+      "reuseAllowed": false
+    },
+    {
+      "name": "257-references-incomplete",
+      "generate": {
+        "shape": "star",
+        "count": 258
+      },
+      "state": "incomplete",
+      "reuseAllowed": false
+    },
+    {
+      "name": "snapshot-cap",
+      "generate": {
+        "shape": "isolated",
+        "count": 10001
+      },
+      "state": "incomplete",
+      "reuseAllowed": false
+    }
+  ]
+}
