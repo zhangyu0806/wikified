@@ -280,6 +280,7 @@ cd ~/wikified-cockpit
 | `llm-wiki-init` | 创建私有记忆库 |
 | `llm-wiki-harness` | 五端检测、状态矩阵与显式安全配置 |
 | `llm-wiki-session-start` | 统一的 critical-only、脱敏、2500 字符 hook 适配器 |
+| `llm-wiki-context` | [Reviewed, version-pinned topic context](docs/CONTINUING_CONTEXT.md); no new grants |
 | `llm-wiki-mcp` | 零 npm 依赖 MCP server |
 | `llm-wiki-remote-sync` | 带节流的多机双向 Git 同步 |
 | `llm-wiki-obsidian-sync` | 生成可读 Obsidian 镜像 |

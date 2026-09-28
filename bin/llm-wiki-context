@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Prepare bounded, version-pinned context from existing assistant authority only."""
+import argparse
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import sys
+
+sys.dont_write_bytecode = True
+ENGINE = runpy.run_path(str(Path(__file__).with_name("llm-wiki-enrich")), run_name="context_engine")
+MAX_SELECTIONS = 20
+MAX_TEXT = 40000
+MAX_ITEM_TEXT = 12000
+REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
+PROFILES = ("coding", "codex", "opencode", "claude", "cursor", "grok", "planning", "reflection")
+
+
+def request(value):
+    if not isinstance(value, dict) or set(value) != {"schemaVersion", "selections"} or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1:
+        raise ValueError("invalid context request")
+    rows = value["selections"]
+    if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_SELECTIONS:
+        raise ValueError("invalid context selection")
+    seen = set()
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != {"kind", "memoryId", "revision"}
+                or row["kind"] not in ("page", "event")
+                or not isinstance(row["memoryId"], str) or not ENGINE["MEMORY_ID_RE"].fullmatch(row["memoryId"])
+                or ENGINE["redact"](row["memoryId"]) != row["memoryId"]
+                or not isinstance(row["revision"], str) or not REVISION.fullmatch(row["revision"])
+                or row["memoryId"] in seen):
+            raise ValueError("invalid context selection")
+        seen.add(row["memoryId"])
+    return rows
+
+
+def prepare(root, profile, value):
+    selections = request(value)
+    if profile not in PROFILES:
+        raise ValueError("assistant profile required")
+    root = root.absolute()
+    if root.resolve(strict=True) != root:
+        raise ValueError("unsafe root")
+    access = ENGINE["access_context"](root, profile)
+    # The engine performs complete discovery, duplicate detection, authorization,
+    # review bindings and source freshness before returning any page body.
+    pages = ENGINE["page_snapshots"](root, access, None)
+    before_events = ENGINE["_event_manifest"](root / "memory/events")
+    with contextlib.redirect_stderr(io.StringIO()):
+        events = ENGINE["load_events"](root, access)
+    available = {}
+    def add(identity, entry):
+        if identity in available:
+            raise ValueError("ambiguous current identity")
+        available[identity] = entry
+    for entry, snapshot in pages:
+        if snapshot.metadata.governance["review_status"] != "approved":
+            continue
+        # Topics only persist explicit identities, so renames do not change
+        # their meaning. Path-derived legacy identities are not silently adopted.
+        identity = snapshot.metadata.frontmatter.get("memory_id")
+        if not isinstance(identity, str):
+            continue
+        add(identity, ("page", ENGINE["page_revision"](snapshot), entry.relative,
+                       ENGINE["redact"](ENGINE["projected_page_text"](snapshot))))
+    for event in events:
+        if event["__governance"]["review_status"] != "approved":
+            continue
+        identity = event.get("record_id", event.get("memory_id", event.get("__memory_id")))
+        if not isinstance(identity, str) or not ENGINE["MEMORY_ID_RE"].fullmatch(identity):
+            raise ValueError("invalid identity")
+        event_id = event.get("id")
+        if not isinstance(event_id, str) or not re.fullmatch(r"[0-9a-f]{16}", event_id):
+            continue
+        add(identity, ("event", ENGINE["EVENT_REVIEW"]["record_revision"](event), event_id,
+                       ENGINE["redact"](str(event.get("summary", "")) + "\n" + str(event.get("details", "")))))
+    items, used = [], 0
+    for selection in selections:
+        item = {"selection": dict(selection), "status": "unavailable"}
+        current = available.get(selection["memoryId"])
+        if current is not None and current[0] == selection["kind"]:
+            kind, revision, locator, text = current
+            if ENGINE["redact"](locator) != locator:
+                raise ValueError("unsafe metadata")
+            if revision != selection["revision"]:
+                # Only already-authorized records can reveal a newer revision.
+                item = {**item, "status": "changed", "currentRevision": revision}
+            elif len(text) > MAX_ITEM_TEXT or used + len(text) > MAX_TEXT:
+                item = {**item, "status": "too-large"}
+            else:
+                item = {**item, "status": "ready", "locator": locator, "text": text}
+                used += len(text)
+        items.append(item)
+    # Fence the entire result, not just each individual read. Never return a
+    # partial pack after a policy, file, source-review or event generation race.
+    if before_events != ENGINE["_event_manifest"](root / "memory/events"):
+        raise ValueError("events changed")
+    pages.verify()
+    return {"schemaVersion": 1, "profile": profile, "items": items}
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError("invalid arguments")
+
+
+def main():
+    parser = Parser(allow_abbrev=False)
+    parser.add_argument("--root", default=os.environ.get("LLM_WIKI_ROOT", str(Path.home() / "llm-wiki")))
+    parser.add_argument("--agent-profile", required=True, choices=PROFILES)
+    parser.add_argument("--request", required=True)
+    for flag in ("--root", "--agent-profile", "--request"):
+        if sum(arg == flag or arg.startswith(flag + "=") for arg in sys.argv[1:]) > 1:
+            raise ValueError("duplicate argument")
+    args = parser.parse_args()
+    if len(args.request.encode("utf-8")) > 16384:
+        raise ValueError("request too large")
+    value = json.loads(args.request, object_pairs_hook=ENGINE["_event_json_object"],
+                       parse_constant=ENGINE["_event_json_constant"])
+    result = prepare(Path(args.root), args.agent_profile, value)
+    print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (Exception, RecursionError):
+        print("context unavailable; refresh the selection and retry", file=sys.stderr)
+        sys.exit(1)
