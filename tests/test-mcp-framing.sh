@@ -128,10 +128,11 @@ check_framing() {
 
   local n
   n=$(grep '"id":2' <<<"$res" | grep -o '"name":' | wc -l | tr -d ' ')
-  if [[ "$n" == "6" ]]; then
-    ok "$label: tools/list 返回 6 个工具"
+  if [[ "$n" == "7" ]]; then
+    ok "$label: tools/list 返回 7 个工具"
+    if grep '"id":2' <<<"$res" | grep -q '"name":"prepare_context"'; then ok "$label: 公开继续议题工具"; else bad "$label: 缺少 prepare_context"; fi
   else
-    bad "$label: tools/list 工具数为 $n，期望 6"
+    bad "$label: tools/list 工具数为 $n，期望 7"
   fi
 
   if grep '"id":3' <<<"$res" | grep -q 'STUB-OK'; then
