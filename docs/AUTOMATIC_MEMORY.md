@@ -21,7 +21,9 @@ Run `node /absolute/path/llm-wiki-capture-hook.mjs /absolute/path/capture.json` 
 }
 ```
 
-Use `Stop` as the normal trigger, with `PreCompact`, `Interrupt` and `SessionEnd` as bounded fallback. SessionEnd/Interrupt have a maximum three-second execution window; enqueue natively and do not launch WSL, Git, a model or a network request there. The script returns success JSON without blocking/restarting the assistant. Fallback reads only a bounded transcript tail within configured roots and selects one final assistant output; no full transcript is persisted. Unknown transcript formats fail closed. Messages shorter than 80 characters are skipped. Identical selected output within one session/project deduplicates.
+Use `Stop` as the normal trigger, with `PreCompact`, `Interrupt` and `SessionEnd` as bounded fallback. SessionEnd/Interrupt have a maximum three-second execution window; enqueue natively and do not launch WSL, Git, a model or a network request there. The script returns success JSON without blocking/restarting the assistant. If `Stop` has no directly supplied assistant text, it may use the same bounded fallback when a current `turn_id` is present. Fallback checks the transcript root and session identity, reads at most a 64 KiB header plus a 2 MiB tail, and selects a final output from the expected turn. It supports `final` and `final_answer`, text content blocks, completed AgentMessage items and task completion messages. Commentary, mismatched sessions/threads/turns and unknown formats are skipped. A short direct reply does not cause an older reply to be reused. No full transcript is persisted. Messages shorter than 80 characters are skipped. Identical selected output within one session/project deduplicates.
+
+Each hook invocation also updates private `queue/hook-status.json` with a fixed outcome, event, timestamp and optional opaque session/job hashes and selection-source enum. It never stores a path, title, message or raw exception. Compare this hook timestamp with `queue/status.json` from the worker: a fresh worker timestamp proves polling, not that Codex has invoked the hook. A manual script invocation or synthetic test does not prove that the live client has loaded and trusted the hook. New or changed definitions still require the normal Codex hook review.
 
 The OpenCode integration may explicitly call the same enqueue format, but installing a Codex hook **does not install an OpenCode event plugin**. Until such an integration is enabled, OpenCode can explicitly store proposals through `record_event` on the shared MCP server.
 
@@ -59,3 +61,7 @@ Back up the vault and existing client/service configurations before activation. 
 Missing legacy event authors are displayed as unknown by the human catalog without modifying JSONL. Explicit invalid authors still fail closed. Pending records are saved but not available to AI recall; legacy approved events remain subject to the existing governance policy and are not retroactively called human-verified.
 
 This is a local single-user capability boundary, not multi-tenant authentication, cloud storage, encryption, a subscription backend or four-platform acceptance. Raw handoff excerpts are deliberately conservative; semantic distillation and user-authored note capture are separate reviewed workflows.
+
+## Existing Codex native memories
+
+The lifecycle hook selects recent assistant handoffs. The separate [native memory importer](CODEX_MEMORY_IMPORT.md) can bring existing host-local generated summaries and durable memory files into the same pending-review event pipeline. Each path has its own provenance and idempotency identity; neither path approves or promotes the other.

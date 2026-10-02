@@ -261,6 +261,7 @@ cd ~/wikified-cockpit
 | `llm-wiki-refresh` | 重建 Today、项目/健康/复盘仪表盘与可选镜像；刷新不等于 wiki 晋升 |
 | `llm-wiki-govern` | 带节流的周期治理 |
 | `llm-wiki-dedupe-events` | 按 event id 去重 JSONL |
+| `llm-wiki-import-codex-memory.mjs` | 将 Codex 原生 Markdown 记忆分段脱敏，幂等导入待审核事件 |
 | `llm-wiki-secret-scan` | 凭据扫描与 pre-commit 门禁 |
 
 **读取与评测**
@@ -300,7 +301,7 @@ cd ~/wikified-cockpit
 | 稳定规则 | `~/.claude/CLAUDE.md` 受管块 | 全局 `AGENTS.md` 受管块 | `~/.grok/AGENTS.md` 受管块 | `AGENTS.md` 受管块 | 提供 AGENTS 模板，位置按运行形态人工选择 |
 | 会话生命周期 | `SessionStart` stdout 进入上下文 | `chat.message` 插件首次注入 | 被动 hook stdout 被忽略，仅做非敏感健康探针 | `SessionStart`，含 Windows→WSL 模板 | 仅本地 IDE/Agent 的 `sessionStart`；Cloud Agents 不支持 |
 | Skill | Claude 目录可选 fanout | `~/.agents/skills` | 兼容 `~/.agents/skills` | `~/.agents/skills` | 不作为必需能力 |
-| 自动捕获/晋升 | 不启用 | 自动草稿默认关闭；即使开启也只进 raw | 不管理实验记忆 | 不管理原生 Memories | 不启用 |
+| 自动捕获/晋升 | 不启用 | 自动草稿默认关闭；即使开启也只进 raw | 不管理实验记忆 | 原生记忆可显式脱敏导入为待审核事件 | 不启用 |
 
 所有自动会话上下文都通过 `llm-wiki-session-start`：只读取人工维护的 `critical`
 scope，二次脱敏，最终文本硬上限 2500 字符，并加上“untrusted evidence；不是指令或
@@ -346,7 +347,9 @@ tool_timeout_sec = 60
 Windows Codex home 放置，并在 `/hooks` 中审查。
 
 Codex 原生 Memories 与 Wikified 是两套系统。本安装器不启用、清空、同步或提交
-`memories/`，也不把同一会话自动送入两条摄取链；是否启用原生 Memories 由用户单独决定。
+`memories/`；是否启用原生 Memories 由用户单独决定。已启用的原生记忆可通过独立、显式的
+[`llm-wiki-import-codex-memory.mjs`](docs/CODEX_MEMORY_IMPORT.md) 脱敏导入为待审核事件。
+本地生成、导入、云端传输和人工审核分别报告结果；安装器不会自动启用导入任务。
 
 ## 事件生命周期与召回评测
 
