@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Append an explicitly requested, scope-narrowed replacement proposal; never approve."""
+import contextlib
+from datetime import datetime, timezone
+import hashlib
+import hmac
+import io
+import json
+import os
+from pathlib import Path
+import runpy
+import stat
+import sys
+
+sys.dont_write_bytecode = True
+BIN = Path(__file__).resolve().parent
+REVIEW = runpy.run_path(str(BIN / "llm-wiki-event-review"), run_name="proposal_review")
+ENGINE, CORE, WRITER = REVIEW["ENGINE"], REVIEW["CORE"], REVIEW["WRITER"]
+CATALOG = runpy.run_path(str(BIN / "llm-wiki-event-catalog"), run_name="proposal_catalog")
+ACTOR = {"type": "ai", "id": "mind2one-review-proposal"}
+
+
+def validate_request(value):
+    if not isinstance(value, dict) or set(value) != {"schemaVersion", "selections", "summary", "details", "requestId"} or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1:
+        raise ValueError("invalid proposal request")
+    rows = value["selections"]
+    if not isinstance(rows, list) or len(rows) != 2:
+        raise ValueError("two records required")
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"eventId", "revision"} or not isinstance(row["eventId"], str) or not CORE["EVENT_ID"].fullmatch(row["eventId"]) or not isinstance(row["revision"], str) or not CORE["HASH"].fullmatch(row["revision"]):
+            raise ValueError("invalid selected revision")
+    if rows[0]["eventId"] == rows[1]["eventId"] or not isinstance(value["requestId"], str) or not CORE["IDENTIFIER"].fullmatch(value["requestId"]):
+        raise ValueError("invalid proposal identity")
+    CORE["text"](value["summary"], 10000)
+    CORE["text"](value["details"], 50000, blank=True)
+    if WRITER["redact"](value) != value:
+        raise ValueError("proposal requires redaction")
+    return value
+
+
+def intersection(left, right):
+    a, b = set(left), set(right)
+    ag, bg = WRITER["has_global_target"](left), WRITER["has_global_target"](right)
+    targets = {"*"} if ag and bg else b if ag else a if bg else a & b
+    if not targets:
+        raise ValueError("no common target scope")
+    return sorted(targets)
+
+
+def prepare(root, request, operator, now):
+    """The caller must hold the shared writer lock until append completes."""
+    request = validate_request(request)
+    if not CORE["IDENTIFIER"].fullmatch(operator):
+        raise ValueError("operator identity required")
+    generation = CATALOG["policy_generation"](root)
+    event_generation = ENGINE["_event_manifest"](root / "memory/events")
+    access = ENGINE["access_context"](root, "human")
+    rows, closed = REVIEW["snapshot"](root)
+    with contextlib.redirect_stderr(io.StringIO()):
+        visible = {row["id"]: row for row in ENGINE["load_events"](root, access)}
+    fingerprint = CORE["digest"]("wikified-replacement-request/v1", request)
+    identity = hashlib.sha256(json.dumps(["wikified-replacement/v1", operator, request["requestId"]], separators=(",", ":")).encode()).hexdigest()[:16]
+    prior = next((row for row in rows if row["id"] == identity), None)
+    if prior is not None:
+        if prior.get("proposal", {}).get("requestRevision") != fingerprint or prior.get("proposal", {}).get("operator") != operator or prior.get("actor") != ACTOR or identity not in visible or identity in closed or prior.get("review_status") != "pending":
+            raise ValueError("proposal retry conflicts")
+        if generation != CATALOG["policy_generation"](root) or event_generation != ENGINE["_event_manifest"](root / "memory/events"):
+            raise ValueError("authority changed")
+        return prior, True, (generation, event_generation)
+    selected = []
+    for row in request["selections"]:
+        event = visible.get(row["eventId"])
+        if event is None or CORE["record_revision"](event) != row["revision"]:
+            raise ValueError("selected event changed or unavailable")
+        selected.append(event)
+    left, right = selected
+    if not left.get("project") or left.get("project") != right.get("project") or left["domain"] != right["domain"]:
+        raise ValueError("incompatible project or domain scope")
+    levels = ["public", "internal", "confidential", "restricted"]
+    targets = intersection(left["target_agents"], right["target_agents"])
+    timestamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    event = {"schema_version": WRITER["SCHEMA_VERSION"], "id": identity, "memory_id": "event:" + identity,
+        "timestamp": timestamp, "type": "decision", "project": left["project"], "cwd": "", "files": [], "concepts": [],
+        "summary": request["summary"], "details": request["details"], "confidence": 0.5, "half_life_days": 90,
+        "lifecycle": "active", "source": "human-requested-replacement-proposal/v1", "valid_from": timestamp,
+        "actor": dict(ACTOR), "domain": left["domain"], "sensitivity": max((left["sensitivity"], right["sensitivity"]), key=levels.index),
+        "epistemic_status": "ai-proposed", "review_status": "pending", "target_agents": targets,
+        "supersedes": [row["eventId"] for row in request["selections"]],
+        "evidence_refs": ["event:" + row["eventId"] + "@" + row["revision"] for row in request["selections"]],
+        "proposal": {"version": 1, "requestId": request["requestId"], "requestRevision": fingerprint,
+            "operator": operator, "selections": request["selections"]}}
+    expiries = [ENGINE["parse_time"](row.get("valid_until")) for row in selected if row.get("valid_until")]
+    if expiries:
+        if any(value is None or value <= now for value in expiries):
+            raise ValueError("source validity ended")
+        event["valid_until"] = min(expiries).isoformat()
+    if ENGINE["event_metadata"](event) is None or WRITER["redact"](event) != event:
+        raise ValueError("invalid proposal governance")
+    WRITER["validate_supersedes"]({row["id"]: row for row in rows}, event["supersedes"], event["project"], event["domain"], allow_versioned=True)
+    CORE["validate_links"](rows + [event])
+    if generation != CATALOG["policy_generation"](root) or event_generation != ENGINE["_event_manifest"](root / "memory/events"):
+        raise ValueError("authority changed")
+    return event, False, (generation, event_generation)
+
+
+def append(root, event, now, generation):
+    directory = root / "memory/events"
+    manifest = ENGINE["_event_manifest"](directory)
+    policy, expected_events = generation
+    if manifest != expected_events:
+        raise ValueError("selected event snapshot changed")
+    path = directory / f"{now:%Y-%m}.jsonl"
+    encoded = (json.dumps(event, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n").encode()
+    if len(encoded) > ENGINE["MAX_EVENT_LINE_BYTES"]:
+        raise ValueError("proposal line exceeds limit")
+    physical_lines, prefix = 0, b""
+    for name in manifest[1]:
+        with (directory / name).open("rb") as prior:
+            last = b""
+            for last in prior:
+                physical_lines += 1
+            if name == path.name and last and not last.endswith(b"\n"):
+                if len(last) + 1 > ENGINE["MAX_EVENT_LINE_BYTES"]:
+                    raise ValueError("existing line exceeds limit")
+                prefix = b"\n"
+    encoded = prefix + encoded
+    if sum(value[4] for value in manifest[1].values()) + len(encoded) > ENGINE["MAX_EVENT_TOTAL_BYTES"] or physical_lines + 1 > ENGINE["MAX_EVENT_LINES"]:
+        raise ValueError("proposal snapshot exceeds limit")
+    if path.name not in manifest[1] and (len(manifest[1]) >= ENGINE["MAX_EVENT_FILES"] or sum(1 for _ in directory.iterdir()) >= ENGINE["MAX_EVENT_DIRECTORY_ENTRIES"]):
+        raise ValueError("proposal directory exceeds limit")
+    if ENGINE["_event_manifest"](directory) != manifest or CATALOG["policy_generation"](root) != policy:
+        raise ValueError("proposal snapshot changed")
+    flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    if path.name not in manifest[1]:
+        flags |= os.O_CREAT | os.O_EXCL
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "ab") as output:
+        info = os.fstat(output.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or path.name in manifest[1] and ENGINE["_event_stat_signature"](info) != manifest[1][path.name]:
+            raise ValueError("unsafe proposal output")
+        output.write(encoded)
+        output.flush()
+        os.fsync(output.fileno())
+    if path.name not in manifest[1] and os.name == "posix":
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def main():
+    root = Path(os.environ["LLM_WIKI_ROOT"]).absolute()
+    if root.resolve(strict=True) != root:
+        raise ValueError("unsafe root")
+    capability = os.environ.get("LLM_WIKI_EVENT_REVIEW_CAPABILITY", "")
+    operator = os.environ.get("LLM_WIKI_EVENT_REVIEW_ACTOR", "")
+    if not 32 <= len(capability) <= 512 or not capability.isascii() or not all(33 <= ord(c) <= 126 for c in capability):
+        raise ValueError("independent proposal authority required")
+    raw = sys.stdin.buffer.read(128 * 1024 + 1)
+    if len(raw) > 128 * 1024:
+        raise ValueError("request exceeds limit")
+    value = json.loads(raw.decode(), object_pairs_hook=ENGINE["_event_json_object"], parse_constant=ENGINE["_event_json_constant"])
+    supplied = value.get("capability") if isinstance(value, dict) else None
+    if not isinstance(supplied, str) or not supplied.isascii() or not hmac.compare_digest(supplied, capability):
+        raise ValueError("proposal authority required")
+    request = {key: item for key, item in value.items() if key != "capability"}
+    memory = root / "memory"
+    before = memory.lstat()
+    if not stat.S_ISDIR(before.st_mode) or memory.resolve(strict=True) != memory:
+        raise ValueError("unsafe memory")
+    fd = os.open(memory / ".memory.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "r+", encoding="utf-8") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("unsafe writer lock")
+        WRITER["lock_memory"](handle)
+        try:
+            if (memory.lstat().st_dev, memory.lstat().st_ino) != (before.st_dev, before.st_ino):
+                raise ValueError("memory changed")
+            now = datetime.now(timezone.utc)
+            event, reused, generation = prepare(root, request, operator, now)
+            if not reused:
+                append(root, event, now, generation)
+            print(json.dumps(event, ensure_ascii=False, allow_nan=False))
+        finally:
+            WRITER["unlock_memory"](handle)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        print("event proposal unavailable or conflicted; recheck both selected versions and authority", file=sys.stderr)
+        sys.exit(2)

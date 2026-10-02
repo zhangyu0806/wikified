@@ -38,8 +38,7 @@ def request(value):
     return rows
 
 
-def prepare(root, profile, value):
-    selections = request(value)
+def catalog(root, profile):
     if profile not in PROFILES:
         raise ValueError("assistant profile required")
     root = root.absolute()
@@ -54,7 +53,7 @@ def prepare(root, profile, value):
         events = ENGINE["load_events"](root, access)
     available = {}
     def add(identity, entry):
-        if identity in available:
+        if not isinstance(identity, str) or not ENGINE["MEMORY_ID_RE"].fullmatch(identity) or ENGINE["redact"](identity) != identity or identity in available:
             raise ValueError("ambiguous current identity")
         available[identity] = entry
     for entry, snapshot in pages:
@@ -78,18 +77,39 @@ def prepare(root, profile, value):
             continue
         add(identity, ("event", ENGINE["EVENT_REVIEW"]["record_revision"](event), event_id,
                        ENGINE["redact"](str(event.get("summary", "")) + "\n" + str(event.get("details", "")))))
+    return root, access, pages, before_events, events, available
+
+
+def verify_catalog(snapshot):
+    root, _, pages, before_events, _, _ = snapshot
+    if before_events != ENGINE["_event_manifest"](root / "memory/events"):
+        raise ValueError("events changed")
+    pages.verify()
+
+
+def selected(selection, available):
+    current = available.get(selection["memoryId"])
+    item = {"selection": dict(selection), "status": "unavailable"}
+    if current is None or current[0] != selection["kind"]:
+        return item, None
+    _, revision, locator, _ = current
+    if ENGINE["redact"](locator) != locator:
+        raise ValueError("unsafe metadata")
+    if revision != selection["revision"]:
+        return {**item, "status": "changed", "currentRevision": revision}, None
+    return item, current
+
+
+def prepare(root, profile, value):
+    selections = request(value)
+    snapshot = catalog(root, profile)
+    available = snapshot[-1]
     items, used = [], 0
     for selection in selections:
-        item = {"selection": dict(selection), "status": "unavailable"}
-        current = available.get(selection["memoryId"])
-        if current is not None and current[0] == selection["kind"]:
+        item, current = selected(selection, available)
+        if current is not None:
             kind, revision, locator, text = current
-            if ENGINE["redact"](locator) != locator:
-                raise ValueError("unsafe metadata")
-            if revision != selection["revision"]:
-                # Only already-authorized records can reveal a newer revision.
-                item = {**item, "status": "changed", "currentRevision": revision}
-            elif len(text) > MAX_ITEM_TEXT or used + len(text) > MAX_TEXT:
+            if len(text) > MAX_ITEM_TEXT or used + len(text) > MAX_TEXT:
                 item = {**item, "status": "too-large"}
             else:
                 item = {**item, "status": "ready", "locator": locator, "text": text}
@@ -97,10 +117,103 @@ def prepare(root, profile, value):
         items.append(item)
     # Fence the entire result, not just each individual read. Never return a
     # partial pack after a policy, file, source-review or event generation race.
-    if before_events != ENGINE["_event_manifest"](root / "memory/events"):
-        raise ValueError("events changed")
-    pages.verify()
+    verify_catalog(snapshot)
     return {"schemaVersion": 1, "profile": profile, "items": items}
+
+
+def body_text(text):
+    # An extract of already-authorized, fully redacted original text, never an
+    # AI summary or a separate approved fact. Hide frontmatter from this view.
+    if text.startswith("---\n") and "\n---\n" in text[4:]:
+        text = text.split("\n---\n", 1)[1]
+    return text.strip()
+
+
+def excerpt(text, maximum):
+    return body_text(text)[:maximum]
+
+
+def preview(root, profile, value):
+    selections = request(value)
+    snapshot = catalog(root, profile)
+    items = []
+    for selection in selections:
+        item, current = selected(selection, snapshot[-1])
+        if current is not None:
+            _, _, locator, text = current
+            item = {**item, "status": "ready", "locator": locator, "excerpt": excerpt(text, 600), "totalChars": len(text)}
+        items.append(item)
+    verify_catalog(snapshot)
+    return {"schemaVersion": 1, "profile": profile, "items": items}
+
+
+def search(root, profile, value):
+    if (not isinstance(value, dict) or not {"schemaVersion", "query"} <= set(value)
+            or set(value) - {"schemaVersion", "query", "project", "limit"}
+            or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1):
+        raise ValueError("invalid search request")
+    query, project, limit = value["query"], value.get("project"), value.get("limit", 6)
+    if (not isinstance(query, str) or not query.strip() or len(query) > 500 or "\0" in query
+            or ("project" in value and (not isinstance(project, str) or not project.strip() or len(project) > 160 or "\0" in project))
+            or type(limit) is not int or not 1 <= limit <= 10):
+        raise ValueError("invalid search request")
+    snapshot = catalog(root, profile)
+    root, access, _, _, events, available = snapshot
+    terms = ENGINE["token_terms"]([query])
+    groups = ENGINE["query_term_groups"]([query])
+    candidates = ENGINE["event_candidates"](events, set(terms), groups, [], project)
+    candidates.extend(ENGINE["wiki_candidates"](root, query, terms, groups, access, project))
+    # Re-resolve every hit against the same authorized, approved identity map.
+    # Path-derived legacy identities and graph-only hints cannot be selected.
+    aliases = {event.get("__memory_id"): event.get("record_id", event.get("memory_id", event.get("__memory_id"))) for event in events}
+    items, seen = [], set()
+    for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
+        identity = aliases.get(candidate.memory_id, candidate.memory_id) if candidate.source == "memory-event" else candidate.memory_id
+        current = available.get(identity)
+        if current is None or identity in seen:
+            continue
+        seen.add(identity)
+        kind, revision, locator, text = current
+        if ENGINE["redact"](locator) != locator:
+            raise ValueError("unsafe metadata")
+        items.append({"selection": {"kind": kind, "memoryId": identity, "revision": revision},
+                      "title": ENGINE["redact"](candidate.title)[:160],
+                      # Find the relevant passage only after full redaction;
+                      # an excerpt boundary must not split and expose a secret.
+                      "excerpt": ENGINE["extract_excerpt"](body_text(text), set(terms))[:400]})
+    verify_catalog(snapshot)
+    return {"schemaVersion": 1, "profile": profile, "items": items[:limit], "coverage": "limited" if len(items) > limit else "complete"}
+
+
+def read_evidence(root, profile, value):
+    if (not isinstance(value, dict) or not {"schemaVersion", "selection"} <= set(value)
+            or set(value) - {"schemaVersion", "selection", "offset", "length"}):
+        raise ValueError("invalid evidence request")
+    selection = request({"schemaVersion": value["schemaVersion"], "selections": [value["selection"]]})[0]
+    offset, length = value.get("offset", 0), value.get("length", 4000)
+    if type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= 8000:
+        raise ValueError("invalid evidence request")
+    snapshot = catalog(root, profile)
+    item, current = selected(selection, snapshot[-1])
+    if current is not None:
+        kind, revision, locator, text = current
+        if offset > len(text):
+            raise ValueError("invalid evidence offset")
+        if kind == "page":
+            raw = ENGINE["read_page"](snapshot[0], locator, snapshot[1], None, offset=offset, length=length, revision=revision)
+            if raw is None:
+                raise ValueError("evidence changed")
+            chunk = json.loads(raw)
+            if chunk["memory_id"] != selection["memoryId"] or chunk["revision"] != revision or chunk["totalChars"] != len(text):
+                raise ValueError("evidence changed")
+            content, end = chunk["text"], chunk["nextOffset"]
+        else:
+            content = text[offset:offset + length]
+            end = offset + len(content) if offset + len(content) < len(text) else None
+        item = {**item, "status": "ready", "locator": locator, "text": content,
+                "offset": offset, "nextOffset": end, "totalChars": len(text)}
+    verify_catalog(snapshot)
+    return {"schemaVersion": 1, "profile": profile, "item": item}
 
 
 class Parser(argparse.ArgumentParser):
@@ -113,7 +226,8 @@ def main():
     parser.add_argument("--root", default=os.environ.get("LLM_WIKI_ROOT", str(Path.home() / "llm-wiki")))
     parser.add_argument("--agent-profile", required=True, choices=PROFILES)
     parser.add_argument("--request", required=True)
-    for flag in ("--root", "--agent-profile", "--request"):
+    parser.add_argument("--operation", choices=("prepare", "search", "preview", "read"), default="prepare")
+    for flag in ("--root", "--agent-profile", "--request", "--operation"):
         if sum(arg == flag or arg.startswith(flag + "=") for arg in sys.argv[1:]) > 1:
             raise ValueError("duplicate argument")
     args = parser.parse_args()
@@ -121,7 +235,7 @@ def main():
         raise ValueError("request too large")
     value = json.loads(args.request, object_pairs_hook=ENGINE["_event_json_object"],
                        parse_constant=ENGINE["_event_json_constant"])
-    result = prepare(Path(args.root), args.agent_profile, value)
+    result = {"prepare": prepare, "search": search, "preview": preview, "read": read_evidence}[args.operation](Path(args.root), args.agent_profile, value)
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))
 
 

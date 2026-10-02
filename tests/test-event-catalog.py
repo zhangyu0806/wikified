@@ -40,6 +40,29 @@ def reviewed(target, action="accept", number=2):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_native_grouping_uses_full_valid_history_but_only_projects_authorized_heads(self):
+        helper_test = runpy.run_path(str(REPO / "tests/test-codex-native-sources.py"))["NativeSources"]()
+        helper_test.root = self.root
+        original = {**EVENT(1), **helper_test.origin()}
+        original.pop("supersedes")
+        helper_test.append([helper_test.observation(original)])
+        accepted = reviewed(original, number=91)
+        self.write([original, accepted])
+        result = self.cli()
+        self.assertEqual(len(result["entries"]), 1)
+        entry = result["entries"][0]
+        self.assertEqual(entry["eventId"], accepted["id"])
+        self.assertEqual(entry["grouping"]["contentHash"], helper_test.observation(original)["parts"][0]["contentHash"])
+        self.assertNotIn(original["id"], json.dumps(entry["grouping"]))
+        # Bad provenance removes only grouping. It never creates permissions or
+        # silently removes an otherwise valid owner-visible memory record.
+        ledger = self.root / "raw/imports/codex-native-sources.jsonl"
+        ledger.write_text("{invalid\n")
+        degraded = self.cli()
+        self.assertEqual(degraded["entries"][0]["eventId"], accepted["id"])
+        self.assertNotIn("grouping", degraded["entries"][0])
+        self.assertNotEqual(result["revision"], degraded["revision"])
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix="wikified-event-catalog-test-")
         self.addCleanup(temp.cleanup)

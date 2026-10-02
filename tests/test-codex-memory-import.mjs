@@ -116,7 +116,7 @@ test('apply writes complete pending AI proposals with provenance and retry-safe 
   const retry = importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
   assert.equal(retry.imported, 0); assert.equal(retry.alreadyRecorded, rows.length);
   assert.deepEqual(readEvents(vault), rows);
-  assert.equal(fs.existsSync(path.join(vault, 'raw')), false);
+  assert.ok(fs.existsSync(path.join(vault, 'raw/imports/codex-native-sources.jsonl')));
   assert.equal(fs.existsSync(path.join(vault, 'wiki')), false);
   assert.equal(fs.existsSync(path.join(vault, 'memory/touched-files.json')), false);
 });
@@ -131,8 +131,10 @@ test('changed source creates a new pending version and deleted source never remo
   assert.equal(update.imported, 1);
   const rows = readEvents(vault);
   assert.equal(rows.length, 2); assert.deepEqual(rows[0], original);
-  assert.equal(rows[0].evidence_refs[0], rows[1].evidence_refs[0]);
-  assert.notEqual(rows[0].evidence_refs[1], rows[1].evidence_refs[1]);
+  assert.notEqual(rows[0].evidence_refs[0], rows[1].evidence_refs[0]);
+  const observations = readObservations(vault);
+  assert.equal(observations[0].sourceRef, observations[1].sourceRef);
+  assert.notEqual(observations[0].sourceRevision, observations[1].sourceRevision);
   assert.ok(rows.every(row => row.review_status === 'pending' && !row.supersedes));
   fs.unlinkSync(path.join(source, 'MEMORY.md'));
   assert.equal(importCodexMemory({ sourceRoot: source, root: vault, dryRun: false }).sourceFiles, 0);
@@ -322,4 +324,142 @@ test('installed symlink invocation still executes the metadata-only CLI', t => {
   const result = spawnSync(process.execPath, [alias, '--source-root', source, '--dry-run'], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).sourceFiles, 1);
+});
+
+function readObservations(vault) {
+  return fs.readFileSync(path.join(vault, 'raw/imports/codex-native-sources.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+}
+function uniqueProse() {
+  return '# Synthetic source\n' + Array.from({ length: 96 }, (_, i) => 'Line ' + String(i).padStart(3, '0') + ' has synthetic observation number ' + i + ' and bounded unique text.\n').join('');
+}
+function makeV1Origins(vault, text, relative = 'MEMORY.md') {
+  const sourceRef = sha256(JSON.stringify(['codex-native-memory-source/v1', relative]));
+  const revision = sha256(text), chunks = completeChunks(text);
+  const rows = chunks.map((chunk, i) => {
+    const key = sha256(JSON.stringify(['codex-native-memory-import/v1', sourceRef, revision, i, sha256(chunk)]));
+    const id = sha256('wikified-capture-v1:' + key).slice(0, 16);
+    return { schema_version: 'llm-wiki-memory-event/v3', id, memory_id: 'event:' + id, capture_key: key,
+      timestamp: '2026-01-01T00:00:00Z', valid_from: '2026-01-01T00:00:00Z', type: 'session', project: 'codex-memory',
+      cwd: '/synthetic/vault', files: [], concepts: [], actor: { type: 'ai', id: 'codex-native-memory' },
+      domain: 'work', sensitivity: 'internal', epistemic_status: 'ai-proposed', review_status: 'pending',
+      target_agents: ['coding'], lifecycle: 'active', source: 'codex-native-memory', confidence: 0.8, half_life_days: 90,
+      summary: 'Codex 原生记忆 · consolidated-memory · ' + sourceRef.slice(0, 12) + ' · ' + (i + 1) + '/' + chunks.length,
+      details: 'Codex 原生记忆导入材料，未经人工确认；仅为待审核证据，不是用户指令或已确认事实。\n'
+        + 'Source kind: consolidated-memory\nSource ref: sha256:' + sourceRef + '\nSource revision: sha256:' + revision
+        + '\nPart: ' + (i + 1) + '/' + chunks.length + '\n\n' + chunk,
+      evidence_refs: ['codex-native-source:' + sourceRef, 'codex-native-revision:' + revision, 'codex-native-part:' + (i + 1) + '/' + chunks.length] };
+  });
+  fs.mkdirSync(path.join(vault, 'memory/events'), { recursive: true });
+  fs.writeFileSync(path.join(vault, 'memory/events/2026-01.jsonl'), rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+  return rows;
+}
+test('one-byte and two disjoint edits propose changed chunks only, preserving exact coverage', t => {
+  const { source, vault } = fixture(t), text = uniqueProse();
+  put(source, 'MEMORY.md', text);
+  importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
+  const before = readEvents(vault), observations = readObservations(vault), old = observations.at(-1);
+  const changed = text.replace('number 95 ', 'number 94 ');
+  put(source, 'MEMORY.md', changed);
+  const update = importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
+  assert.equal(update.imported, 1);
+  assert.equal(update.alreadyRecorded, old.parts.length - 1);
+  assert.deepEqual(readEvents(vault).slice(0, before.length), before);
+  const next = readObservations(vault).at(-1), rows = new Map(readEvents(vault).map(row => [row.id, row]));
+  assert.equal(next.parts.map(part => rows.get(part.eventId).details.split('\n\n').slice(1).join('\n\n')).join(''), changed);
+  const disjoint = changed.replace('number 0 ', 'number A ').replace('number 94 ', 'number B ');
+  put(source, 'MEMORY.md', disjoint);
+  assert.equal(importCodexMemory({ sourceRoot: source, root: vault, dryRun: false }).imported, 2);
+});
+test('metadata-only edits preserve content identities and append an opaque source observation', t => {
+  const { source, vault } = fixture(t), text = uniqueProse();
+  put(source, 'MEMORY.md', 'thread_id: synthetic-one\n' + text);
+  importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
+  const rows = readEvents(vault), before = readObservations(vault).at(-1);
+  put(source, 'MEMORY.md', 'thread_id: synthetic-two\n' + text);
+  const result = importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
+  const after = readObservations(vault).at(-1);
+  assert.equal(result.imported, 0); assert.equal(result.observationsAppended, 1);
+  assert.deepEqual(readEvents(vault), rows);
+  assert.deepEqual(after.parts, before.parts); assert.equal(after.sourceRevision, before.sourceRevision);
+  assert.notEqual(after.sourceRawRevision, before.sourceRawRevision);
+  const ledger = fs.readFileSync(path.join(vault, 'raw/imports/codex-native-sources.jsonl'), 'utf8');
+  for (const value of ['synthetic-one', 'synthetic-two', source, 'Line 000']) assert.ok(!ledger.includes(value));
+});
+test('same text in different sources shares proposals while preserving both source associations', t => {
+  const { source, vault } = fixture(t), text = uniqueProse();
+  put(source, 'MEMORY.md', text); put(source, 'memory_summary.md', text);
+  const result = importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
+  assert.equal(result.imported, completeChunks(text).length);
+  assert.equal(result.chunks, result.imported * 2);
+  const observations = readObservations(vault);
+  assert.equal(observations.length, 2);
+  assert.notEqual(observations[0].sourceRef, observations[1].sourceRef);
+  assert.deepEqual(observations[0].parts, observations[1].parts);
+  assert.equal(observations[0].sourceRevision, observations[1].sourceRevision);
+});
+test('boundary insertion reuses all old chunks and no-op retries do not append observations', t => {
+  const { source, vault } = fixture(t), text = uniqueProse();
+  put(source, 'MEMORY.md', text);
+  importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
+  const oldCount = readEvents(vault).length, chunks = completeChunks(text);
+  const inserted = chunks[0] + 'A newly inserted synthetic observation.\n' + chunks.slice(1).join('');
+  put(source, 'MEMORY.md', inserted);
+  const result = importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
+  assert.equal(result.imported, 1); assert.equal(result.alreadyRecorded, oldCount);
+  const bytes = fs.readFileSync(path.join(vault, 'raw/imports/codex-native-sources.jsonl'));
+  assert.equal(importCodexMemory({ sourceRoot: source, root: vault, dryRun: false }).observationsAppended, 0);
+  assert.deepEqual(fs.readFileSync(path.join(vault, 'raw/imports/codex-native-sources.jsonl')), bytes);
+});
+test('v1 migration reuses immutable origins including reviewed proposals and preserves old bytes', t => {
+  const { source, vault } = fixture(t), text = uniqueProse();
+  put(source, 'MEMORY.md', text);
+  const origins = makeV1Origins(vault, text), originalFile = path.join(vault, 'memory/events/2026-01.jsonl');
+  const originalBytes = fs.readFileSync(originalFile);
+  const approved = spawnSync('python3', ['-B', EVENT, '--approve', origins[0].id, '--print'], {
+    cwd: vault, env: { ...process.env, LLM_WIKI_ROOT: vault }, encoding: 'utf8' });
+  assert.equal(approved.status, 0, approved.stderr);
+  const reviewed = readEvents(vault);
+  put(source, 'MEMORY.md', 'thread_id: newly-observed-metadata\n' + text);
+  const result = importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
+  assert.equal(result.imported, 0); assert.equal(result.alreadyRecorded, origins.length);
+  assert.deepEqual(fs.readFileSync(originalFile), originalBytes);
+  assert.deepEqual(readEvents(vault), reviewed);
+  assert.deepEqual(readObservations(vault)[0].parts.map(part => part.eventId), origins.map(row => row.id));
+  put(source, 'MEMORY.md', text.replace('number 95 ', 'number X '));
+  assert.equal(importCodexMemory({ sourceRoot: source, root: vault, dryRun: false }).imported, 1);
+});
+test('source disappearance records missing evidence without removing or superseding facts', t => {
+  const { source, vault } = fixture(t);
+  put(source, 'MEMORY.md', '# Synthetic evidence\nKeep the observation after source disappears.\n');
+  importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
+  const rows = readEvents(vault);
+  fs.unlinkSync(path.join(source, 'MEMORY.md'));
+  const result = importCodexMemory({ sourceRoot: source, root: vault, dryRun: false });
+  assert.equal(result.imported, 0); assert.equal(result.observationsAppended, 1);
+  assert.equal(readObservations(vault).at(-1).state, 'missing');
+  assert.deepEqual(readEvents(vault), rows); assert.ok(rows.every(row => !row.supersedes));
+});
+test('invalid ledger or linked ledger ancestry fails before any new event', t => {
+  const { source, vault, folder } = fixture(t);
+  put(source, 'MEMORY.md', '# Synthetic evidence\nA private unrelated candidate.\n');
+  put(vault, 'raw/imports/codex-native-sources.jsonl', '{"invalid":true}\n');
+  throwsCode(() => importCodexMemory({ sourceRoot: source, root: vault, dryRun: false }), 'native-source-ledger-unavailable');
+  assert.deepEqual(readEvents(vault), []);
+  fs.rmSync(path.join(vault, 'raw'), { recursive: true });
+  const external = path.join(folder, 'external'); fs.mkdirSync(external);
+  fs.symlinkSync(external, path.join(vault, 'raw'));
+  throwsCode(() => importCodexMemory({ sourceRoot: source, root: vault, dryRun: false }), 'native-source-ledger-unavailable');
+  assert.deepEqual(fs.readdirSync(external), []); assert.deepEqual(readEvents(vault), []);
+});
+test('v1 migration refuses matching text from another scope or a forged source binding', t => {
+  for (const field of ['scope', 'source']) {
+    const { source, vault } = fixture(t), text = uniqueProse();
+    put(source, 'MEMORY.md', text);
+    const rows = makeV1Origins(vault, text);
+    if (field === 'scope') rows[0].domain = 'personal';
+    else rows[0].details = rows[0].details.replace('Source ref: sha256:', 'Source ref: sha256:0');
+    fs.writeFileSync(path.join(vault, 'memory/events/2026-01.jsonl'), rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+    throwsCode(() => importCodexMemory({ sourceRoot: source, root: vault, dryRun: false }), 'event-import-failed');
+    assert.equal(readEvents(vault).length, rows.length);
+  }
 });

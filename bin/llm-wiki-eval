@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import tempfile
+import runpy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -228,6 +229,8 @@ def run() -> dict[str, Any]:
 
         hybrid = metrics(hybrid_ranks)
         legacy = metrics(legacy_ranks)
+        task_suite = runpy.run_path(str(ENRICH.parent / "llm_wiki_task_eval.py"))["run_task_suite"]()
+        violations.extend(task_suite["violations"])
         return {
             "schema_version": "llm-wiki-retrieval-eval/v1",
             "fixture": "generated-temporary-no-user-data",
@@ -237,6 +240,7 @@ def run() -> dict[str, Any]:
             ],
             "hybrid": hybrid,
             "legacy": legacy,
+            "task_suite": task_suite,
             "checks": {
                 "project_isolation": "pass" if "project isolation failed" not in violations else "fail",
                 "decay_ordering": "pass" if "decay ordering failed" not in violations else "fail",
@@ -265,6 +269,8 @@ def main() -> int:
         print(f"hybrid Recall@5={report['hybrid']['recall_at_5']:.3f} MRR={report['hybrid']['mrr']:.3f}")
         print(f"legacy Recall@5={report['legacy']['recall_at_5']:.3f} MRR={report['legacy']['mrr']:.3f}")
         print(f"violations={len(report['violations'])}")
+        suite = report["task_suite"]
+        print(f"synthetic-derived tasks={suite['questionCount']} search Recall@5={suite['search']['recallAt5']:.3f} MRR={suite['search']['mrr']:.3f}; exact-context={suite['context']['passed']}/{suite['context']['total']}; real-user labels=none")
     if report["violations"]:
         return 1
     if report["hybrid"]["recall_at_5"] < 1.0 or report["hybrid"]["mrr"] < 0.99:

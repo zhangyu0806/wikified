@@ -27,6 +27,7 @@ SAFE_FAILURE = "llm-wiki-event-catalog: catalog unavailable or record no longer 
 try:
     ENGINE = runpy.run_path(str(BIN / "llm-wiki-enrich"), run_name="event_catalog_reader")
     CORE = ENGINE["EVENT_REVIEW"]
+    NATIVE = runpy.run_path(str(BIN / "llm_wiki_codex_native_sources.py"), run_name="native_source_projection")
 except Exception:
     # Missing/incompatible companion code must not leak loader paths or stacks.
     print(SAFE_FAILURE, file=sys.stderr)
@@ -152,12 +153,26 @@ def catalog(root: Path, *, event_id: str | None = None, revision: str | None = N
         raise ValueError("unsafe root")
     root_identity = (root.stat().st_dev, root.stat().st_ino)
     generation = policy_generation(root)
+    event_generation = ENGINE["_event_manifest"](root / "memory/events")
     access = ENGINE["access_context"](root, "human")
     # load_events validates the complete snapshot and closes all terminal edges
     # before ACL filtering. Never reproduce that algorithm in this projection.
     with contextlib.redirect_stderr(io.StringIO()):
         events = ENGINE["load_events"](root, access)
     projected = [entry_for(event) for event in events]
+    # Only verified ledger-to-event bindings become grouping suggestions. No
+    # hidden event IDs/counts or raw source paths enter the owner projection.
+    with contextlib.redirect_stderr(io.StringIO()):
+        source_projection = NATIVE["read_source_projection"](root, ENGINE["_read_event_snapshot"](root))
+    groups = {}
+    if source_projection["state"] == "complete":
+        for group in source_projection["groups"]:
+            for identity in group["eventIds"]:
+                groups[identity] = {key: group[key] for key in ("contentGroupId", "contentHash", "sources")}
+    for entry, _, _ in projected:
+        if entry["eventId"] in groups:
+            entry["grouping"] = groups[entry["eventId"]]
+            assert_safe_metadata(entry["grouping"])
     projected.sort(key=lambda item: (item[0]["objectId"], item[0]["eventId"]))
     identities: set[str] = set()
     for entry, _, _ in projected:
@@ -165,7 +180,7 @@ def catalog(root: Path, *, event_id: str | None = None, revision: str | None = N
             raise ValueError("conflicting current object identity")
         identities.add(entry["objectId"])
     def assert_authority():
-        if generation != policy_generation(root) or root_identity != (root.stat().st_dev, root.stat().st_ino):
+        if generation != policy_generation(root) or event_generation != ENGINE["_event_manifest"](root / "memory/events") or root_identity != (root.stat().st_dev, root.stat().st_ino):
             raise ValueError("authority changed")
     if event_id is not None:
         selected = next((item for item in projected if item[0]["eventId"] == event_id), None)
@@ -176,7 +191,7 @@ def catalog(root: Path, *, event_id: str | None = None, revision: str | None = N
         return {"schemaVersion": 1, "entry": entry, "summary": summary, "details": details}
     # Generation excludes hidden rows and their counts, but includes all
     # authorized record revisions rather than only this query's first page.
-    material = ["wikified-event-catalog/v1", generation[2], [[entry["objectId"], entry["eventId"], entry["revision"]] for entry, _, _ in projected]]
+    material = ["wikified-event-catalog/v1", generation[2], [[entry["objectId"], entry["eventId"], entry["revision"], entry.get("grouping")] for entry, _, _ in projected]]
     aggregate = "sha256:" + hashlib.sha256(json.dumps(material, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
     entries = []
     eligible = 0

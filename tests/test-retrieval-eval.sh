@@ -14,6 +14,11 @@ assert report["hybrid"]["mrr"] == 1.0
 assert report["hybrid"]["recall_at_5"] > report["legacy"]["recall_at_5"]
 assert report["violations"] == []
 assert all(value == "pass" for value in report["checks"].values())
+suite = report["task_suite"]
+assert suite["questionCount"] >= 30
+assert suite["fixture"] == "synthetic-derived-task-questions" and suite["realUserLabels"] is False
+assert suite["context"]["passed"] == suite["context"]["total"]
+assert {"history", "permission", "negative", "negative-paraphrase"} <= {row["category"] for row in suite["search"]["cases"]}
 ' <<<"$OUT"
 
 printf 'PASS  retrieval eval: hybrid Recall@5/MRR=1.0, all safety checks pass\n'

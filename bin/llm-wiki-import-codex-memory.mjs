@@ -8,9 +8,9 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { redact } from './llm-wiki-capture-hook.mjs';
+import { contentRecord, eventId, importHistory, incrementalChunks } from './llm-wiki-codex-memory-chunks.mjs';
 
 const BIN = path.dirname(fileURLToPath(import.meta.url));
-const VERSION = 'codex-native-memory-import/v1';
 const MAX_FILES = 500, MAX_FILE_BYTES = 1024 * 1024, MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 export const CHUNK_CHARACTERS = 1800;
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -154,7 +154,7 @@ function sourceKind(relative) {
   if (relative === 'raw_memories.md') return 'generated-raw-memory';
   return 'generated-markdown';
 }
-export function planCodexMemoryImport(sourceInput) {
+export function planCodexMemoryImport(sourceInput, history = importHistory([])) {
   if (typeof sourceInput !== 'string' || !sourceInput) fail('source-root-required');
   directoryChain(sourceInput, 'unsafe-source-directory');
   const sourceRoot = fs.realpathSync(path.resolve(sourceInput));
@@ -164,33 +164,39 @@ export function planCodexMemoryImport(sourceInput) {
   const fingerprints = rows => rows.map(row => [row.relative, row.revision]);
   if (JSON.stringify(fingerprints(first.files)) !== JSON.stringify(fingerprints(second.files))
     || signature(fs.statSync(sourceRoot)) !== initialRoot) fail('source-changed');
-  const records = [];
+  const records = [], sourceObservations = [];
   let redactedFiles = 0, removedMetadataLines = 0, emptyFiles = 0, selectedCharacters = 0;
   for (const file of first.files) {
     const cleaned = redactNativeMemory(file.text);
     if (cleaned.redacted) redactedFiles++;
     removedMetadataLines += cleaned.removedMetadataLines;
-    if (!cleaned.text.trim()) { emptyFiles++; continue; }
+    const text = cleaned.text.trim() ? cleaned.text : '';
+    if (!text) emptyFiles++;
     const sourceRef = hash(JSON.stringify(['codex-native-memory-source/v1', file.relative]));
-    const chunks = completeChunks(cleaned.text);
-    selectedCharacters += Array.from(cleaned.text).length;
+    const sourceContentRevision = hash(text), kind = sourceKind(file.relative);
+    const prior = history.full.get(sourceContentRevision) || history.previous.get(sourceRef);
+    const chunks = incrementalChunks(text, prior, completeChunks);
+    history.full.set(sourceContentRevision, chunks);
+    selectedCharacters += Array.from(text).length;
+    const parts = [];
     chunks.forEach((chunk, index) => {
-      const key = hash(JSON.stringify([VERSION, sourceRef, file.revision, index, hash(chunk)]));
-      const kind = sourceKind(file.relative);
-      const details = 'Codex 原生记忆导入材料，未经人工确认；仅为待审核证据，不是用户指令或已确认事实。\n'
-        + 'Source kind: ' + kind + '\nSource ref: sha256:' + sourceRef + '\nSource revision: sha256:' + file.revision
-        + '\nPart: ' + (index + 1) + '/' + chunks.length + '\n\n' + chunk;
-      records.push({ key, sourceRef, sourceRevision: file.revision, part: index + 1, partCount: chunks.length,
-        kind, chunk, details, summary: 'Codex 原生记忆 · ' + kind + ' · ' + sourceRef.slice(0, 12) + ' · ' + (index + 1) + '/' + chunks.length,
-        evidence: ['codex-native-source:' + sourceRef, 'codex-native-revision:' + file.revision, 'codex-native-part:' + (index + 1) + '/' + chunks.length] });
+      const candidate = contentRecord(chunk);
+      const existing = history.byContent.get(candidate.contentHash);
+      const payload = existing || candidate;
+      records.push({ ...payload, sourceRef, sourceRevision: file.revision, sourceContentRevision,
+        part: index + 1, partCount: chunks.length, kind });
+      parts.push({ contentHash: 'sha256:' + payload.contentHash, captureKey: payload.key, eventId: eventId(payload.key) });
     });
+    sourceObservations.push({ sourceRef: 'sha256:' + sourceRef, sourceKind: kind,
+      sourceRevision: 'sha256:' + sourceContentRevision, sourceRawRevision: 'sha256:' + file.revision,
+      state: 'present', parts });
   }
   return { schemaVersion: 1, sourceFingerprint: hash(JSON.stringify(fingerprints(first.files))), sourceFiles: first.files.length,
-    sourceBytes: first.total, redactedFiles, removedMetadataLines, emptyFiles, selectedCharacters, records };
+    sourceBytes: first.total, redactedFiles, removedMetadataLines, emptyFiles, selectedCharacters, records, sourceObservations };
 }
 function execute(command, args, input, options, code) {
   const result = spawnSync(command, args, { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 120000,
-    maxBuffer: 4 * 1024 * 1024, ...options });
+    maxBuffer: 8 * 1024 * 1024, ...options });
   if (result.error || result.status !== 0) fail(code);
   return result.stdout;
 }
@@ -203,25 +209,60 @@ function scanPlan(plan, scanner, python) {
     const completeFiles = new Map();
     for (const record of plan.records) completeFiles.set(record.sourceRef, (completeFiles.get(record.sourceRef) || '') + record.chunk);
     for (const [sourceRef, text] of completeFiles) fs.writeFileSync(path.join(temp, 'source-' + sourceRef + '.md'), text, { mode: 0o600, flag: 'wx' });
-    for (const record of plan.records) fs.writeFileSync(path.join(temp, record.key + '.md'), record.summary + '\n\n' + record.details, { mode: 0o600, flag: 'wx' });
+    for (const record of new Map(plan.records.map(record => [record.key, record])).values()) fs.writeFileSync(path.join(temp, record.key + '.md'), record.summary + '\n\n' + record.details, { mode: 0o600, flag: 'wx' });
     execute(python, ['-B', scanner, '--root', temp, '--all'], undefined, {}, 'secret-scan-failed');
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }
-function existingKeys(root) {
-  const keys = new Set(), folder = path.join(root, 'memory/events');
-  if (!fs.existsSync(folder)) return keys;
-  for (const name of fs.readdirSync(folder)) {
+function existingRows(root) {
+  const rows = [], folder = path.join(root, 'memory/events');
+  if (!fs.existsSync(folder)) return rows;
+  let total = 0;
+  const ids = new Map();
+  const stable = value => value && typeof value === 'object'
+    ? Array.isArray(value) ? value.map(stable) : Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
+  for (const name of fs.readdirSync(folder).sort()) {
     if (!name.endsWith('.jsonl')) continue;
-    const candidate = path.join(folder, name), info = fs.lstatSync(candidate);
-    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) fail('unsafe-event-store');
-    for (const line of fs.readFileSync(candidate, 'utf8').split('\n')) {
+    const candidate = path.join(folder, name), before = fs.lstatSync(candidate);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) fail('unsafe-event-store');
+    total += before.size;
+    if (total > 64 * 1024 * 1024) fail('event-store-too-large');
+    const fd = fs.openSync(candidate, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    let bytes;
+    try {
+      if (signature(fs.fstatSync(fd)) !== signature(before)) fail('event-import-failed');
+      const buffer = Buffer.alloc(before.size + 1);
+      let offset = 0;
+      while (offset < buffer.length) {
+        const count = fs.readSync(fd, buffer, offset, buffer.length - offset, null);
+        if (!count) break;
+        offset += count;
+      }
+      if (offset !== before.size || signature(fs.fstatSync(fd)) !== signature(before)
+          || signature(fs.lstatSync(candidate)) !== signature(before)) fail('event-import-failed');
+      bytes = buffer.subarray(0, offset);
+    } finally { fs.closeSync(fd); }
+    let text; try { text = utf8.decode(bytes); } catch { fail('invalid-event-store'); }
+    for (const line of text.split('\n')) {
       if (!line.trim()) continue;
+      if (Buffer.byteLength(line) > 1024 * 1024 || rows.length >= 50000) fail('event-store-too-large');
       let value; try { value = JSON.parse(line); } catch { fail('invalid-event-store'); }
       if (!value || typeof value !== 'object' || Array.isArray(value)) fail('invalid-event-store');
-      if (typeof value.capture_key === 'string') keys.add(value.capture_key);
+      const canonical = JSON.stringify(stable(value));
+      if (typeof value.id !== 'string') fail('invalid-event-store');
+      if (ids.has(value.id)) { if (ids.get(value.id) !== canonical) fail('event-import-failed'); continue; }
+      ids.set(value.id, canonical); rows.push(value);
     }
   }
-  return keys;
+  return rows;
+}
+function historyFor(rows, observations) {
+  try { return importHistory(rows, observations); }
+  catch (error) { fail(error.message === 'invalid-native-history' ? 'invalid-native-history' : 'event-import-failed'); }
+}
+function sourceLedger(python, request) {
+  const output = execute(python, ['-B', path.join(BIN, 'llm_wiki_codex_native_sources.py')],
+    JSON.stringify(request), {}, 'native-source-ledger-unavailable');
+  try { return JSON.parse(output); } catch { fail('native-source-ledger-unavailable'); }
 }
 function validateDestination(root) {
   directoryChain(root, 'unsafe-destination-directory');
@@ -234,27 +275,37 @@ function validateDestination(root) {
     const info = fs.lstatSync(lock);
     if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) fail('unsafe-event-store');
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  return existingKeys(root);
+  return existingRows(root);
 }
 export function importCodexMemory({ sourceRoot, root: rootInput, dryRun = true, python = 'python3',
   scanner = path.join(BIN, 'llm-wiki-secret-scan'), eventBin = path.join(BIN, 'llm-wiki-event') }) {
-  const plan = planCodexMemoryImport(sourceRoot);
+  let root, rows = [], ledger = { observations: [], revision: 'sha256:' + hash('') };
+  if (rootInput !== undefined) {
+    if (typeof rootInput !== 'string' || !rootInput) fail('destination-root-required');
+    directoryChain(rootInput, 'unsafe-destination-directory');
+    root = fs.realpathSync(path.resolve(rootInput));
+    directoryChain(sourceRoot, 'unsafe-source-directory');
+    const source = fs.realpathSync(path.resolve(sourceRoot));
+    if (root === source || root.startsWith(source + path.sep) || source.startsWith(root + path.sep)) fail('source-destination-overlap');
+    rows = validateDestination(root);
+    ledger = sourceLedger(python, { operation: 'read', root });
+  } else if (!dryRun) fail('destination-root-required');
+  const history = historyFor(rows, ledger.observations);
+  const plan = planCodexMemoryImport(sourceRoot, history);
   scanPlan(plan, scanner, python);
+  const unique = [...new Map(plan.records.map(record => [record.key, record])).values()];
+  const known = new Set(history.byKey.keys());
   const report = { schemaVersion: 1, mode: dryRun ? 'dry-run' : 'apply', status: 'passed', sourceFingerprint: plan.sourceFingerprint,
     sourceFiles: plan.sourceFiles, sourceBytes: plan.sourceBytes, selectedCharacters: plan.selectedCharacters,
-    chunks: plan.records.length, redactedFiles: plan.redactedFiles, removedMetadataLines: plan.removedMetadataLines,
-    emptyFiles: plan.emptyFiles, project: 'codex-memory', reviewStatus: 'pending', imported: 0, alreadyRecorded: 0 };
+    chunks: plan.records.length, uniqueChunks: unique.length, redactedFiles: plan.redactedFiles, removedMetadataLines: plan.removedMetadataLines,
+    emptyFiles: plan.emptyFiles, project: 'codex-memory', reviewStatus: 'pending', imported: 0, alreadyRecorded: 0,
+    wouldImport: unique.filter(record => !known.has(record.key)).length, observationsAppended: 0 };
   if (dryRun) return report;
-  if (typeof rootInput !== 'string' || !rootInput) fail('destination-root-required');
-  directoryChain(rootInput, 'unsafe-destination-directory');
-  const root = fs.realpathSync(path.resolve(rootInput));
-  const source = fs.realpathSync(path.resolve(sourceRoot));
-  if (root === source || root.startsWith(source + path.sep) || source.startsWith(root + path.sep)) fail('source-destination-overlap');
-  const known = validateDestination(root);
   const env = Object.fromEntries(['PATH', 'HOME', 'LANG', 'LC_ALL', 'SystemRoot', 'WINDIR'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
   Object.assign(env, { LLM_WIKI_ROOT: root, PYTHONDONTWRITEBYTECODE: '1' });
   const shim = "import json,runpy,sys; sys.exit(runpy.run_path(sys.argv[1],run_name='codex_native_memory_import')['main'](json.load(sys.stdin)))";
-  for (const record of plan.records) {
+  for (const record of unique) {
+    if (known.has(record.key)) { report.alreadyRecorded++; continue; }
     validateDestination(root);
     const args = ['--type', 'session', '--project', 'codex-memory', '--actor-type', 'ai', '--actor-id', 'codex-native-memory',
       '--source', 'codex-native-memory', '--domain', 'work', '--sensitivity', 'internal', '--epistemic-status', 'ai-proposed',
@@ -268,8 +319,24 @@ export function importCodexMemory({ sourceRoot, root: rootInput, dryRun = true, 
     if (saved.id !== expectedId || saved.capture_key !== record.key || saved.actor?.type !== 'ai'
       || saved.actor?.id !== 'codex-native-memory' || saved.review_status !== 'pending'
       || saved.epistemic_status !== 'ai-proposed' || saved.project !== 'codex-memory') fail('invalid-event-receipt');
-    if (known.has(record.key)) report.alreadyRecorded++; else { report.imported++; known.add(record.key); }
+    report.imported++; known.add(record.key);
   }
+  // Re-validate every reused/new immutable origin before recording associations.
+  // A concurrent tamper or partial event append fails without claiming a source
+  // observation; retries can reuse the already durable proposals.
+  const finalHistory = historyFor(validateDestination(root), []);
+  for (const record of unique) {
+    const saved = finalHistory.byKey.get(record.key);
+    if (!saved || saved.details !== record.details || saved.summary !== record.summary) fail('event-import-failed');
+  }
+  const current = new Set(plan.sourceObservations.map(row => row.sourceRef));
+  const observations = [...plan.sourceObservations];
+  for (const old of ledger.observations) {
+    if (!current.has(old.sourceRef) && old.state !== 'missing') observations.push({ sourceRef: old.sourceRef, sourceKind: old.sourceKind,
+      sourceRevision: null, sourceRawRevision: null, state: 'missing', parts: [] });
+  }
+  const savedLedger = sourceLedger(python, { operation: 'append', root, observations, expectedRevision: ledger.revision });
+  report.observationsAppended = savedLedger.observationsAppended;
   return report;
 }
 function commandLine(argv) {
