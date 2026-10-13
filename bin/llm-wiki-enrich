@@ -2182,6 +2182,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--max-chars", type=int, default=3500, help="Maximum output characters.")
     parser.add_argument("--json", action="store_true", help="Output machine-readable JSON instead of Markdown.")
     parser.add_argument(
+        "--source-scope",
+        choices=("all", "pages"),
+        default="all",
+        help="Search source scope: all keeps mixed recall; pages returns governed wiki/note pages before output limits.",
+    )
+    parser.add_argument(
         "--ranking",
         choices=("hybrid", "legacy"),
         default="hybrid",
@@ -2214,7 +2220,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default="full",
         help="Session digest scope. Codex hooks should prefer critical; full preserves the manual overview.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.source_scope == "pages" and (args.read_page is not None or args.session_start):
+        parser.error("--source-scope pages requires --query or --file and cannot combine with --read-page or --session-start")
+    return args
 
 
 def render_markdown(candidates: list[Candidate], max_chars: int, ambient: bool = False) -> str:
@@ -2474,6 +2483,10 @@ def main(argv: list[str]) -> int:
     hint = graph_hint(root, query_tokens, query_groups, access)
     if hint is not None:
         candidates.append(hint)
+    if args.source_scope == "pages":
+        # Keep complete snapshot, policy and source validation above. Only the
+        # output candidate domain changes; excluded sources consume no budget.
+        candidates = [item for item in candidates if item.source in {"wiki-page", "note-page"}]
     candidates = sorted(candidates, key=lambda item: item.score, reverse=True)[: max(1, args.limit)]
     output = render_json(candidates, args.max_chars) + "\n" if args.json else render_markdown(candidates, max(200, args.max_chars), args.ambient)
     try:

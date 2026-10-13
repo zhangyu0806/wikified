@@ -392,6 +392,12 @@ llm-wiki-eval --json
 衰减、替代与有效期、无关查询零上下文、凭据脱敏和有界合法 JSON。`legacy` 仅供
 回归比较，不建议作为日常检索模式。
 
+查询或文件检索可加 `--source-scope pages`，仅返回已通过现有治理检查的 wiki/note
+页面，并在 `--limit` 和 `--max-chars` 生效前排除事件、图谱提示，避免这些结果占满
+页面候选。默认 `--source-scope all` 保持混合召回；页面排序、权限、审核、来源与
+完整快照检查不变，事件快照损坏时仍整体失败。`pages` 不可与 `--read-page` 或
+`--session-start` 混用。
+
 `llm-wiki-health` 现在也报告 `graph_status` / `graph_issues`：Graphify manifest 缺失、
 损坏，或 wiki 输入比 manifest 更新时会明确标成 missing / invalid / stale。默认仍是
 建议项；`--strict` 才把健康问题升级为非零退出码。
