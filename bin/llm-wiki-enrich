@@ -131,6 +131,7 @@ class Candidate:
     signals: dict[str, Any]
     memory_id: str
     governance: dict[str, Any]
+    fragment: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1800,6 +1801,7 @@ def _legacy_wiki_candidates(
     query_tokens: set[str],
     access: AccessContext,
     project: str | None = None,
+    page_fragments: bool = False,
 ) -> list[Candidate]:
     candidates: list[Candidate] = []
     snapshots = page_snapshots(root, access, project)
@@ -1813,6 +1815,7 @@ def _legacy_wiki_candidates(
             continue
         title_bonus = 2 if query_tokens & legacy_tokenize([title]) else 0
         excerpt = extract_excerpt(text, query_tokens)
+        excerpt, fragment = page_fragment_excerpt(snapshot, query_tokens, excerpt, page_fragments)
         candidates.append(
             Candidate(
                 score=float(overlap + title_bonus),
@@ -1823,6 +1826,7 @@ def _legacy_wiki_candidates(
                          "path": entry.relative, "revision": page_revision(snapshot)},
                 memory_id=metadata.memory_id,
                 governance=metadata.governance,
+                fragment=fragment,
             )
         )
     snapshots.verify()
@@ -1836,12 +1840,14 @@ def wiki_candidates(
     query_groups: list[set[str]],
     access: AccessContext,
     project: str | None = None,
+    page_fragments: bool = False,
 ) -> list[Candidate]:
     if not query_terms:
         return []
 
     documents: list[tuple[str, str, list[str], list[str], PageMetadata, PageCatalogEntry, str]] = []
     snapshots = page_snapshots(root, access, project)
+    snapshots_by_path = {entry.relative: snapshot for entry, snapshot in snapshots}
     for entry, snapshot in snapshots:
         metadata = snapshot.metadata
         text = snapshot.body
@@ -1891,6 +1897,7 @@ def wiki_candidates(
         phrase_bonus = 3.0 if len(normalized_query) >= 3 and normalized_query in f"{title.lower()}\n{haystack}" else 0.0
         score = (2.0 * bm25) + title_bonus + title_identity_bonus + phrase_bonus
         excerpt = extract_excerpt(text, set(query_terms))
+        excerpt, fragment = page_fragment_excerpt(snapshots_by_path[entry.relative], set(query_terms), excerpt, page_fragments)
         candidates.append(
             Candidate(
                 score=score,
@@ -1908,10 +1915,40 @@ def wiki_candidates(
                 },
                 memory_id=metadata.memory_id,
                 governance=metadata.governance,
+                fragment=fragment,
             )
         )
     snapshots.verify()
     return candidates
+
+
+def page_fragment_excerpt(snapshot: PageSnapshot, query_tokens: set[str], excerpt: str,
+                          enabled: bool) -> tuple[str, dict[str, Any] | None]:
+    """Address a continuous range in the complete safe projection, never a joined excerpt."""
+    if not enabled:
+        return excerpt, None
+    text = redact(projected_page_text(snapshot))
+    if len(text) <= 12000:
+        return excerpt, None
+    # Search the original string so case conversion (for example U+0130) cannot
+    # shift offsets. Prefer a line covering more query terms, then a longer term,
+    # with the earliest actual match as deterministic tie breaker. The line start
+    # is never the anchor: a hit at the tail of a long single line remains usable.
+    patterns = [re.compile(re.escape(term), re.IGNORECASE) for term in sorted(query_tokens, key=lambda term: (-len(term), term))]
+    anchor, best, position = 0, (0, 0), 0
+    for line in text.splitlines(keepends=True):
+        matches = [match for pattern in patterns if (match := pattern.search(line)) is not None]
+        if matches:
+            score = (len(matches), max(match.end() - match.start() for match in matches))
+            if score > best:
+                best = score
+                anchor = position + min(match.start() for match in matches)
+        position += len(line)
+    offset = max(0, anchor - 320)
+    length = min(8000, len(text) - offset)
+    fragment = {"projectionRevision": "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "offset": offset, "length": length}
+    return text[offset:offset + min(1200, length)], fragment
 
 
 def extract_excerpt(text: str, query_tokens: set[str], max_lines: int = 8) -> str:
@@ -2181,6 +2218,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=8, help="Maximum candidates to print.")
     parser.add_argument("--max-chars", type=int, default=3500, help="Maximum output characters.")
     parser.add_argument("--json", action="store_true", help="Output machine-readable JSON instead of Markdown.")
+    parser.add_argument("--page-fragments", action="store_true", help="Add version-pinned continuous ranges for long pages; requires --source-scope pages, --query and --json.")
     parser.add_argument(
         "--source-scope",
         choices=("all", "pages"),
@@ -2223,6 +2261,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.source_scope == "pages" and (args.read_page is not None or args.session_start):
         parser.error("--source-scope pages requires --query or --file and cannot combine with --read-page or --session-start")
+    if args.page_fragments and (args.source_scope != "pages" or not args.query.strip() or not args.json):
+        parser.error("--page-fragments requires --source-scope pages, --query and --json")
     return args
 
 
@@ -2268,8 +2308,8 @@ def render_markdown(candidates: list[Candidate], max_chars: int, ambient: bool =
     return output
 
 
-def render_json(candidates: list[Candidate], max_chars: int) -> str:
-    """Return a valid JSON array within budget; never byte-slice serialized JSON."""
+def _json_payload(candidates: list[Candidate], max_chars: int, *, empty_fragment_previews: bool = False) -> list[dict[str, Any]]:
+    """Fit the ranked prefix without byte-slicing serialized JSON."""
     budget = max(200, max_chars)
     payload: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -2277,13 +2317,17 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
             "score": candidate.score,
             "source": candidate.source,
             "title": candidate.title,
-            "text": redact(candidate.text.strip()),
+            # Fragment previews already refer to the fully redacted projection.
+            # Trimming or redacting a second time would invalidate its coordinates.
+            "text": ("" if empty_fragment_previews else candidate.text) if candidate.fragment is not None else redact(candidate.text.strip()),
             "signals": candidate.signals,
             "memory_id": candidate.memory_id,
             "governance": candidate.governance,
         }
         if "path" in candidate.signals:
             base.update({"path": candidate.signals["path"], "revision": candidate.signals["revision"]})
+        if candidate.fragment is not None:
+            base.update({"fragment": candidate.fragment, "truncated": len(base["text"]) < candidate.fragment["length"]})
         trial = payload + [base]
         serialized = json.dumps(trial, ensure_ascii=False, indent=2)
         if len(serialized) <= budget:
@@ -2296,7 +2340,7 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
             midpoint = (low + high) // 2
             clipped = dict(base)
             clipped["text"] = base["text"][:midpoint]
-            clipped["truncated"] = midpoint < len(base["text"])
+            clipped["truncated"] = midpoint < (candidate.fragment["length"] if candidate.fragment is not None else len(base["text"]))
             serialized = json.dumps(payload + [clipped], ensure_ascii=False, indent=2)
             if len(serialized) <= budget:
                 fitted = clipped
@@ -2306,6 +2350,31 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
         if fitted is not None:
             payload.append(fitted)
         break
+    return payload
+
+
+def render_json(candidates: list[Candidate], max_chars: int) -> str:
+    """Keep candidate identities ahead of optional fragment previews in the same budget."""
+    fragments = any(candidate.fragment is not None for candidate in candidates)
+    # Preserve the legacy path exactly when there are no fragments. In fragment
+    # mode, reserve the ranked prefix's metadata and whole-page excerpts first:
+    # an optional preview must not displace later usable whole-page candidates.
+    payload = _json_payload(candidates, max_chars, empty_fragment_previews=fragments)
+    if fragments and payload:
+        reserved = payload
+        visible = candidates[:len(reserved)]
+        low, high = 0, max((len(candidate.text) for candidate in visible if candidate.fragment is not None), default=0)
+        while low <= high:
+            midpoint = (low + high) // 2
+            trial = [({**row, "text": candidate.text[:midpoint],
+                       "truncated": min(midpoint, len(candidate.text)) < candidate.fragment["length"]}
+                      if candidate.fragment is not None else row)
+                     for row, candidate in zip(reserved, visible)]
+            if len(json.dumps(trial, ensure_ascii=False, indent=2)) <= max(200, max_chars):
+                payload = trial
+                low = midpoint + 1
+            else:
+                high = midpoint - 1
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -2474,9 +2543,9 @@ def main(argv: list[str]) -> int:
     candidates = event_candidates(events, query_tokens, query_groups, touched_files, args.project)
     try:
         if args.ranking == "legacy":
-            candidates.extend(_legacy_wiki_candidates(root, legacy_tokenize([args.query, *touched_files]), access, args.project))
+            candidates.extend(_legacy_wiki_candidates(root, legacy_tokenize([args.query, *touched_files]), access, args.project, args.page_fragments))
         else:
-            candidates.extend(wiki_candidates(root, args.query, query_terms, query_groups, access, args.project))
+            candidates.extend(wiki_candidates(root, args.query, query_terms, query_groups, access, args.project, args.page_fragments))
     except PageSnapshotError as exc:
         print(f"llm-wiki-enrich: page snapshot unavailable [{exc.code}]; no partial search results", file=sys.stderr)
         return 4

@@ -398,6 +398,12 @@ llm-wiki-eval --json
 完整快照检查不变，事件快照损坏时仍整体失败。`pages` 不可与 `--read-page` 或
 `--session-start` 混用。
 
+长页可显式加 `--page-fragments --source-scope pages --query "主题" --json`：
+超过 12,000 Unicode 码点的安全投影会附上原文版本、投影版本和连续片段范围，
+供 [context schema 2](docs/CONTINUING_CONTEXT.md#authorized-page-fragments) 重新授权读取。
+搜索文本仅是该范围的预览，最终交接仍限制每项 12,000、总计 40,000 码点和 20 个
+唯一来源；默认搜索和 schema 1 整页读取不变。
+
 `llm-wiki-health` 现在也报告 `graph_status` / `graph_issues`：Graphify manifest 缺失、
 损坏，或 wiki 输入比 manifest 更新时会明确标成 missing / invalid / stale。默认仍是
 建议项；`--strict` 才把健康问题升级为非零退出码。
