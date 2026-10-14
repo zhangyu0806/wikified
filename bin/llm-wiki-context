@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import stat
 import sys
 
 sys.dont_write_bytecode = True
@@ -18,6 +19,104 @@ MAX_TEXT = 40000
 MAX_ITEM_TEXT = 12000
 REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
 PROFILES = ("coding", "codex", "opencode", "claude", "cursor", "grok", "planning", "reflection")
+
+
+def _directory_signature(path, *, optional=False):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if optional:
+            return None
+        raise
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise ValueError("unsafe generation directory")
+    return ENGINE["_event_stat_signature"](info)
+
+
+def _generation_directories(root, source_review_enabled):
+    # Parent identities bind the canonical route to the vault, without watching
+    # unrelated writes in shared ancestors such as a system temporary directory.
+    ancestors = [(str(path), _directory_signature(path)[:2]) for path in reversed(root.parents)]
+    result = {"ancestors": ancestors, "root": _directory_signature(root),
+              "policy": _directory_signature(root / "policy"),
+              "memory": _directory_signature(root / "memory", optional=True),
+              "sourceReview": (_directory_signature(root / "memory/source-review")
+                               if source_review_enabled else None), "pageTrees": []}
+    # The ordinary page manifest records present Markdown files. Directory
+    # ctime/mtime also detect a file/tree created and removed between batches.
+    # Do not follow links or read page bodies to construct this observation.
+    visited_entries = 0
+    for collection in ("wiki", "notes"):
+        directory = root / collection
+        initial = _directory_signature(directory, optional=True)
+        result["pageTrees"].append((collection, initial))
+        if initial is None:
+            continue
+        pending = [directory]
+        while pending:
+            current = pending.pop()
+            before = _directory_signature(current)
+            children = []
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    visited_entries += 1
+                    if visited_entries > ENGINE["MAX_PAGE_DIRECTORY_ENTRIES"]:
+                        raise ValueError("generation directory limit")
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode):
+                        children.append(current / entry.name)
+                    elif stat.S_ISLNK(info.st_mode):
+                        result["pageTrees"].append((str((current / entry.name).relative_to(root)),
+                                                   ENGINE["_event_stat_signature"](info)))
+            if _directory_signature(current) != before:
+                raise ValueError("generation directory changed")
+            if current != directory:
+                result["pageTrees"].append((str(current.relative_to(root)), before))
+            pending.extend(sorted(children, reverse=True))
+    result["pageTrees"].sort(key=lambda item: item[0])
+    return result
+
+
+def _generation_value(value):
+    # Raw policy/ledger bytes stay inside this process. Hash each byte string
+    # before canonicalizing the outer observation; emit only the final digest.
+    if isinstance(value, bytes):
+        return {"sha256": hashlib.sha256(value).hexdigest()}
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _generation_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_generation_value(item) for item in value]
+    if value is None or type(value) in (str, int, bool):
+        return value
+    raise ValueError("invalid generation component")
+
+
+def observe_generation(root, profile):
+    """Opaque filesystem observation for one complete, caller-bracketed search."""
+    if profile not in PROFILES:
+        raise ValueError("assistant profile required")
+    root = root.absolute()
+    if root.resolve(strict=True) != root:
+        raise ValueError("unsafe root")
+    access = ENGINE["access_context"](root, profile)
+    directories = _generation_directories(root, "source_review" in access.policy_document)
+    pages = ENGINE["PageGeneration"](root, access)
+    events = ENGINE["_event_manifest"](root / "memory/events")
+    value = {"protocol": "wikified-search-generation/v1", "profile": access.profile_name,
+             "root": access.root_identity, "policy": access.policy_generation,
+             "pages": [(relative, signature) for _, _, relative, signature in pages.manifest],
+             "directories": directories, "events": events,
+             "sourceReview": pages.source_review._generation if pages.source_review is not None else None}
+    pages.verify()
+    if (_generation_directories(root, "source_review" in access.policy_document) != directories
+            or ENGINE["_event_manifest"](root / "memory/events") != events):
+        raise ValueError("generation changed")
+    pages.verify()
+    digest = hashlib.sha256(json.dumps(_generation_value(value), sort_keys=True,
+        ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+    return {"schemaVersion": 1, "profile": profile, "generation": "sha256:" + digest}
 
 
 def request(value):
@@ -134,11 +233,17 @@ def main():
     parser = Parser(allow_abbrev=False)
     parser.add_argument("--root", default=os.environ.get("LLM_WIKI_ROOT", str(Path.home() / "llm-wiki")))
     parser.add_argument("--agent-profile", required=True, choices=PROFILES)
-    parser.add_argument("--request", required=True)
-    for flag in ("--root", "--agent-profile", "--request"):
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--request")
+    mode.add_argument("--observe-generation", action="store_true",
+                      help="Return an opaque read-only filesystem generation for bracketing a complete search.")
+    for flag in ("--root", "--agent-profile", "--request", "--observe-generation"):
         if sum(arg == flag or arg.startswith(flag + "=") for arg in sys.argv[1:]) > 1:
             raise ValueError("duplicate argument")
     args = parser.parse_args()
+    if args.observe_generation:
+        print(json.dumps(observe_generation(Path(args.root), args.agent_profile), allow_nan=False))
+        return
     if len(args.request.encode("utf-8")) > 16384:
         raise ValueError("request too large")
     value = json.loads(args.request, object_pairs_hook=ENGINE["_event_json_object"],
