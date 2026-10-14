@@ -2,6 +2,7 @@
 """Prepare bounded, version-pinned context from existing assistant authority only."""
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -20,19 +21,28 @@ PROFILES = ("coding", "codex", "opencode", "claude", "cursor", "grok", "planning
 
 
 def request(value):
-    if not isinstance(value, dict) or set(value) != {"schemaVersion", "selections"} or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1:
+    if not isinstance(value, dict) or set(value) != {"schemaVersion", "selections"} or type(value["schemaVersion"]) is not int or value["schemaVersion"] not in (1, 2):
         raise ValueError("invalid context request")
     rows = value["selections"]
     if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_SELECTIONS:
         raise ValueError("invalid context selection")
     seen = set()
     for row in rows:
-        if (not isinstance(row, dict) or set(row) != {"kind", "memoryId", "revision"}
-                or row["kind"] not in ("page", "event")
+        fragment = isinstance(row, dict) and row.get("kind") == "page-fragment" and value["schemaVersion"] == 2
+        keys = {"kind", "memoryId", "revision"}
+        if fragment:
+            keys |= {"projectionRevision", "offset", "length"}
+        if (not isinstance(row, dict) or set(row) != keys
+                or row["kind"] not in (("page-fragment",) if fragment else ("page", "event"))
                 or not isinstance(row["memoryId"], str) or not ENGINE["MEMORY_ID_RE"].fullmatch(row["memoryId"])
                 or ENGINE["redact"](row["memoryId"]) != row["memoryId"]
                 or not isinstance(row["revision"], str) or not REVISION.fullmatch(row["revision"])
                 or row["memoryId"] in seen):
+            raise ValueError("invalid context selection")
+        if fragment and (not isinstance(row["projectionRevision"], str) or not REVISION.fullmatch(row["projectionRevision"])
+                         or type(row["offset"]) is not int or not 0 <= row["offset"] <= 2**53 - 1
+                         or type(row["length"]) is not int or not 1 <= row["length"] <= MAX_ITEM_TEXT
+                         or row["offset"] + row["length"] > 2**53 - 1):
             raise ValueError("invalid context selection")
         seen.add(row["memoryId"])
     return rows
@@ -66,7 +76,8 @@ def prepare(root, profile, value):
         if not isinstance(identity, str):
             continue
         add(identity, ("page", ENGINE["page_revision"](snapshot), entry.relative,
-                       ENGINE["redact"](ENGINE["projected_page_text"](snapshot))))
+                       ENGINE["redact"](ENGINE["projected_page_text"](snapshot)),
+                       {key: snapshot.metadata.governance[key] for key in ("domain", "sensitivity")}))
     for event in events:
         if event["__governance"]["review_status"] != "approved":
             continue
@@ -77,30 +88,41 @@ def prepare(root, profile, value):
         if not isinstance(event_id, str) or not re.fullmatch(r"[0-9a-f]{16}", event_id):
             continue
         add(identity, ("event", ENGINE["EVENT_REVIEW"]["record_revision"](event), event_id,
-                       ENGINE["redact"](str(event.get("summary", "")) + "\n" + str(event.get("details", "")))))
+                       ENGINE["redact"](str(event.get("summary", "")) + "\n" + str(event.get("details", ""))), None))
     items, used = [], 0
     for selection in selections:
         item = {"selection": dict(selection), "status": "unavailable"}
         current = available.get(selection["memoryId"])
-        if current is not None and current[0] == selection["kind"]:
-            kind, revision, locator, text = current
+        fragment = selection["kind"] == "page-fragment"
+        if current is not None and current[0] == ("page" if fragment else selection["kind"]):
+            kind, revision, locator, text, governance = current
             if ENGINE["redact"](locator) != locator:
                 raise ValueError("unsafe metadata")
             if revision != selection["revision"]:
                 # Only already-authorized records can reveal a newer revision.
                 item = {**item, "status": "changed", "currentRevision": revision}
-            elif len(text) > MAX_ITEM_TEXT or used + len(text) > MAX_TEXT:
-                item = {**item, "status": "too-large"}
             else:
-                item = {**item, "status": "ready", "locator": locator, "text": text}
-                used += len(text)
+                if fragment:
+                    projection = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+                    start, end = selection["offset"], selection["offset"] + selection["length"]
+                    if projection != selection["projectionRevision"] or end > len(text):
+                        items.append(item)
+                        continue
+                    text = text[start:end]
+                if len(text) > MAX_ITEM_TEXT or used + len(text) > MAX_TEXT:
+                    item = {**item, "status": "too-large"}
+                else:
+                    item = {**item, "status": "ready", "locator": locator, "text": text}
+                    if fragment:
+                        item["governance"] = governance
+                    used += len(text)
         items.append(item)
     # Fence the entire result, not just each individual read. Never return a
     # partial pack after a policy, file, source-review or event generation race.
     if before_events != ENGINE["_event_manifest"](root / "memory/events"):
         raise ValueError("events changed")
     pages.verify()
-    return {"schemaVersion": 1, "profile": profile, "items": items}
+    return {"schemaVersion": value["schemaVersion"], "profile": profile, "items": items}
 
 
 class Parser(argparse.ArgumentParser):
