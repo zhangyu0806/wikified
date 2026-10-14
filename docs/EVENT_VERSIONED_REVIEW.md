@@ -1,5 +1,9 @@
 # Opt-in version-bound JSONL review (v4)
 
+For explicit Markdown dependency bindings and rebinding, see the opt-in
+[v5 event source contract](EVENT_SOURCE_FRESHNESS.md). The v4 defaults and
+fingerprint algorithm described here remain unchanged.
+
 This is an explicit local CLI capability, not a default migration, cloud identity
 service, native client release or product event-review inbox. `llm-wiki-event`
 and Agent MCP still create v3 proposals. Existing v1–v3 read compatibility remains;

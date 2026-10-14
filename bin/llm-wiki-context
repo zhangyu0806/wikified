@@ -160,7 +160,7 @@ def prepare(root, profile, value):
     pages = ENGINE["page_snapshots"](root, access, None)
     before_events = ENGINE["_event_manifest"](root / "memory/events")
     with contextlib.redirect_stderr(io.StringIO()):
-        events = ENGINE["load_events"](root, access)
+        events = ENGINE["load_events"](root, access, pages=pages)
     available = {}
     def add(identity, entry):
         if identity in available:
@@ -220,6 +220,7 @@ def prepare(root, profile, value):
     # partial pack after a policy, file, source-review or event generation race.
     if before_events != ENGINE["_event_manifest"](root / "memory/events"):
         raise ValueError("events changed")
+    events.verify()
     pages.verify()
     return {"schemaVersion": value["schemaVersion"], "profile": profile, "items": items}
 

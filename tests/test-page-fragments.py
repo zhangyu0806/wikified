@@ -199,8 +199,8 @@ class PageFragments(unittest.TestCase):
         fragment = self.fragment(row)
         original = E["load_events"]
         for target in ("notes/one.md", "policy/access.json", "memory/events/new.jsonl"):
-            def mutate(root, access):
-                result = original(root, access)
+            def mutate(root, access, **kwargs):
+                result = original(root, access, **kwargs)
                 with (self.root / target).open("a") as handle:
                     handle.write("\n")
                 return result
@@ -307,8 +307,8 @@ class FragmentSourceGates(unittest.TestCase):
         self.enable()
         self.assertEqual(self.pack([selection])[0]["status"], "ready")
         original = E["load_events"]
-        def mutate(root, access):
-            result = original(root, access)
+        def mutate(root, access, **kwargs):
+            result = original(root, access, **kwargs)
             self.append("hold", SOURCE["DERIVED_ID"])
             return result
         with patch.dict(E, load_events=mutate), self.assertRaises(Exception):

@@ -27,7 +27,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Match provider-specific credentials before generic ``token=...`` forms so
@@ -95,6 +95,8 @@ EVENT_REVIEW = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_e
 SOURCE_FRESHNESS = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_source_freshness.py")))
 SOURCE_REVIEW = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_source_review.py")))
 REVIEW_EVENT_SCHEMA = EVENT_REVIEW["SCHEMA"]
+SOURCE_EVENT_SCHEMA = EVENT_REVIEW["SOURCE_SCHEMA"]
+REVIEW_EVENT_SCHEMAS = EVENT_REVIEW["SCHEMAS"]
 LEGACY_GOVERNANCE: dict[str, Any] = {
     "domain": "work",
     "sensitivity": "internal",
@@ -294,15 +296,24 @@ def _policy_generation(root: Path) -> tuple[Any, ...]:
 class PageGeneration:
     """Request-local observation fence; not a transaction against same-OS writers."""
 
-    def __init__(self, root: Path, access: AccessContext):
+    def __init__(self, root: Path, access: AccessContext, *, source_review_lock: Callable[[], None] | None = None):
         self.root, self.access = root, access
+        # Internal writer integration only: the callback verifies its already
+        # held exclusive descriptor. No CLI/request can provide this callback.
+        self.source_review_lock = source_review_lock
         try:
             if access.policy_document is None:
                 raise PageSnapshotError("source-review-unavailable")
             # Opt-in only: an old vault keeps its existing root/policy fence
             # without acquiring new lock or ledger filesystem requirements.
-            self.source_review = (SOURCE_REVIEW["read_snapshot"](root, access.policy_document)
-                                  if "source_review" in access.policy_document else None)
+            self.source_review = None
+            if "source_review" in access.policy_document:
+                if source_review_lock is not None:
+                    source_review_lock()
+                    self.source_review = SOURCE_REVIEW["_read_snapshot_unlocked"](root, access.policy_document)
+                    source_review_lock()
+                else:
+                    self.source_review = SOURCE_REVIEW["read_snapshot"](root, access.policy_document)
         except (SOURCE_REVIEW["SourceReviewError"], OSError) as exc:
             # The ledger contains governance, never user-facing diagnostics.
             raise PageSnapshotError("source-review-unavailable") from exc
@@ -316,7 +327,12 @@ class PageGeneration:
                 or _page_files(self.root) != self.manifest):
                 raise PageSnapshotError("snapshot-changed")
             if self.source_review is not None:
-                self.source_review.verify()
+                if self.source_review_lock is not None:
+                    self.source_review_lock()
+                    self.source_review._verify_unlocked()
+                    self.source_review_lock()
+                else:
+                    self.source_review.verify()
         except SOURCE_REVIEW["SourceReviewError"] as exc:
             raise PageSnapshotError("source-review-unavailable") from exc
         except OSError as exc:
@@ -324,9 +340,10 @@ class PageGeneration:
 
 
 class PageSnapshots(list):
-    def __init__(self, values: list[Any], generation: PageGeneration):
+    def __init__(self, values: list[Any], generation: PageGeneration, source_nodes: list[dict[str, Any]] | None = None):
         super().__init__(values)
         self.generation = generation
+        self.source_nodes = source_nodes if source_nodes is not None else []
 
     def verify(self) -> None:
         self.generation.verify()
@@ -1098,8 +1115,9 @@ def page_catalog(root: Path, manifest: list[tuple[Path, Path, str, tuple[Any, ..
     return entries
 
 
-def page_snapshots(root: Path, access: AccessContext, project: str | None) -> list[tuple[PageCatalogEntry, PageSnapshot]]:
-    generation = PageGeneration(root, access)
+def page_snapshots(root: Path, access: AccessContext, project: str | None,
+                   *, source_review_lock: Callable[[], None] | None = None) -> PageSnapshots:
+    generation = PageGeneration(root, access, source_review_lock=source_review_lock)
     manifest = generation.manifest
     catalog = page_catalog(root, manifest)
     snapshots: list[tuple[PageCatalogEntry, PageSnapshot]] = []
@@ -1159,7 +1177,7 @@ def page_snapshots(root: Path, access: AccessContext, project: str | None) -> li
                                 metadata.has_frontmatter, metadata.frontmatter)
         reusable.append((entry, PageSnapshot(governed, snapshot.raw, snapshot.body)))
     generation.verify()
-    return PageSnapshots(reusable, generation)
+    return PageSnapshots(reusable, generation, nodes)
 
 
 def page_revision(snapshot: PageSnapshot) -> str:
@@ -1261,7 +1279,7 @@ def strip_frontmatter(text: str, has_frontmatter: bool) -> str:
 def event_metadata(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     schema_present = "schema_version" in event
     schema = event.get("schema_version")
-    if schema_present and schema not in LEGACY_EVENT_SCHEMAS | {CURRENT_EVENT_SCHEMA, REVIEW_EVENT_SCHEMA}:
+    if schema_present and schema not in LEGACY_EVENT_SCHEMAS | {CURRENT_EVENT_SCHEMA} | REVIEW_EVENT_SCHEMAS:
         return None
     event_id = event.get("id")
     if isinstance(event_id, str) and event_id.strip():
@@ -1269,7 +1287,7 @@ def event_metadata(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     else:
         canonical = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         fallback_id = stable_memory_id("event", canonical)
-    if schema in {CURRENT_EVENT_SCHEMA, REVIEW_EVENT_SCHEMA}:
+    if schema in {CURRENT_EVENT_SCHEMA} | REVIEW_EVENT_SCHEMAS:
         required = {
             "id", "memory_id", "actor", "domain", "sensitivity", "epistemic_status",
             "review_status", "target_agents",
@@ -1303,7 +1321,7 @@ def event_metadata(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
         memory_id, governance = governance_from_mapping(event, fallback_id)
     except PolicyError:
         return None
-    if schema in {CURRENT_EVENT_SCHEMA, REVIEW_EVENT_SCHEMA}:
+    if schema in {CURRENT_EVENT_SCHEMA} | REVIEW_EVENT_SCHEMAS:
         actor_type = event["actor"]["type"]
         epistemic = governance["epistemic_status"]
         review = governance["review_status"]
@@ -1323,7 +1341,7 @@ def event_metadata(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
             return None
         if epistemic in {"source-record", "externally-verified", "legacy-imported"} and review != "approved":
             return None
-    if schema == REVIEW_EVENT_SCHEMA and not EVENT_REVIEW["validate_binding"](event):
+    if schema in REVIEW_EVENT_SCHEMAS and not EVENT_REVIEW["validate_binding"](event):
         return None
     return memory_id, governance
 
@@ -1608,7 +1626,7 @@ def _read_event_snapshot(root: Path) -> list[dict[str, Any]]:
                     schema = item.get("schema_version")
                     if "schema_version" in item and (
                         not isinstance(schema, str)
-                        or schema not in LEGACY_EVENT_SCHEMAS | {CURRENT_EVENT_SCHEMA, REVIEW_EVENT_SCHEMA}
+                        or schema not in LEGACY_EVENT_SCHEMAS | {CURRENT_EVENT_SCHEMA} | REVIEW_EVENT_SCHEMAS
                     ):
                         raise EventSnapshotError("unknown-event-schema")
                     try:
@@ -1616,7 +1634,7 @@ def _read_event_snapshot(root: Path) -> list[dict[str, Any]]:
                     except (TypeError, ValueError):
                         metadata = None
                     if metadata is None:
-                        if schema == REVIEW_EVENT_SCHEMA:
+                        if schema in REVIEW_EVENT_SCHEMAS:
                             raise EventSnapshotError("invalid-event-review")
                         rejected += 1
                         continue
@@ -1666,7 +1684,7 @@ def _event_terminal_edges(events: list[dict[str, Any]], now: datetime) -> dict[s
             continue
         governance = revision["__governance"]
         review = governance.get("review_status")
-        versioned = revision.get("schema_version") == REVIEW_EVENT_SCHEMA
+        versioned = revision.get("schema_version") in REVIEW_EVENT_SCHEMAS
         effective = parse_time(revision["review"]["at"] if versioned else revision.get("valid_from") or revision.get("timestamp"))
         expiry = parse_time(revision.get("valid_until"))
         if review not in {"approved", "rejected"} or effective is None or effective > now:
@@ -1714,7 +1732,42 @@ def _event_terminal_edges(events: list[dict[str, Any]], now: datetime) -> dict[s
     return edges
 
 
-def load_events(root: Path, access: AccessContext) -> list[dict[str, Any]]:
+class EventSnapshots(list):
+    """Keep source and event observations alive until the caller emits output."""
+    def __init__(self, values, root, manifest, parent, pages):
+        super().__init__(values)
+        self.root, self.manifest, self.parent, self.pages = root, manifest, parent, pages
+
+    def verify(self):
+        if (_event_parent_signature(self.root) != self.parent
+            or _event_manifest(self.root / "memory/events") != self.manifest):
+            raise EventSnapshotError("snapshot-changed")
+        if self.pages is not None:
+            self.pages.verify()
+
+
+def _event_parent_signature(root):
+    try:
+        info = (root / "memory").lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise EventSnapshotError("unreadable") from None
+    if not stat.S_ISDIR(info.st_mode):
+        raise EventSnapshotError("unsafe-event-directory")
+    return _event_stat_signature(info)
+
+
+def load_events(root: Path, access: AccessContext, *, pages: PageSnapshots | None = None,
+                include_source_unavailable: bool = False) -> EventSnapshots:
+    # This exception is only for the fixed local human review catalog. It is not
+    # an assistant recall option, and does not override the event's own ACL.
+    if include_source_unavailable and access.profile_name != "human":
+        raise PolicyError("human review scope required")
+    if pages is not None and (pages.generation.root != root or pages.generation.access != access):
+        raise PolicyError("source snapshot scope mismatch")
+    parent = _event_parent_signature(root)
+    manifest = _event_manifest(root / "memory/events")
     events = _read_event_snapshot(root)
     now = datetime.now(timezone.utc)
     superseded = {target for targets in _event_terminal_edges(events, now).values() for target in targets}
@@ -1722,7 +1775,7 @@ def load_events(root: Path, access: AccessContext) -> list[dict[str, Any]]:
     for event in events:
         if event.get("lifecycle", "active") != "active" or str(event.get("id", "")) in superseded:
             continue
-        if event.get("schema_version") == REVIEW_EVENT_SCHEMA and parse_time(event["review"]["at"]) > now:
+        if event.get("schema_version") in REVIEW_EVENT_SCHEMAS and parse_time(event["review"]["at"]) > now:
             continue
         valid_from = parse_time(event.get("valid_from") or event.get("timestamp"))
         valid_until = parse_time(event.get("valid_until"))
@@ -1732,8 +1785,20 @@ def load_events(root: Path, access: AccessContext) -> list[dict[str, Any]]:
             continue
         if not is_authorized(event["__governance"], access):
             continue
+        if event.get("schema_version") == SOURCE_EVENT_SCHEMA:
+            if pages is None:
+                pages = page_snapshots(root, access, None)
+            identity = event["record_id"]
+            nodes = [*pages.source_nodes, {"id": identity, "revision": EVENT_REVIEW["record_revision"](event),
+                                         "sources": event["sources"]}]
+            assessment = SOURCE_FRESHNESS["assess"](identity, nodes)
+            event = {**event, "__governance": {**event["__governance"], "source_freshness": assessment["state"]}}
+            if not assessment["reuseAllowed"] and not include_source_unavailable:
+                continue
         active.append(event)
-    return active
+    result = EventSnapshots(active, root, manifest, parent, pages)
+    result.verify()
+    return result
 
 
 def event_candidates(
@@ -2536,7 +2601,7 @@ def main(argv: list[str]) -> int:
     query_tokens = set(query_terms)
     try:
         events = load_events(root, access)
-    except EventSnapshotError as exc:
+    except (EventSnapshotError, PageSnapshotError) as exc:
         recovery = "retry after writers finish" if exc.code == "snapshot-changed" else "inspect the event snapshot before retrying"
         print(f"llm-wiki-enrich: event snapshot unavailable [{exc.code}]; {recovery}", file=sys.stderr)
         return 4
@@ -2559,9 +2624,10 @@ def main(argv: list[str]) -> int:
     candidates = sorted(candidates, key=lambda item: item.score, reverse=True)[: max(1, args.limit)]
     output = render_json(candidates, args.max_chars) + "\n" if args.json else render_markdown(candidates, max(200, args.max_chars), args.ambient)
     try:
+        events.verify()
         generation.verify()
-    except PageSnapshotError as exc:
-        print(f"llm-wiki-enrich: page snapshot unavailable [{exc.code}]; no partial export", file=sys.stderr)
+    except (PageSnapshotError, EventSnapshotError) as exc:
+        print(f"llm-wiki-enrich: snapshot unavailable [{exc.code}]; no partial export", file=sys.stderr)
         return 4
     sys.stdout.write(output)
     return 0

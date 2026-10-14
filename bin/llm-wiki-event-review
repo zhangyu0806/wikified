@@ -67,8 +67,21 @@ def main(argv):
         try:
             if (memory.lstat().st_dev, memory.lstat().st_ino) != (before.st_dev, before.st_ino):
                 raise ValueError("memory directory changed")
+            lock_signature = ENGINE["_event_stat_signature"](os.fstat(handle.fileno()))
+            def verify_source_review_lock():
+                # Source-review uses the same POSIX lock. A second descriptor
+                # cannot acquire a shared lock while this writer owns LOCK_EX.
+                # Reassert and verify the existing descriptor instead.
+                fcntl = WRITER["fcntl"]
+                if os.name != "posix" or fcntl is None:
+                    raise ValueError("source review requires POSIX locking")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if ((memory.lstat().st_dev, memory.lstat().st_ino) != (before.st_dev, before.st_ino)
+                    or ENGINE["_event_stat_signature"](os.fstat(handle.fileno())) != lock_signature
+                    or ENGINE["_event_stat_signature"](lock_path.lstat()) != lock_signature):
+                    raise ValueError("source review lock changed")
             rows, closed = snapshot(root)
-            prior = next((e for e in rows if e.get("schema_version") == CORE["SCHEMA"] and e["review"]["request_id"] == request.get("request_id")), None)
+            prior = next((e for e in rows if e.get("schema_version") in CORE["SCHEMAS"] and e["review"]["request_id"] == request.get("request_id")), None)
             if prior:
                 if prior["id"] in closed or prior["review"]["request_revision"] != CORE["request_revision"](request) or prior["actor"]["id"] != actor_id:
                     raise ValueError("review retry conflicts with current state")
@@ -84,6 +97,20 @@ def main(argv):
                 raise ValueError("event requires redaction before review")
             if ENGINE["event_metadata"](e) is None:
                 raise ValueError("invalid generated event governance")
+            source_pages = None
+            if "source_bindings" in request:
+                # Only explicitly selected bindings are refreshed. Unselected
+                # edges keep their reviewed revisions, including stale edges.
+                access = ENGINE["access_context"](root, "human")
+                if not ENGINE["is_authorized"](ENGINE["event_metadata"](e)[1], access):
+                    raise ValueError("event unavailable to reviewer")
+                source_pages = ENGINE["page_snapshots"](root, access, None, source_review_lock=verify_source_review_lock)
+                available = {page.metadata.memory_id: page for _, page in source_pages
+                             if (page.metadata.frontmatter or {}).get("memory_id")}
+                for binding in CORE["source_bindings"](request["source_bindings"]):
+                    page = available.get(binding["id"])
+                    if page is None or ENGINE["page_revision"](page) != binding["revision"]:
+                        raise ValueError("source unavailable or changed")
             CORE["validate_links"](rows + [e])
             # Verify inherited edges and cycles against the same locked snapshot.
             index = {r["id"]:r for r in rows}
@@ -115,6 +142,8 @@ def main(argv):
                 raise ValueError("event directory entry limit")
             if ENGINE["_event_manifest"](directory) != manifest:
                 raise ValueError("event directory changed")
+            if source_pages is not None:
+                source_pages.verify()
             flags = os.O_WRONLY | os.O_APPEND | getattr(os,"O_NOFOLLOW",0)
             if path.name not in manifest[1]:
                 flags |= os.O_CREAT | os.O_EXCL
@@ -125,11 +154,15 @@ def main(argv):
                     raise ValueError("unsafe event output")
                 if path.name in manifest[1] and ENGINE["_event_stat_signature"](info) != manifest[1][path.name]:
                     raise ValueError("event output changed")
+                if source_pages is not None:
+                    source_pages.verify()
                 output.write(line); output.flush(); os.fsync(output.fileno())
             if path.name not in manifest[1] and os.name == "posix":
                 directory_fd = os.open(directory, os.O_RDONLY | getattr(os,"O_DIRECTORY",0) | getattr(os,"O_NOFOLLOW",0))
                 try: os.fsync(directory_fd)
                 finally: os.close(directory_fd)
+            if source_pages is not None:
+                source_pages.verify()
             print(json.dumps(e, ensure_ascii=False, allow_nan=False))
             return 0
         finally:
@@ -138,7 +171,7 @@ def main(argv):
 if __name__ == "__main__":
     try:
         raise SystemExit(main(sys.argv[1:]))
-    except (ValueError, TypeError, KeyError, OSError, UnicodeError, OverflowError, RecursionError, ENGINE["EventSnapshotError"]):
+    except (ValueError, TypeError, KeyError, OSError, UnicodeError, OverflowError, RecursionError, ENGINE["EventSnapshotError"], ENGINE["PageSnapshotError"], ENGINE["PolicyError"]):
         # Never echo stdin, environment values, event text or paths.
         print("llm-wiki-event-review: review unavailable or conflicted; re-inspect current state and authority", file=sys.stderr)
         raise SystemExit(2)

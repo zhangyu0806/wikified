@@ -152,7 +152,7 @@ def load_event_state(root: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(event, dict) and event.get("schema_version") == EVENT_REVIEW["SCHEMA"]:
+            if isinstance(event, dict) and event.get("schema_version") in EVENT_REVIEW["SCHEMAS"]:
                 has_versioned = True
             if isinstance(event, dict) and isinstance(event.get("id"), str):
                 event_id = event["id"]
@@ -199,7 +199,7 @@ def validate_supersedes(
         target = event_index.get(target_id)
         if target is None:
             raise ValueError(f"supersedes target does not exist: {target_id}")
-        if target.get("schema_version") == EVENT_REVIEW["SCHEMA"] and not allow_versioned:
+        if target.get("schema_version") in EVENT_REVIEW["SCHEMAS"] and not allow_versioned:
             raise ValueError("versioned event target requires the independent review command")
         target_project = str(target.get("project") or "").strip()
         if not normalized_project or target_project != normalized_project:
@@ -262,7 +262,7 @@ def normalized_supersedes(event: dict[str, Any]) -> list[str]:
 
 
 def is_effective_terminal_revision(event: dict[str, Any]) -> bool:
-    if event.get("schema_version") == EVENT_REVIEW["SCHEMA"]:
+    if event.get("schema_version") in EVENT_REVIEW["SCHEMAS"]:
         return EVENT_REVIEW["validate_binding"](event) and parse_time(event["review"]["at"]) <= datetime.now(timezone.utc)
     event_id = event.get("id")
     if not isinstance(event_id, str) or not re.fullmatch(r"[0-9a-f]{16}", event_id):
@@ -338,7 +338,7 @@ def terminally_superseded_ids(event_index: dict[str, dict[str, Any]]) -> set[str
             target_project = str(target.get("project") or "").strip()
             target_domain = str(target.get("domain") or "").strip().lower()
             target_status = target.get("review_status", target.get("review_state", "approved"))
-            withdrawal = event.get("schema_version") == EVENT_REVIEW["SCHEMA"] and event["review"]["decision"] == "withdraw"
+            withdrawal = event.get("schema_version") in EVENT_REVIEW["SCHEMAS"] and event["review"]["decision"] == "withdraw"
             closes_target = event.get("review_status") == "approved" or target_status == "pending" or withdrawal
             if target_project == event_project and target_domain == event_domain and closes_target:
                 closed.add(target_id)
