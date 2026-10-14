@@ -130,3 +130,52 @@ revisions and range, and must not present it as the complete document.
 with synthetic long-tail pages, Unicode and redaction coordinates, legacy
 compatibility, shared budgets, authorization, source and review denials, holds,
 version mismatches and generation races. No installed vault is used.
+
+## Bracketing a search across multiple context processes
+
+A server that collects several context batches must keep all previews temporary
+until it has checked the complete search's filesystem generation. The explicit,
+read-only CLI mode is:
+
+```bash
+llm-wiki-context --agent-profile codex --observe-generation
+```
+
+It is mutually exclusive with `--request` and returns exactly `schemaVersion: 1`,
+the fixed `profile`, and `generation: "sha256:<64 lowercase hexadecimal characters>"`.
+Call it before candidate discovery and again after all batches have finished,
+using the same canonical root and profile. Validate both response shapes and
+require equal generations before publishing any accumulated result. On a failed
+observation or mismatch, discard the entire temporary result and ask for a fresh
+search. An empty result also needs the final observation. The caller's existing
+overall deadline and process-concurrency limits apply to both observations.
+
+The opaque digest binds the canonical root and ancestor identities, fixed profile,
+policy bytes and complete stat signature, bounded page manifest and directory
+topology, memory/event directory and event-file signatures, and the enabled
+source-review snapshot including policy, ledger, lock and directory generations.
+Capture is followed by verification before returning a digest. Byte strings are
+hashed inside the engine; no paths, record identities, metadata, ledger contents
+or text are returned. The observer never reads unauthorized page bodies, creates
+a token store, or writes to the vault. Keep its digest internal to the calling
+server, rather than placing it in a user response or persistent topic file.
+
+Nanosecond ctime, mtime and inode signatures detect ordinary changes followed by
+restoring the same bytes and mtime. Directory signatures additionally detect
+transient page creation/deletion and subtree replacement even when surviving
+Markdown file signatures do not change. Ancestors outside the vault are bound
+by identity, without treating unrelated writes in shared parent directories as
+vault changes. Unsafe paths, configured ledger damage and incomplete bounded
+observations fail closed.
+
+This is a filesystem observation fence, not an authorization grant or an atomic
+transaction against arbitrary same-OS writers or filesystem snapshot rollback.
+It does not freeze wall-clock event expiry. Each context batch still performs all
+current authorization, review, source/version and text-budget checks; the final
+observation adds cross-batch change detection for page-search previews. It cannot
+revoke data already delivered to another process. The default CLI request and
+MCP protocols are unchanged; this server-internal mode is not an MCP tool.
+
+`python3 -B tests/test-search-generation.py` covers real subprocess observations,
+profile/root binding, restore and directory races, source-review holds and lock
+generations, rejection of unsafe/incomplete observations, and legacy requests.
