@@ -152,6 +152,38 @@ class PageFragments(unittest.TestCase):
         whole = self.page("short", "x" * 8000)
         self.assertEqual([item["status"] for item in self.pack([whole, *rows[:3]])], ["ready"] * 3 + ["too-large"])
 
+    def test_forty_ranked_candidates_survive_fragment_preview_budget_both_profiles(self):
+        query = "scopealpha scopebeta scopegamma"
+        short_selections = []
+        for number in range(20):
+            directory = f"oversized-{number:02d}"
+            (self.root / "notes" / directory).mkdir()
+            self.page(directory + "/scopealpha", query + "\nHistorical index only; no current resolution.\n"
+                      + "neutral synthetic background\n" * 600)
+            short_selections.append(self.page(f"evidence-{number:02d}", "scopealpha owner: synthetic team\n"
+                "scopebeta action: clear cache\nscopegamma result: retry once\n"))
+        for profile in ("codex", "opencode"):
+            complete = self.search(query=query, profile=profile, budget=200000)
+            self.assertEqual(len(complete), 40)
+            self.assertTrue(all("fragment" in hit for hit in complete[:20]))
+            expected_short_ids = [row["memoryId"] for row in short_selections]
+            self.assertEqual([hit["memory_id"] for hit in complete[20:]], expected_short_ids)
+            bounded = self.search(query=query, profile=profile, budget=65536)
+            self.assertEqual(len(bounded), 40)
+            self.assertEqual([hit["memory_id"] for hit in bounded], [hit["memory_id"] for hit in complete])
+            self.assertEqual(bounded[20:], complete[20:])
+            for hit, full in zip(bounded[:20], complete[:20]):
+                self.assertEqual(hit["fragment"], full["fragment"])
+                self.assertEqual({key: value for key, value in hit.items() if key != "text"},
+                                 {key: value for key, value in full.items() if key != "text"})
+                self.assertTrue(full["text"].startswith(hit["text"]))
+                self.assertLess(len(hit["text"]), 1200)
+            # Search preview compression changes neither the actual selected
+            # sources nor the unchanged twenty-item / 40,000-code-point pack.
+            self.assertEqual([item["status"] for item in self.pack(short_selections, profile=profile)], ["ready"] * 20)
+            normal = self.search(query=query, profile=profile, fragments=False)
+            self.assertEqual([hit["memory_id"] for hit in normal], [hit["memory_id"] for hit in complete])
+
     def test_profile_review_and_authority_cannot_be_bypassed(self):
         row = self.page(body="fragmentneedle " + "x" * 15000)
         fragment = self.fragment(row)

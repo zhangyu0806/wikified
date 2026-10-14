@@ -2308,8 +2308,8 @@ def render_markdown(candidates: list[Candidate], max_chars: int, ambient: bool =
     return output
 
 
-def render_json(candidates: list[Candidate], max_chars: int) -> str:
-    """Return a valid JSON array within budget; never byte-slice serialized JSON."""
+def _json_payload(candidates: list[Candidate], max_chars: int, *, empty_fragment_previews: bool = False) -> list[dict[str, Any]]:
+    """Fit the ranked prefix without byte-slicing serialized JSON."""
     budget = max(200, max_chars)
     payload: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -2319,7 +2319,7 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
             "title": candidate.title,
             # Fragment previews already refer to the fully redacted projection.
             # Trimming or redacting a second time would invalidate its coordinates.
-            "text": candidate.text if candidate.fragment is not None else redact(candidate.text.strip()),
+            "text": ("" if empty_fragment_previews else candidate.text) if candidate.fragment is not None else redact(candidate.text.strip()),
             "signals": candidate.signals,
             "memory_id": candidate.memory_id,
             "governance": candidate.governance,
@@ -2327,7 +2327,7 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
         if "path" in candidate.signals:
             base.update({"path": candidate.signals["path"], "revision": candidate.signals["revision"]})
         if candidate.fragment is not None:
-            base.update({"fragment": candidate.fragment, "truncated": len(candidate.text) < candidate.fragment["length"]})
+            base.update({"fragment": candidate.fragment, "truncated": len(base["text"]) < candidate.fragment["length"]})
         trial = payload + [base]
         serialized = json.dumps(trial, ensure_ascii=False, indent=2)
         if len(serialized) <= budget:
@@ -2350,6 +2350,31 @@ def render_json(candidates: list[Candidate], max_chars: int) -> str:
         if fitted is not None:
             payload.append(fitted)
         break
+    return payload
+
+
+def render_json(candidates: list[Candidate], max_chars: int) -> str:
+    """Keep candidate identities ahead of optional fragment previews in the same budget."""
+    fragments = any(candidate.fragment is not None for candidate in candidates)
+    # Preserve the legacy path exactly when there are no fragments. In fragment
+    # mode, reserve the ranked prefix's metadata and whole-page excerpts first:
+    # an optional preview must not displace later usable whole-page candidates.
+    payload = _json_payload(candidates, max_chars, empty_fragment_previews=fragments)
+    if fragments and payload:
+        reserved = payload
+        visible = candidates[:len(reserved)]
+        low, high = 0, max((len(candidate.text) for candidate in visible if candidate.fragment is not None), default=0)
+        while low <= high:
+            midpoint = (low + high) // 2
+            trial = [({**row, "text": candidate.text[:midpoint],
+                       "truncated": min(midpoint, len(candidate.text)) < candidate.fragment["length"]}
+                      if candidate.fragment is not None else row)
+                     for row, candidate in zip(reserved, visible)]
+            if len(json.dumps(trial, ensure_ascii=False, indent=2)) <= max(200, max_chars):
+                payload = trial
+                low = midpoint + 1
+            else:
+                high = midpoint - 1
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 

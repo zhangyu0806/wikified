@@ -76,7 +76,15 @@ first actual match on that line, even on a long single line. Case conversion
 does not change coordinate calculation. If only a filename or redacted material
 matched, the range starts at zero. Its length is 8,000 code points, or the
 remaining text near the end. Search `text` is an exact prefix of that range,
-at most 1,200 code points and possibly shorter under the existing output budget.
+at most 1,200 code points. Under the existing output budget, fragment mode first
+reserves the ranked candidate prefix's identities, range metadata and whole-page
+excerpts. Remaining space is shared using one maximum preview length for all
+retained fragments. A fragment preview can therefore be very short or empty;
+it must not displace later whole-page candidates. If even metadata and whole-page
+excerpts exceed the budget, the existing prefix/truncation limit still applies.
+Ordering and the maximum output size remain unchanged. Clients obtain the actual
+selected text through context and may derive a longer display excerpt from that
+authorized read; search preview length is not the selected range length.
 `truncated` indicates whether more text exists **inside the selected range**;
 it does not indicate whether the page has more text beyond the range. Short
 pages retain the existing search shape and excerpt behavior.
