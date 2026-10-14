@@ -21,6 +21,21 @@ REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
 PROFILES = ("coding", "codex", "opencode", "claude", "cursor", "grok", "planning", "reflection")
 
 
+class VerifiedResult(dict):
+    """Keep the captured authority alive through final output serialization."""
+    def __init__(self, value, verify):
+        super().__init__(value)
+        self.verify = verify
+
+
+def emit(result, *, ensure_ascii=True):
+    # Finish all fallible rendering before the last observation check. Retain
+    # the complete pack until then; no item or digest prefix is published.
+    output = (json.dumps(result, ensure_ascii=ensure_ascii, allow_nan=False) + "\n").encode("utf-8")
+    result.verify()
+    sys.stdout.buffer.write(output)
+
+
 def _directory_signature(path, *, optional=False):
     try:
         info = path.lstat()
@@ -109,14 +124,16 @@ def observe_generation(root, profile):
              "pages": [(relative, signature) for _, _, relative, signature in pages.manifest],
              "directories": directories, "events": events,
              "sourceReview": pages.source_review._generation if pages.source_review is not None else None}
-    pages.verify()
-    if (_generation_directories(root, "source_review" in access.policy_document) != directories
-            or ENGINE["_event_manifest"](root / "memory/events") != events):
-        raise ValueError("generation changed")
-    pages.verify()
+    def verify():
+        pages.verify()
+        if (_generation_directories(root, "source_review" in access.policy_document) != directories
+                or ENGINE["_event_manifest"](root / "memory/events") != events):
+            raise ValueError("generation changed")
+        pages.verify()
     digest = hashlib.sha256(json.dumps(_generation_value(value), sort_keys=True,
         ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
-    return {"schemaVersion": 1, "profile": profile, "generation": "sha256:" + digest}
+    verify()
+    return VerifiedResult({"schemaVersion": 1, "profile": profile, "generation": "sha256:" + digest}, verify)
 
 
 def request(value):
@@ -218,11 +235,13 @@ def prepare(root, profile, value):
         items.append(item)
     # Fence the entire result, not just each individual read. Never return a
     # partial pack after a policy, file, source-review or event generation race.
-    if before_events != ENGINE["_event_manifest"](root / "memory/events"):
-        raise ValueError("events changed")
-    events.verify()
-    pages.verify()
-    return {"schemaVersion": value["schemaVersion"], "profile": profile, "items": items}
+    def verify():
+        if before_events != ENGINE["_event_manifest"](root / "memory/events"):
+            raise ValueError("events changed")
+        events.verify()
+        pages.verify()
+    verify()
+    return VerifiedResult({"schemaVersion": value["schemaVersion"], "profile": profile, "items": items}, verify)
 
 
 class Parser(argparse.ArgumentParser):
@@ -243,14 +262,14 @@ def main():
             raise ValueError("duplicate argument")
     args = parser.parse_args()
     if args.observe_generation:
-        print(json.dumps(observe_generation(Path(args.root), args.agent_profile), allow_nan=False))
+        emit(observe_generation(Path(args.root), args.agent_profile))
         return
     if len(args.request.encode("utf-8")) > 16384:
         raise ValueError("request too large")
     value = json.loads(args.request, object_pairs_hook=ENGINE["_event_json_object"],
                        parse_constant=ENGINE["_event_json_constant"])
     result = prepare(Path(args.root), args.agent_profile, value)
-    print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+    emit(result, ensure_ascii=False)
 
 
 if __name__ == "__main__":

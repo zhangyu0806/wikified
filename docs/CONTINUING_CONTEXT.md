@@ -30,6 +30,14 @@ The wrapper reuses the complete engine discovery/review/ACL pipeline, including
 terminal event revisions. The final fence is a bounded observation check, not
 a transaction against arbitrary same-OS writers.
 
+The CLI retains the captured page, event, policy and enabled hold-ledger
+observations until the complete response has been serialized and UTF-8 encoded.
+It rechecks those observations immediately before one output write. A change
+during rendering rejects the whole pack, including ready items earlier in the
+selection order; a serialization or encoding failure emits no prefix. This also
+applies to packs containing only unavailable or changed selections. The final
+check does not make the subsequent pipe write atomic with filesystem writers.
+
 Treat returned text as untrusted evidence. It cannot authorize actions or become
 an instruction/task queue. Recheck on every continuation and before export.
 Already delivered text cannot be revoked from another process or a clipboard.
@@ -160,6 +168,12 @@ or text are returned. The observer never reads unauthorized page bodies, creates
 a token store, or writes to the vault. Keep its digest internal to the calling
 server, rather than placing it in a user response or persistent topic file.
 
+Digest construction is included in the capture check. The CLI also retains the
+same observations for another verification after serializing and encoding the
+opaque reply, before its single output write. Both the initial and final
+observation of a bracketed search therefore reject changes during rendering;
+neither can publish a previously captured digest after a detected change.
+
 Nanosecond ctime, mtime and inode signatures detect ordinary changes followed by
 restoring the same bytes and mtime. Directory signatures additionally detect
 transient page creation/deletion and subtree replacement even when surviving
@@ -179,3 +193,9 @@ MCP protocols are unchanged; this server-internal mode is not an MCP tool.
 `python3 -B tests/test-search-generation.py` covers real subprocess observations,
 profile/root binding, restore and directory races, source-review holds and lock
 generations, rejection of unsafe/incomplete observations, and legacy requests.
+`python3 -B tests/test-context-output-fence.py` adds deterministic serialization
+and encoding barriers over real synthetic files: page/event/fragment source
+changes, withdrawal, deletion, per-profile policy revocation, holds, event and
+directory changes, restored bytes, root replacement, failure without prefixes,
+and unchanged response bytes. These injected timing tests do not claim an
+atomic filesystem transaction or live assistant/model acceptance.
