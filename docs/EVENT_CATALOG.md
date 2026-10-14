@@ -36,3 +36,9 @@ and after projection. These are bounded snapshot checks, not a transaction lock
 against arbitrary same-user filesystem writers.
 
 Synthetic regressions: `python3 tests/test-event-catalog.py`.
+
+Source-bound v5 events require explicit `--schema-version 2`, whose generic
+freshness state is scoped to this human view and never grants assistant access.
+Unusable-source events remain reviewable without disclosing their source IDs.
+See [v5 source freshness](EVENT_SOURCE_FRESHNESS.md) for the v1 fail-closed
+compatibility boundary and additional snapshot checks.

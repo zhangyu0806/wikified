@@ -94,7 +94,7 @@ def policy_generation(root: Path):
     return signature(before_directory), signature(after), hashlib.sha256(content).hexdigest()
 
 
-def entry_for(event: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+def entry_for(event: dict[str, Any], schema_version: int = 1) -> tuple[dict[str, Any], str, str]:
     """Called only for rows already authorized by the pinned engine."""
     event_id = event.get("id")
     memory_id = event.get("memory_id", event.get("__memory_id"))
@@ -115,16 +115,22 @@ def entry_for(event: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     if modified is not None and (not isinstance(modified, str) or len(modified) > 64 or ENGINE["parse_time"](modified) is None):
         raise ValueError("invalid event time")
     governance = event["__governance"]
-    versioned = event.get("schema_version") == CORE["SCHEMA"]
+    source_bound = event.get("schema_version") == CORE["SOURCE_SCHEMA"]
+    if source_bound and schema_version == 1:
+        raise ValueError("source-bound events require catalog v2")
+    versioned = event.get("schema_version") in CORE["SCHEMAS"]
     entry = {
         "kind": "event", "objectId": object_id, "eventId": event_id,
         "revision": CORE["record_revision"](event), "identity": "persistent",
         "title": summary[:120], "type": kind, "actor": None if unknown_legacy_actor else dict(actor),
-        "reviewStatus": governance["review_status"], "reviewBinding": "v4" if versioned else "legacy",
+        "reviewStatus": governance["review_status"], "reviewBinding": "v5" if source_bound else "v4" if versioned else "legacy",
         "decision": event["review"]["decision"] if versioned else None,
         "domain": governance["domain"], "sensitivity": governance["sensitivity"],
         "targetProfiles": sorted(governance["target_profiles"]), "modifiedAt": modified,
     }
+    if schema_version == 2:
+        state = governance.get("source_freshness", "unassessed")
+        entry["sourceFreshness"] = {"state": state, "reuseAllowed": state in {"current", "unassessed"}}
     assert_safe_metadata(entry)
     return entry, summary, details
 
@@ -146,7 +152,15 @@ def search_match(query: str, summary: str, details: str):
     return None
 
 
-def catalog(root: Path, *, event_id: str | None = None, revision: str | None = None, query: str = ""):
+class CatalogResult(dict):
+    def __init__(self, value, verify):
+        super().__init__(value)
+        self.verify = verify
+
+
+def catalog(root: Path, *, event_id: str | None = None, revision: str | None = None, query: str = "", schema_version: int = 1):
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        raise ValueError("invalid catalog version")
     root = root.absolute()
     if root.resolve(strict=True) != root or not stat.S_ISDIR(root.lstat().st_mode):
         raise ValueError("unsafe root")
@@ -156,8 +170,8 @@ def catalog(root: Path, *, event_id: str | None = None, revision: str | None = N
     # load_events validates the complete snapshot and closes all terminal edges
     # before ACL filtering. Never reproduce that algorithm in this projection.
     with contextlib.redirect_stderr(io.StringIO()):
-        events = ENGINE["load_events"](root, access)
-    projected = [entry_for(event) for event in events]
+        events = ENGINE["load_events"](root, access, include_source_unavailable=True)
+    projected = [entry_for(event, schema_version) for event in events]
     projected.sort(key=lambda item: (item[0]["objectId"], item[0]["eventId"]))
     identities: set[str] = set()
     for entry, _, _ in projected:
@@ -165,6 +179,7 @@ def catalog(root: Path, *, event_id: str | None = None, revision: str | None = N
             raise ValueError("conflicting current object identity")
         identities.add(entry["objectId"])
     def assert_authority():
+        events.verify()
         if generation != policy_generation(root) or root_identity != (root.stat().st_dev, root.stat().st_ino):
             raise ValueError("authority changed")
     if event_id is not None:
@@ -173,10 +188,13 @@ def catalog(root: Path, *, event_id: str | None = None, revision: str | None = N
             raise ValueError("record unavailable")
         entry, summary, details = selected
         assert_authority()
-        return {"schemaVersion": 1, "entry": entry, "summary": summary, "details": details}
+        return CatalogResult({"schemaVersion": schema_version, "entry": entry, "summary": summary, "details": details}, assert_authority)
     # Generation excludes hidden rows and their counts, but includes all
     # authorized record revisions rather than only this query's first page.
     material = ["wikified-event-catalog/v1", generation[2], [[entry["objectId"], entry["eventId"], entry["revision"]] for entry, _, _ in projected]]
+    if schema_version == 2:
+        material = ["wikified-event-catalog/v2", generation[2], [[entry["objectId"], entry["eventId"], entry["revision"],
+            entry["sourceFreshness"]] for entry, _, _ in projected]]
     aggregate = "sha256:" + hashlib.sha256(json.dumps(material, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
     entries = []
     eligible = 0
@@ -189,9 +207,9 @@ def catalog(root: Path, *, event_id: str | None = None, revision: str | None = N
             entries.append({**entry, **({"match": match} if match is not None else {})})
     incomplete = eligible > len(entries)
     assert_authority()
-    return {"schemaVersion": 1, "purpose": PURPOSE, "revision": aggregate, "entries": entries,
+    return CatalogResult({"schemaVersion": schema_version, "purpose": PURPOSE, "revision": aggregate, "entries": entries,
         "coverage": {"status": "incomplete" if incomplete else "complete", "scope": "authorized-active-events",
-            "indexed": len(entries), "eligible": eligible, "reasons": ["entry-limit"] if incomplete else []}}
+            "indexed": len(entries), "eligible": eligible, "reasons": ["entry-limit"] if incomplete else []}}, assert_authority)
 
 
 def main(argv):
@@ -202,7 +220,8 @@ def main(argv):
     parser.add_argument("--event-id")
     parser.add_argument("--revision")
     parser.add_argument("--query", default="")
-    for flag in ("--root", "--profile", "--purpose", "--event-id", "--revision", "--query"):
+    parser.add_argument("--schema-version", type=int, choices=[1, 2], default=1)
+    for flag in ("--root", "--profile", "--purpose", "--event-id", "--revision", "--query", "--schema-version"):
         if sum(arg == flag or arg.startswith(flag + "=") for arg in argv) > 1:
             raise ValueError("duplicate argument")
     args = parser.parse_args(argv)
@@ -214,10 +233,11 @@ def main(argv):
             or not CORE["HASH"].fullmatch(args.revision) or args.query):
         raise ValueError("invalid event locator")
     query = bounded_text(args.query, 500).strip()
-    result = catalog(root, event_id=args.event_id, revision=args.revision, query=query)
+    result = catalog(root, event_id=args.event_id, revision=args.revision, query=query, schema_version=args.schema_version)
     output = (json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n").encode("utf-8")
     if len(output) > MAX_OUTPUT_BYTES:
         raise ValueError("catalog output limit")
+    result.verify()
     sys.stdout.buffer.write(output)
     return 0
 
@@ -225,6 +245,6 @@ def main(argv):
 if __name__ == "__main__":
     try:
         raise SystemExit(main(sys.argv[1:]))
-    except (ValueError, TypeError, KeyError, OSError, UnicodeError, OverflowError, RecursionError, ENGINE["EventSnapshotError"]):
+    except (ValueError, TypeError, KeyError, OSError, UnicodeError, OverflowError, RecursionError, ENGINE["EventSnapshotError"], ENGINE["PageSnapshotError"]):
         print(SAFE_FAILURE, file=sys.stderr)
         raise SystemExit(2)

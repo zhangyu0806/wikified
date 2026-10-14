@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 1,
+  "syntheticOnly": true,
+  "cases": [
+    {
+      "name": "bound-v5",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v5",
+        "id": "0000000000000002",
+        "memory_id": "event:0000000000000002",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_status": "approved",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "vfourmarker original",
+        "supersedes": [
+          "0000000000000001"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "sources": [
+          {
+            "kind": "document",
+            "id": "source:synthetic-vector",
+            "revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "relation": "current-derived"
+          }
+        ],
+        "record_id": "event:0000000000000001",
+        "source": "human-review/v5",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "correct",
+          "target_id": "0000000000000001",
+          "target_revision": "sha256:75df670bbbcaa3e5552efd134cef6afd90cdf0730375f0588a647d6a5b03b029",
+          "content_revision": "sha256:be1dfcf18373c5bd583014aa8191c49e3502c6a9f4be1ee8dc84848814d3753a",
+          "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "test:correct",
+          "request_revision": "sha256:51fa24ca61b2bed37698f5f1cde3a95355845852dd705f9c924b2acbbf633779"
+        }
+      },
+      "record_revision": "sha256:7131d3a2703f79fbb703e6a993c2ad92fd3995aec746fa296b8c2f69604c2087",
+      "target_revision": "sha256:82c1c64261b1ce60356da0ed46cfe9aa3abbf9c7d35df30210267abecb682c22",
+      "content_revision": "sha256:be1dfcf18373c5bd583014aa8191c49e3502c6a9f4be1ee8dc84848814d3753a",
+      "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1"
+    },
+    {
+      "name": "rebound-v5",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v5",
+        "id": "0000000000000003",
+        "memory_id": "event:0000000000000003",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_status": "approved",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "vfourmarker original",
+        "supersedes": [
+          "0000000000000002",
+          "0000000000000001"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "sources": [
+          {
+            "kind": "document",
+            "id": "source:synthetic-vector",
+            "revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "relation": "current-derived"
+          }
+        ],
+        "record_id": "event:0000000000000001",
+        "source": "human-review/v5",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "correct",
+          "target_id": "0000000000000002",
+          "target_revision": "sha256:82c1c64261b1ce60356da0ed46cfe9aa3abbf9c7d35df30210267abecb682c22",
+          "content_revision": "sha256:eac907e3d53c278d90b082fc8972e49c5cda7d08cce941acaceb41d124c702a3",
+          "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "test:explicit-rebind",
+          "request_revision": "sha256:b99f14a27427811fd3b382ab2aab2d84ee6280a25732e7658f5b504b28797dac"
+        }
+      },
+      "record_revision": "sha256:60628db2c7fa54535e9146e2275a18bdf428e757819171fb15eda5a6f4dba096",
+      "target_revision": "sha256:01ed965765f775fd151add99a5ee59b570b13cf09a5478dd1d0b4b9bf577b339",
+      "content_revision": "sha256:eac907e3d53c278d90b082fc8972e49c5cda7d08cce941acaceb41d124c702a3",
+      "policy_revision": "sha256:8747057f97feb684b7e4fa879e4e3a25427766da91a5e21960b5eedda7fab5e1"
+    }
+  ]
+}
