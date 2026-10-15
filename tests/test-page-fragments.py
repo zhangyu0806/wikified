@@ -132,9 +132,10 @@ class PageFragments(unittest.TestCase):
         row = self.page(body="fragmentneedle " + "x" * 15000)
         fragment = self.fragment(row)
         for schema, rows in [(1, [fragment]), (1, [{**row, "offset": 0}]), (2, [row, fragment]),
-                             (2, [fragment] * 21), (3, [row])]:
+                             (2, [fragment] * 21), (4, [row])]:
             with self.assertRaises(ValueError):
                 M["request"](dict(schemaVersion=schema, selections=rows))
+        self.assertEqual(M["request"](dict(schemaVersion=3, selections=[fragment])), [fragment])
         for change in ({"offset": -1}, {"offset": True}, {"offset": 1.0}, {"offset": 2**53}, {"offset": 2**53 - 1},
                        {"length": 0}, {"length": 12001}, {"length": False}, {"length": 1.5},
                        {"projectionRevision": "latest"}, {"path": "notes/one.md"}, {"kind": "event"}):

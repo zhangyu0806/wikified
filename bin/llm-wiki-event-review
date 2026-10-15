@@ -17,6 +17,98 @@ CORE = runpy.run_path(str(BIN / "llm_wiki_event_review.py"))
 ENGINE = runpy.run_path(str(BIN / "llm-wiki-enrich"), run_name="event_review_reader")
 WRITER = runpy.run_path(str(BIN / "llm-wiki-event"), run_name="event_review_writer")
 
+
+def source_selection(pages, bindings, target_identity):
+    available = {page.metadata.memory_id: page for _, page in pages
+                 if (page.metadata.frontmatter or {}).get("memory_id")}
+    nodes = {node["id"]: node for node in pages.source_nodes}
+    for binding in bindings:
+        page = available.get(binding["id"])
+        if page is None or ENGINE["page_revision"](page) != binding["revision"]:
+            raise ValueError("source unavailable or changed")
+        # A new revision would invalidate a source that depends on the event
+        # being reviewed, even when its current exact revision is still valid.
+        # Check before append, using the same bounded cross-type graph.
+        pending, visited = [(binding["id"], 0)], set()
+        while pending:
+            identity, depth = pending.pop()
+            if identity == target_identity:
+                raise ValueError("source depends on reviewed event")
+            if depth > ENGINE["SOURCE_FRESHNESS"]["LIMITS"]["depth"]:
+                raise ValueError("source graph limit")
+            if identity in visited:
+                continue
+            visited.add(identity)
+            if len(visited) > ENGINE["SOURCE_FRESHNESS"]["LIMITS"]["visited"]:
+                raise ValueError("source graph limit")
+            node = nodes.get(identity)
+            if node is None:
+                raise ValueError("source unavailable")
+            for source in node.get("sources") or []:
+                if source.get("relation") == "current-derived":
+                    pending.append((source["id"], depth + 1))
+
+
+class ExpectedAppend:
+    """Only the writer's exact append may advance an observed event set."""
+    def __init__(self, root, manifest, path, line):
+        self.root, self.directory, self.path = root, path.parent, path
+        self.before, self.line = manifest, line
+        self.entries = self.directory_entries()
+        self.parent = ENGINE["_event_parent_signature"](root)
+        self.prior = b""
+        expected = manifest[1].get(path.name)
+        if expected is not None:
+            with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as handle:
+                if ENGINE["_event_stat_signature"](os.fstat(handle.fileno())) != expected:
+                    raise ValueError("event output changed")
+                self.prior = handle.read(ENGINE["MAX_EVENT_TOTAL_BYTES"] + 1)
+                if len(self.prior) != expected[4] or ENGINE["_event_stat_signature"](os.fstat(handle.fileno())) != expected:
+                    raise ValueError("event output changed")
+        if ENGINE["_event_manifest"](self.directory) != manifest:
+            raise ValueError("event directory changed")
+
+    def opened(self, info):
+        current = ENGINE["_event_manifest"](self.directory)
+        expected_files = {**self.before[1], self.path.name: ENGINE["_event_stat_signature"](info)}
+        if (current[1] != expected_files or current[0][:3] != self.before[0][:3]
+            or self.directory_entries() != self.entries | {self.path.name}
+            or ENGINE["_event_parent_signature"](self.root) != self.parent
+            or (self.path.name in self.before[1] and current[0] != self.before[0])):
+            raise ValueError("event directory changed")
+        self.directory_signature = current[0]
+        self.file_identity = ENGINE["_event_stat_signature"](info)[:4]
+
+    def directory_entries(self):
+        names = set()
+        with os.scandir(self.directory) as entries:
+            for entry in entries:
+                names.add(entry.name)
+                if len(names) > ENGINE["MAX_EVENT_DIRECTORY_ENTRIES"]:
+                    raise ValueError("event directory entry limit")
+        return frozenset(names)
+
+    def written(self, info):
+        signature = ENGINE["_event_stat_signature"](info)
+        if signature[:4] != self.file_identity or signature[4] != len(self.prior) + len(self.line):
+            raise ValueError("unexpected event append")
+        self.expected = (self.directory_signature, {**self.before[1], self.path.name: signature})
+        self.verify()
+
+    def verify(self):
+        if (ENGINE["_event_parent_signature"](self.root) != self.parent
+            or ENGINE["_event_manifest"](self.directory) != self.expected):
+            raise ValueError("unexpected event append")
+        with os.fdopen(os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as handle:
+            signature = self.expected[1][self.path.name]
+            if (ENGINE["_event_stat_signature"](os.fstat(handle.fileno())) != signature
+                or handle.read(ENGINE["MAX_EVENT_TOTAL_BYTES"] + 1) != self.prior + self.line
+                or ENGINE["_event_stat_signature"](os.fstat(handle.fileno())) != signature):
+                raise ValueError("unexpected event append")
+        if ENGINE["_event_manifest"](self.directory) != self.expected:
+            raise ValueError("unexpected event append")
+
+
 def snapshot(root):
     rows = ENGINE["_read_event_snapshot"](root)
     now = datetime.now(timezone.utc)
@@ -105,12 +197,7 @@ def main(argv):
                 if not ENGINE["is_authorized"](ENGINE["event_metadata"](e)[1], access):
                     raise ValueError("event unavailable to reviewer")
                 source_pages = ENGINE["page_snapshots"](root, access, None, source_review_lock=verify_source_review_lock)
-                available = {page.metadata.memory_id: page for _, page in source_pages
-                             if (page.metadata.frontmatter or {}).get("memory_id")}
-                for binding in CORE["source_bindings"](request["source_bindings"]):
-                    page = available.get(binding["id"])
-                    if page is None or ENGINE["page_revision"](page) != binding["revision"]:
-                        raise ValueError("source unavailable or changed")
+                source_selection(source_pages, CORE["source_bindings"](request["source_bindings"]), e["record_id"])
             CORE["validate_links"](rows + [e])
             # Verify inherited edges and cycles against the same locked snapshot.
             index = {r["id"]:r for r in rows}
@@ -144,6 +231,7 @@ def main(argv):
                 raise ValueError("event directory changed")
             if source_pages is not None:
                 source_pages.verify()
+            expected_append = ExpectedAppend(root, manifest, path, line) if source_pages is not None else None
             flags = os.O_WRONLY | os.O_APPEND | getattr(os,"O_NOFOLLOW",0)
             if path.name not in manifest[1]:
                 flags |= os.O_CREAT | os.O_EXCL
@@ -155,14 +243,26 @@ def main(argv):
                 if path.name in manifest[1] and ENGINE["_event_stat_signature"](info) != manifest[1][path.name]:
                     raise ValueError("event output changed")
                 if source_pages is not None:
-                    source_pages.verify()
+                    expected_append.opened(info)
+                    # O_EXCL may have created this one empty output file. The
+                    # exact event observation is now guarded by ExpectedAppend;
+                    # all other authority stays at its original generation.
+                    source_pages.generation.verify()
                 output.write(line); output.flush(); os.fsync(output.fileno())
+                if expected_append is not None:
+                    expected_append.written(os.fstat(output.fileno()))
             if path.name not in manifest[1] and os.name == "posix":
                 directory_fd = os.open(directory, os.O_RDONLY | getattr(os,"O_DIRECTORY",0) | getattr(os,"O_NOFOLLOW",0))
                 try: os.fsync(directory_fd)
                 finally: os.close(directory_fd)
             if source_pages is not None:
-                source_pages.verify()
+                source_pages.generation.verify()
+                expected_append.verify()
+                refreshed = ENGINE["page_snapshots"](root, access, None, source_review_lock=verify_source_review_lock)
+                source_selection(refreshed, CORE["source_bindings"](request["source_bindings"]), e["record_id"])
+                refreshed.verify()
+                source_pages.generation.verify()
+                expected_append.verify()
             print(json.dumps(e, ensure_ascii=False, allow_nan=False))
             return 0
         finally:

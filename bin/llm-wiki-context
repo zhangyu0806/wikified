@@ -137,14 +137,14 @@ def observe_generation(root, profile):
 
 
 def request(value):
-    if not isinstance(value, dict) or set(value) != {"schemaVersion", "selections"} or type(value["schemaVersion"]) is not int or value["schemaVersion"] not in (1, 2):
+    if not isinstance(value, dict) or set(value) != {"schemaVersion", "selections"} or type(value["schemaVersion"]) is not int or value["schemaVersion"] not in (1, 2, 3):
         raise ValueError("invalid context request")
     rows = value["selections"]
     if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_SELECTIONS:
         raise ValueError("invalid context selection")
     seen = set()
     for row in rows:
-        fragment = isinstance(row, dict) and row.get("kind") == "page-fragment" and value["schemaVersion"] == 2
+        fragment = isinstance(row, dict) and row.get("kind") == "page-fragment" and value["schemaVersion"] in (2, 3)
         keys = {"kind", "memoryId", "revision"}
         if fragment:
             keys |= {"projectionRevision", "offset", "length"}
@@ -197,6 +197,10 @@ def prepare(root, profile, value):
     for event in events:
         if event["__governance"]["review_status"] != "approved":
             continue
+        if value["schemaVersion"] == 3:
+            if not ENGINE["event_source_eligible"](event) or not ENGINE["SOURCE_FRESHNESS"]["assess"](
+                    event["record_id"], events.source_nodes)["reuseAllowed"]:
+                continue
         identity = event.get("record_id", event.get("memory_id", event.get("__memory_id")))
         if not isinstance(identity, str) or not ENGINE["MEMORY_ID_RE"].fullmatch(identity):
             raise ValueError("invalid identity")
@@ -204,7 +208,8 @@ def prepare(root, profile, value):
         if not isinstance(event_id, str) or not re.fullmatch(r"[0-9a-f]{16}", event_id):
             continue
         add(identity, ("event", ENGINE["EVENT_REVIEW"]["record_revision"](event), event_id,
-                       ENGINE["redact"](str(event.get("summary", "")) + "\n" + str(event.get("details", ""))), None))
+                       ENGINE["redact"](str(event.get("summary", "")) + "\n" + str(event.get("details", ""))),
+                       {key: event["__governance"][key] for key in ("domain", "sensitivity")}))
     items, used = [], 0
     for selection in selections:
         item = {"selection": dict(selection), "status": "unavailable"}
@@ -229,7 +234,7 @@ def prepare(root, profile, value):
                     item = {**item, "status": "too-large"}
                 else:
                     item = {**item, "status": "ready", "locator": locator, "text": text}
-                    if fragment:
+                    if fragment or (value["schemaVersion"] == 3 and kind == "event"):
                         item["governance"] = governance
                     used += len(text)
         items.append(item)

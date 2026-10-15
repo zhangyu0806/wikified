@@ -1,4 +1,4 @@
-# Request-local Markdown source freshness
+# Request-local Markdown and event source freshness
 
 This slice gates AI reuse of typed Markdown dependencies. It does not migrate a
 vault, rewrite a note, establish a new authoritative body, or implement event
@@ -17,7 +17,8 @@ A strict-JSON `mind2one.sources` entry can declare:
   record; this slice reports it as `unassessed`, not current-valid evidence.
 - No relation / no source: legacy `unassessed`, not an invented dependency.
 
-The source `kind` for a current dependency must be `document`. `locator` is an
+The source `kind` for a current dependency can be `document` or `event`. For a
+document, `locator` is an
 optional bounded portable `wiki/...md` / `notes/...md` hint, never a fallback
 identity. Renaming a file while preserving its explicit identity and exact
 bytes preserves the edge. A path-derived legacy ID is not a persistent source
@@ -26,11 +27,24 @@ current references, cycles, and traversal bounds cannot yield reusable current
 context. The pure contract returns only a generic state and `reuseAllowed`;
 it never discloses missing source names, IDs, locators, counts, or bodies.
 
+An `event` source pins an independently reviewed, current v4/v5 event's stable
+`record_id` and its complete `wikified-event-record/v1` revision. It does not use
+the transient event ID or a hash of its rendered summary. Event locators must be
+absent or empty. Legacy/unreviewed events, and v4 events carrying an unknown
+`sources` property, cannot act as source-free leaves. Their ordinary legacy
+context access is unchanged. A v5 source retains all its document dependencies;
+editing, withdrawing, denying, or holding an upstream source withholds the
+downstream Markdown conclusion too. Restoring/reviewing an event creates a new
+revision and does not automatically update a pinned conclusion.
+
 Existing P2 semantic bindings already cover the relation, source ID, revision,
 label, and locator. This implementation does not alter that hash algorithm or
 auto-confirm an edited AI claim. Review validity and source freshness are
 separate conditions. To rebind a changed claim, a human must review a new
 complete declaration; an old approval does not bless new source bytes.
+The Markdown version and semantic hash algorithm stay unchanged. Older readers
+reject the new `event` source kind instead of treating it as independent content.
+Upgrade all relevant readers before adopting these references.
 
 ## Authorization and coverage
 
@@ -40,11 +54,23 @@ opening any document body. Denied sources never enter the body reader. The
 dependency snapshot includes eligible documents outside the query's project;
 project filtering cannot hide an otherwise authorized dependency.
 
+Where current event references are present, the snapshot joins trusted document
+nodes with eligible event nodes before freshness filtering. Event lifecycle
+closure runs before ACL and source filtering; an unavailable successor cannot
+resurrect its predecessor. Node kinds must match reference kinds, and duplicate
+stable IDs across either type fail closed. Pure document reads retain their
+existing independence from an unrelated event directory. No new event writer
+format, event-to-event binding input, index, or automatic review queue is added.
+
 The existing limits remain explicit: 2 MiB per Markdown snapshot, 8 MiB total
 authorized snapshots, 2,000 Markdown files, and 8,000 directory entries. A
 coverage/resource failure aborts rather than emitting a partial query or
 session digest. The graph additionally bounds depth, visited nodes, references,
 and snapshot nodes; incomplete assessment cannot be reused as current context.
+The unchanged graph bounds are depth 32, visited nodes 256, references per node
+256, and snapshot nodes 10,000, shared across both types. Event scanning retains
+its existing complete-snapshot file, byte and line limits. Traversal does not
+reset at a document/event boundary.
 
 The root identity, exact access-policy bytes/file identity, and complete file
 manifest are checked before and after snapshot construction and immediately
@@ -95,3 +121,9 @@ The existing P2 review suite now uses an explicitly historical synthetic source
 for its binding-only fixture; its source-relation mutation still invalidates
 the P2 binding. Actual current full-SHA dependencies are tested here rather
 than treating a nonexistent `source-revision-1` as current evidence.
+
+`tests/test-event-backed-conclusions.py` adds synthetic event revisions,
+withdrawal, policy-only revocation, upstream holds, mixed-type graph budgets,
+old-reader refusal, final-output races, schema 3/MCP negotiation, and exact
+review-writer append checks. The separate `event-backed-markdown.json` semantic
+vector leaves prior Markdown and event hash vectors unchanged.

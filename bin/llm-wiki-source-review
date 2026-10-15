@@ -231,7 +231,7 @@ def record(root, identity, access, *, require_verified=True):
 def current_relation(target):
     product = target["product"]
     sources = product.get("sources") if isinstance(product, dict) else None
-    return isinstance(sources, list) and any(isinstance(source, dict) and source.get("kind") == "document"
+    return isinstance(sources, list) and any(isinstance(source, dict) and source.get("kind") in {"document", "event"}
         and source.get("relation") == "current-derived" for source in sources)
 
 
