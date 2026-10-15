@@ -27,7 +27,7 @@ current references, cycles, and traversal bounds cannot yield reusable current
 context. The pure contract returns only a generic state and `reuseAllowed`;
 it never discloses missing source names, IDs, locators, counts, or bodies.
 
-An `event` source pins an independently reviewed, current v4/v5 event's stable
+An `event` source pins an independently reviewed, current v4/v5/v6 event's stable
 `record_id` and its complete `wikified-event-record/v1` revision. It does not use
 the transient event ID or a hash of its rendered summary. Event locators must be
 absent or empty. Legacy/unreviewed events, and v4 events carrying an unknown

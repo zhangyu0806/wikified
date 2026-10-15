@@ -1,0 +1,257 @@
+{
+  "cases": [
+    {
+      "name": "event-initial",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v6",
+        "id": "0000000000000011",
+        "memory_id": "event:0000000000000011",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_status": "approved",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "Synthetic dependent event 😀",
+        "supersedes": [
+          "0000000000000010"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "sources": [
+          {
+            "kind": "event",
+            "id": "event:0000000000000001",
+            "revision": "sha256:baf57926bcea1109af986c86bb5c9bc0235f532d55aa5248afca8b4e553a10b1",
+            "relation": "current-derived"
+          }
+        ],
+        "record_id": "event:0000000000000010",
+        "source": "human-review/v6",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "correct",
+          "target_id": "0000000000000010",
+          "target_revision": "sha256:e2c7e956b0848776105472ddbb3b8b79db07ad8fdc2b464ff8922717bdd51a79",
+          "content_revision": "sha256:6374e454818e992d529bd76e521f6d793b21bc08802b71c5ee720dc4a5ee62f4",
+          "policy_revision": "sha256:d6d171e804e57e9500df982187f24895ec1e59ce82a7580983b458684de0309e",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "fixture:event-initial",
+          "request_revision": "sha256:40768133526e6e8ce78932f0148edd7ca0a63d3c36a4fa77fcd340ceda560e3f"
+        }
+      },
+      "request": {
+        "action": "correct",
+        "target_id": "0000000000000010",
+        "expected_revision": "sha256:791fa48793e4eb678c74982dfd03cd6a8aa8a87e3add33ed9d3a1eb3df733e40",
+        "request_id": "fixture:event-initial",
+        "reason": "synthetic review",
+        "source_bindings": [
+          {
+            "kind": "event",
+            "id": "event:0000000000000001",
+            "revision": "sha256:baf57926bcea1109af986c86bb5c9bc0235f532d55aa5248afca8b4e553a10b1",
+            "relation": "current-derived"
+          }
+        ]
+      },
+      "record_revision": "sha256:c5fa58db99da07185c383ec755724590930ed3aebf5665cebfe5e5b0b53ee6fa",
+      "target_revision": "sha256:a348c3aa4587c566197f09b5be48a02531a1a238275fe85e424107d20dc751ab",
+      "content_revision": "sha256:6374e454818e992d529bd76e521f6d793b21bc08802b71c5ee720dc4a5ee62f4",
+      "policy_revision": "sha256:d6d171e804e57e9500df982187f24895ec1e59ce82a7580983b458684de0309e",
+      "request_revision": "sha256:40768133526e6e8ce78932f0148edd7ca0a63d3c36a4fa77fcd340ceda560e3f"
+    },
+    {
+      "name": "event-rebind",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v6",
+        "id": "0000000000000012",
+        "memory_id": "event:0000000000000012",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_status": "approved",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "Synthetic dependent event 😀",
+        "supersedes": [
+          "0000000000000011",
+          "0000000000000010"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "sources": [
+          {
+            "kind": "event",
+            "id": "event:0000000000000001",
+            "revision": "sha256:725f9173253bb3823a529d6add5179618ed30bcc8d1d4f38c8cc7c18fabaaf7e",
+            "relation": "current-derived"
+          }
+        ],
+        "record_id": "event:0000000000000010",
+        "source": "human-review/v6",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "correct",
+          "target_id": "0000000000000011",
+          "target_revision": "sha256:a348c3aa4587c566197f09b5be48a02531a1a238275fe85e424107d20dc751ab",
+          "content_revision": "sha256:627017527563b6e6c1f524a4badb04e91d01b0c4e6e2e72f235be2337e233d0f",
+          "policy_revision": "sha256:d6d171e804e57e9500df982187f24895ec1e59ce82a7580983b458684de0309e",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "fixture:event-rebind",
+          "request_revision": "sha256:e604503b16e43caca6206212a8d807951776ba8aea01ee243aff4a4e46f3d6b3"
+        }
+      },
+      "request": {
+        "action": "correct",
+        "target_id": "0000000000000011",
+        "expected_revision": "sha256:c5fa58db99da07185c383ec755724590930ed3aebf5665cebfe5e5b0b53ee6fa",
+        "request_id": "fixture:event-rebind",
+        "reason": "synthetic review",
+        "source_bindings": [
+          {
+            "kind": "event",
+            "id": "event:0000000000000001",
+            "revision": "sha256:725f9173253bb3823a529d6add5179618ed30bcc8d1d4f38c8cc7c18fabaaf7e",
+            "relation": "current-derived"
+          }
+        ],
+        "confirm_supersedes": true
+      },
+      "record_revision": "sha256:4b378c0bcc7a886fc01ef23691def6af1c709288db55d27e0b1796bfde6916f6",
+      "target_revision": "sha256:e05e16b0e7d452e2dc63f27388f6b46dc481af8aa245989a698400e6555cab5e",
+      "content_revision": "sha256:627017527563b6e6c1f524a4badb04e91d01b0c4e6e2e72f235be2337e233d0f",
+      "policy_revision": "sha256:d6d171e804e57e9500df982187f24895ec1e59ce82a7580983b458684de0309e",
+      "request_revision": "sha256:e604503b16e43caca6206212a8d807951776ba8aea01ee243aff4a4e46f3d6b3"
+    },
+    {
+      "name": "mixed-upgrade",
+      "event": {
+        "schema_version": "llm-wiki-memory-event/v6",
+        "id": "0000000000000014",
+        "memory_id": "event:0000000000000014",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-human"
+        },
+        "domain": "work",
+        "sensitivity": "internal",
+        "epistemic_status": "human-confirmed",
+        "review_status": "approved",
+        "target_agents": [
+          "codex",
+          "opencode"
+        ],
+        "project": "snapshot-test",
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "valid_from": "2020-01-01T00:00:00Z",
+        "lifecycle": "active",
+        "type": "fact",
+        "summary": "Synthetic dependent event 😀",
+        "supersedes": [
+          "0000000000000013",
+          "0000000000000010"
+        ],
+        "confidence": 1.0,
+        "half_life_days": 36500,
+        "details": "Synthetic only 😀",
+        "files": [],
+        "concepts": [],
+        "sources": [
+          {
+            "kind": "document",
+            "id": "source:synthetic",
+            "revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "relation": "current-derived"
+          },
+          {
+            "kind": "event",
+            "id": "event:0000000000000001",
+            "revision": "sha256:baf57926bcea1109af986c86bb5c9bc0235f532d55aa5248afca8b4e553a10b1",
+            "relation": "current-derived"
+          }
+        ],
+        "record_id": "event:0000000000000010",
+        "source": "human-review/v6",
+        "review": {
+          "version": 1,
+          "algorithm": "wikified-event-review/v1",
+          "decision": "correct",
+          "target_id": "0000000000000013",
+          "target_revision": "sha256:b924b2fc8cf580f13a82217090fcb9463975294e18b7e95cadb1949e37892e48",
+          "content_revision": "sha256:135aab920cd20a5c57015fe3a9c1beca43d2d3ec2a55e686930959b9003386d3",
+          "policy_revision": "sha256:d6d171e804e57e9500df982187f24895ec1e59ce82a7580983b458684de0309e",
+          "actor": {
+            "type": "human",
+            "id": "synthetic-human"
+          },
+          "at": "2026-01-02T00:00:00.000Z",
+          "reason": "synthetic review",
+          "request_id": "fixture:mixed-upgrade",
+          "request_revision": "sha256:7a1477a6e6e9c64e973bd1a6d792a62aca98f107337cc4982697d0cf57a20775"
+        }
+      },
+      "request": {
+        "action": "correct",
+        "target_id": "0000000000000013",
+        "expected_revision": "sha256:2216c8252c8e79f8ba5d9c4ccc64f86c5ddb298e331df341a29b525e03f818db",
+        "request_id": "fixture:mixed-upgrade",
+        "reason": "synthetic review",
+        "source_bindings": [
+          {
+            "kind": "event",
+            "id": "event:0000000000000001",
+            "revision": "sha256:baf57926bcea1109af986c86bb5c9bc0235f532d55aa5248afca8b4e553a10b1",
+            "relation": "current-derived"
+          }
+        ],
+        "confirm_supersedes": true
+      },
+      "record_revision": "sha256:ae028ecdf7b1c6540d6faf470473cba98a0cc611603690b8a2a56c1877e411e9",
+      "target_revision": "sha256:6a17850437e06e687ba0086ba1f6361417a9563305779e52db679c37c7910c58",
+      "content_revision": "sha256:135aab920cd20a5c57015fe3a9c1beca43d2d3ec2a55e686930959b9003386d3",
+      "policy_revision": "sha256:d6d171e804e57e9500df982187f24895ec1e59ce82a7580983b458684de0309e",
+      "request_revision": "sha256:7a1477a6e6e9c64e973bd1a6d792a62aca98f107337cc4982697d0cf57a20775"
+    }
+  ]
+}

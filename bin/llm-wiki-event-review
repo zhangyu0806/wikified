@@ -23,30 +23,33 @@ def source_selection(pages, bindings, target_identity):
                  if (page.metadata.frontmatter or {}).get("memory_id")}
     nodes = {node["id"]: node for node in pages.source_nodes}
     for binding in bindings:
-        page = available.get(binding["id"])
-        if page is None or ENGINE["page_revision"](page) != binding["revision"]:
+        node = nodes.get(binding["id"])
+        if (node is None or node.get("kind", "document") != binding["kind"]
+            or node["revision"] != binding["revision"]
+            or (binding["kind"] == "document" and binding["id"] not in available)
+            or not ENGINE["SOURCE_FRESHNESS"]["assess"](binding["id"], pages.source_nodes)["reuseAllowed"]):
             raise ValueError("source unavailable or changed")
         # A new revision would invalidate a source that depends on the event
         # being reviewed, even when its current exact revision is still valid.
         # Check before append, using the same bounded cross-type graph.
-        pending, visited = [(binding["id"], 0)], set()
+        pending, visited = [(binding["kind"], binding["id"], 0)], set()
         while pending:
-            identity, depth = pending.pop()
-            if identity == target_identity:
+            kind, identity, depth = pending.pop()
+            if kind == "event" and identity == target_identity:
                 raise ValueError("source depends on reviewed event")
             if depth > ENGINE["SOURCE_FRESHNESS"]["LIMITS"]["depth"]:
                 raise ValueError("source graph limit")
-            if identity in visited:
+            if (kind, identity) in visited:
                 continue
-            visited.add(identity)
+            visited.add((kind, identity))
             if len(visited) > ENGINE["SOURCE_FRESHNESS"]["LIMITS"]["visited"]:
                 raise ValueError("source graph limit")
             node = nodes.get(identity)
-            if node is None:
+            if node is None or node.get("kind", "document") != kind:
                 raise ValueError("source unavailable")
             for source in node.get("sources") or []:
                 if source.get("relation") == "current-derived":
-                    pending.append((source["id"], depth + 1))
+                    pending.append((source["kind"], source["id"], depth + 1))
 
 
 class ExpectedAppend:
@@ -196,8 +199,9 @@ def main(argv):
                 access = ENGINE["access_context"](root, "human")
                 if not ENGINE["is_authorized"](ENGINE["event_metadata"](e)[1], access):
                     raise ValueError("event unavailable to reviewer")
-                source_pages = ENGINE["page_snapshots"](root, access, None, source_review_lock=verify_source_review_lock)
-                source_selection(source_pages, CORE["source_bindings"](request["source_bindings"]), e["record_id"])
+                source_pages = ENGINE["page_snapshots"](root, access, None, source_review_lock=verify_source_review_lock,
+                    event_generation=ENGINE["EventGeneration"](root, access))
+                source_selection(source_pages, CORE["source_bindings"](request["source_bindings"], typed=True), e["record_id"])
             CORE["validate_links"](rows + [e])
             # Verify inherited edges and cycles against the same locked snapshot.
             index = {r["id"]:r for r in rows}
@@ -258,8 +262,9 @@ def main(argv):
             if source_pages is not None:
                 source_pages.generation.verify()
                 expected_append.verify()
-                refreshed = ENGINE["page_snapshots"](root, access, None, source_review_lock=verify_source_review_lock)
-                source_selection(refreshed, CORE["source_bindings"](request["source_bindings"]), e["record_id"])
+                refreshed = ENGINE["page_snapshots"](root, access, None, source_review_lock=verify_source_review_lock,
+                    event_generation=ENGINE["EventGeneration"](root, access))
+                source_selection(refreshed, CORE["source_bindings"](request["source_bindings"], typed=True), e["record_id"])
                 refreshed.verify()
                 source_pages.generation.verify()
                 expected_append.verify()

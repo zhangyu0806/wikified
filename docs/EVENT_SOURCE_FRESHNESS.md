@@ -1,5 +1,9 @@
 # Opt-in source-bound event conclusions (v5)
 
+This page retains the document-only v5 contract. Explicit event sources use the
+new [v6 event dependency contract](EVENT_EVENT_DEPENDENCIES.md); v5 itself is not
+reinterpreted or widened.
+
 An independently authorized human review can bind an event conclusion to stable
 Markdown source identities and exact raw revisions. This appends
 `llm-wiki-memory-event/v5` with `source: "human-review/v5"`; it does not rewrite
