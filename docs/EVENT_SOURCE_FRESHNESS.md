@@ -50,6 +50,23 @@ detected after append may leave a stored revision without a success response;
 refresh current state before deciding whether to retry. Subsequent reads still
 check its sources, and idempotency prevents duplicate successful retries.
 
+Selected Markdown can itself depend on reviewed events. These dependencies are
+assessed in one bounded typed graph, without resetting depth or visited budgets.
+Before writing, the reviewer rejects a selected source whose current dependency
+closure includes the event being revised: the new version would immediately
+invalidate that source. Source inputs remain document-only; this is not a new
+event-to-event review API.
+
+The writer distinguishes its own append from an unrelated source-generation
+change. Under the existing exclusive lock it pins the old event manifest and
+target bytes, accepts only the exact old prefix plus its serialized new line,
+keeps every other file and authority observation unchanged, then rebuilds and
+rechecks the complete source graph. A new monthly file may advance only its
+expected directory/file observation. Unexpected extra appends, prefix edits,
+or another file's change fail without a success response. This preserves the
+existing post-write failure boundary above; it is not rollback or an OS-wide
+atomic transaction.
+
 First adoption on v3/v4 requires the absence of a `sources` property. Previously
 unknown `sources` data is neither discarded nor silently assigned new meaning;
 such an upgrade is rejected for a separately reviewed recovery process. Existing
@@ -85,12 +102,15 @@ generic freshness state is attached to the internal governance projection.
 Event and source observations are checked again after result construction and
 before output. This detects observed filesystem races, not a multi-file OS
 transaction, and cannot retract already delivered context. Session-start and
-Markdown read-page remain their existing Markdown-only paths.
+Markdown read-page retain Markdown output, including event-backed conclusions
+only when their complete source graph passes the same gates.
 
-The context request schema and budgets are unchanged: at most 20 selections,
+Existing context schemas and budgets are unchanged: at most 20 selections,
 12,000 Unicode codepoints per item and 40,000 total. No source body is added to
 an event's context text. The opaque search-generation observer also retains its
-existing protocol and fences.
+existing protocol and fences. Explicit context schema 3 additionally prepares
+eligible reviewed events as conclusion sources with authorized governance;
+see [continuing context](CONTINUING_CONTEXT.md).
 
 ## Human catalog and compatibility
 

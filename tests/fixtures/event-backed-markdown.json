@@ -1,0 +1,51 @@
+{
+  "name": "reviewed-event-source",
+  "frontmatter": {
+    "memory_id": "conclusion:synthetic",
+    "domain": "work",
+    "sensitivity": "internal",
+    "review_state": "approved",
+    "target_profiles": [
+      "codex",
+      "opencode"
+    ],
+    "epistemic_status": "human-confirmed",
+    "mind2one": {
+      "version": 2,
+      "id": "conclusion:synthetic",
+      "kind": "memory",
+      "origin": "ai",
+      "review-state": "accepted",
+      "sources": [
+        {
+          "kind": "event",
+          "id": "event:0000000000000001",
+          "revision": "sha256:baf57926bcea1109af986c86bb5c9bc0235f532d55aa5248afca8b4e553a10b1",
+          "relation": "current-derived"
+        }
+      ],
+      "reviewed-at": "2026-09-18T08:00:00.000Z",
+      "reviewed-by": "human",
+      "review-history": [],
+      "review": {
+        "version": 1,
+        "algorithm": "m2o-semantic-v1",
+        "record-id": "conclusion:synthetic",
+        "content-revision": "sha256:42b6a4fce99c2fac7fe66b7a3343444b613cc43b7e0ccb9bb669b6e6015f0c41",
+        "policy-revision": "sha256:aaf96cb9e4799b99dc95ad7171fa803b3ea6949597d7d5ba33175930e51ff9b0",
+        "decision": "accept",
+        "actor": {
+          "type": "human",
+          "id": "synthetic-owner"
+        },
+        "at": "2026-09-18T08:00:00.000Z",
+        "reason": "Synthetic review",
+        "request-id": "synthetic-request",
+        "previous-revision": null
+      }
+    }
+  },
+  "body": "syntheticeventbackedconclusion\n",
+  "contentRevision": "sha256:42b6a4fce99c2fac7fe66b7a3343444b613cc43b7e0ccb9bb669b6e6015f0c41",
+  "policyRevision": "sha256:aaf96cb9e4799b99dc95ad7171fa803b3ea6949597d7d5ba33175930e51ff9b0"
+}

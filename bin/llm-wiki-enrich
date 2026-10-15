@@ -340,13 +340,25 @@ class PageGeneration:
 
 
 class PageSnapshots(list):
-    def __init__(self, values: list[Any], generation: PageGeneration, source_nodes: list[dict[str, Any]] | None = None):
+    def __init__(self, values: list[Any], generation: PageGeneration, source_nodes: list[dict[str, Any]] | None = None,
+                 event_generation=None):
         super().__init__(values)
         self.generation = generation
         self.source_nodes = source_nodes if source_nodes is not None else []
+        self.event_generation = event_generation
 
     def verify(self) -> None:
         self.generation.verify()
+        if self.event_generation is not None:
+            self.event_generation.verify()
+
+
+class VerifiedText(str):
+    """Retain dependency observations through the CLI's final render step."""
+    def __new__(cls, value, verify):
+        result = super().__new__(cls, value)
+        result.verify = verify
+        return result
 
 
 def stable_memory_id(kind: str, material: str) -> str:
@@ -820,7 +832,7 @@ def compute_content_revision(frontmatter: dict[str, Any], body: str) -> str:
         if not isinstance(source, dict):
             raise PolicyError("invalid semantic source")
         source_kind = _semantic_string(source.get("kind"))
-        if source_kind not in {"document", "conversation", "task", "external"}:
+        if source_kind not in {"document", "event", "conversation", "task", "external"}:
             raise PolicyError("unknown semantic source kind")
         relation = _semantic_string(source.get("relation"), optional=True)
         if relation not in {None, "current-derived", "historical-citation", "independent-judgment"}:
@@ -1116,7 +1128,8 @@ def page_catalog(root: Path, manifest: list[tuple[Path, Path, str, tuple[Any, ..
 
 
 def page_snapshots(root: Path, access: AccessContext, project: str | None,
-                   *, source_review_lock: Callable[[], None] | None = None) -> PageSnapshots:
+                   *, source_review_lock: Callable[[], None] | None = None,
+                   event_generation=None) -> PageSnapshots:
     generation = PageGeneration(root, access, source_review_lock=source_review_lock)
     manifest = generation.manifest
     catalog = page_catalog(root, manifest)
@@ -1160,9 +1173,19 @@ def page_snapshots(root: Path, access: AccessContext, project: str | None,
             # cannot establish rename-stable typed document dependencies.
             continue
         product = fields.get("mind2one")
-        nodes.append({"id": snapshot.metadata.memory_id, "revision": page_revision(snapshot),
+        nodes.append({"kind": "document", "id": snapshot.metadata.memory_id, "revision": page_revision(snapshot),
                       "sources": product.get("sources") if isinstance(product, dict) else None,
                       "opaqueSources": bool(fields.get("__m2o_opaque_sources"))})
+    # Gather trusted nodes before filtering freshness. Resolving only reusable
+    # pages/events would lose cross-type cycles and reset traversal budgets.
+    if event_generation is None and any(isinstance(source, dict) and source.get("kind") == "event"
+            and source.get("relation") == "current-derived" for node in nodes
+            for source in (node.get("sources") if isinstance(node.get("sources"), list) else [])):
+        event_generation = EventGeneration(root, access)
+    if event_generation is not None:
+        if event_generation.root != root or event_generation.access != access:
+            raise PolicyError("event snapshot scope mismatch")
+        nodes.extend(event_generation.source_nodes())
     reusable = []
     for entry, snapshot in snapshots:
         if not matches_project(snapshot.metadata.governance, project):
@@ -1176,8 +1199,9 @@ def page_snapshots(root: Path, access: AccessContext, project: str | None,
         governed = PageMetadata(metadata.memory_id, {**metadata.governance, "source_freshness": assessment["state"]},
                                 metadata.has_frontmatter, metadata.frontmatter)
         reusable.append((entry, PageSnapshot(governed, snapshot.raw, snapshot.body)))
-    generation.verify()
-    return PageSnapshots(reusable, generation, nodes)
+    result = PageSnapshots(reusable, generation, nodes, event_generation)
+    result.verify()
+    return result
 
 
 def page_revision(snapshot: PageSnapshot) -> str:
@@ -1734,9 +1758,10 @@ def _event_terminal_edges(events: list[dict[str, Any]], now: datetime) -> dict[s
 
 class EventSnapshots(list):
     """Keep source and event observations alive until the caller emits output."""
-    def __init__(self, values, root, manifest, parent, pages):
+    def __init__(self, values, root, manifest, parent, pages, source_nodes=None):
         super().__init__(values)
         self.root, self.manifest, self.parent, self.pages = root, manifest, parent, pages
+        self.source_nodes = source_nodes if source_nodes is not None else []
 
     def verify(self):
         if (_event_parent_signature(self.root) != self.parent
@@ -1758,6 +1783,50 @@ def _event_parent_signature(root):
     return _event_stat_signature(info)
 
 
+def event_source_eligible(event):
+    """Source authority is narrower than legacy ordinary event recall."""
+    return (event.get("schema_version") in REVIEW_EVENT_SCHEMAS
+            and event["__governance"]["review_status"] == "approved"
+            and isinstance(event.get("record_id"), str)
+            and MEMORY_ID_RE.fullmatch(event["record_id"]) is not None
+            and (event.get("schema_version") == SOURCE_EVENT_SCHEMA or "sources" not in event))
+
+
+class EventGeneration:
+    """Complete event observation; reduce lifecycle before access/freshness."""
+    def __init__(self, root, access):
+        self.root, self.access = root, access
+        self.parent = _event_parent_signature(root)
+        self.manifest = _event_manifest(root / "memory/events")
+        self.rows = _read_event_snapshot(root)
+        now = datetime.now(timezone.utc)
+        superseded = {target for targets in _event_terminal_edges(self.rows, now).values() for target in targets}
+        self.active = []
+        for event in self.rows:
+            if event.get("lifecycle", "active") != "active" or str(event.get("id", "")) in superseded:
+                continue
+            if event.get("schema_version") in REVIEW_EVENT_SCHEMAS and parse_time(event["review"]["at"]) > now:
+                continue
+            valid_from = parse_time(event.get("valid_from") or event.get("timestamp"))
+            valid_until = parse_time(event.get("valid_until"))
+            if valid_from is not None and valid_from > now:
+                continue
+            if valid_until is not None and valid_until <= now:
+                continue
+            if is_authorized(event["__governance"], access):
+                self.active.append(event)
+        self.verify()
+
+    def verify(self):
+        if (_event_parent_signature(self.root) != self.parent
+            or _event_manifest(self.root / "memory/events") != self.manifest):
+            raise EventSnapshotError("snapshot-changed")
+
+    def source_nodes(self):
+        return [{"kind": "event", "id": event["record_id"], "revision": EVENT_REVIEW["record_revision"](event),
+                 "sources": event.get("sources")} for event in self.active if event_source_eligible(event)]
+
+
 def load_events(root: Path, access: AccessContext, *, pages: PageSnapshots | None = None,
                 include_source_unavailable: bool = False) -> EventSnapshots:
     # This exception is only for the fixed local human review catalog. It is not
@@ -1766,37 +1835,27 @@ def load_events(root: Path, access: AccessContext, *, pages: PageSnapshots | Non
         raise PolicyError("human review scope required")
     if pages is not None and (pages.generation.root != root or pages.generation.access != access):
         raise PolicyError("source snapshot scope mismatch")
-    parent = _event_parent_signature(root)
-    manifest = _event_manifest(root / "memory/events")
-    events = _read_event_snapshot(root)
-    now = datetime.now(timezone.utc)
-    superseded = {target for targets in _event_terminal_edges(events, now).values() for target in targets}
+    observed = pages.event_generation if pages is not None and pages.event_generation is not None else EventGeneration(root, access)
+    if pages is None and any(event.get("schema_version") == SOURCE_EVENT_SCHEMA for event in observed.active):
+        pages = page_snapshots(root, access, None, event_generation=observed)
+    # Reuse the complete pre-freshness document nodes. Never reset graph bounds
+    # or turn an already-assessed event into a source-free leaf at this join.
+    nodes = ([node for node in pages.source_nodes if node.get("kind", "document") == "document"] if pages is not None else [])
+    nodes += observed.source_nodes()
     active: list[dict[str, Any]] = []
-    for event in events:
-        if event.get("lifecycle", "active") != "active" or str(event.get("id", "")) in superseded:
-            continue
-        if event.get("schema_version") in REVIEW_EVENT_SCHEMAS and parse_time(event["review"]["at"]) > now:
-            continue
-        valid_from = parse_time(event.get("valid_from") or event.get("timestamp"))
-        valid_until = parse_time(event.get("valid_until"))
-        if valid_from is not None and valid_from > now:
-            continue
-        if valid_until is not None and valid_until <= now:
-            continue
-        if not is_authorized(event["__governance"], access):
-            continue
+    for event in observed.active:
         if event.get("schema_version") == SOURCE_EVENT_SCHEMA:
-            if pages is None:
-                pages = page_snapshots(root, access, None)
             identity = event["record_id"]
-            nodes = [*pages.source_nodes, {"id": identity, "revision": EVENT_REVIEW["record_revision"](event),
-                                         "sources": event["sources"]}]
-            assessment = SOURCE_FRESHNESS["assess"](identity, nodes)
+            # The human catalog can inspect rejected/pending revisions without
+            # granting them authority as dependencies of another node.
+            assessment_nodes = nodes if event_source_eligible(event) else [*nodes,
+                {"kind": "event", "id": identity, "revision": EVENT_REVIEW["record_revision"](event), "sources": event["sources"]}]
+            assessment = SOURCE_FRESHNESS["assess"](identity, assessment_nodes)
             event = {**event, "__governance": {**event["__governance"], "source_freshness": assessment["state"]}}
             if not assessment["reuseAllowed"] and not include_source_unavailable:
                 continue
         active.append(event)
-    result = EventSnapshots(active, root, manifest, parent, pages)
+    result = EventSnapshots(active, root, observed.manifest, observed.parent, pages, nodes)
     result.verify()
     return result
 
@@ -2154,7 +2213,7 @@ def drop_done_lines(text: str) -> str:
 
 
 def session_start_sections(
-    root: Path, max_projects: int, access: AccessContext, scope: str = "full"
+    root: Path, max_projects: int, access: AccessContext, scope: str = "full", *, snapshots=None
 ) -> list[str]:
     """Assemble session-start digest sections in priority order.
 
@@ -2163,7 +2222,7 @@ def session_start_sections(
     """
     context_dir = root / "wiki" / "context"
     parts: list[str] = []
-    snapshots = page_snapshots(root, access, None)
+    snapshots = snapshots if snapshots is not None else page_snapshots(root, access, None)
 
     def read_head(path: Path) -> str:
         return read_text_head(path, root, access, snapshots=snapshots)
@@ -2230,10 +2289,14 @@ def render_session_start(
     root: Path, max_chars: int, max_projects: int, access: AccessContext, scope: str = "full"
 ) -> str:
     generation = PageGeneration(root, access)
-    parts = session_start_sections(root, max_projects, access, scope)
-    if not parts:
+    snapshots = page_snapshots(root, access, None)
+    parts = session_start_sections(root, max_projects, access, scope, snapshots=snapshots)
+    def verify():
         generation.verify()
-        return "## Wikified — Session Memory\n\nNo wiki content found yet.\n"
+        snapshots.verify()
+    if not parts:
+        verify()
+        return VerifiedText("## Wikified — Session Memory\n\nNo wiki content found yet.\n", verify)
     body = redact("\n\n".join(parts).strip())
     scope_note = {
         "critical": (
@@ -2259,8 +2322,8 @@ def render_session_start(
     if len(output) > max_chars:
         budget = max(0, max_chars - len(prefix) - 40)
         output = prefix + body[:budget].rstrip() + "\n\n[truncated by llm-wiki-enrich]\n"
-    generation.verify()
-    return output
+    verify()
+    return VerifiedText(output, verify)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -2529,7 +2592,7 @@ def read_page(
         text = redact(projected_page_text(snapshot))
         if not chunked:
             snapshots.verify()
-            return text
+            return VerifiedText(text, snapshots.verify)
         if start > len(text):
             return None
         end = min(len(text), start + size)
@@ -2538,8 +2601,8 @@ def read_page(
                            "nextOffset": end if end < len(text) else None, "totalChars": len(text),
                            "truncated": end < len(text), "text": text[start:end]}, ensure_ascii=False)
         snapshots.verify()
-        return result
-    except (OSError, ValueError):
+        return VerifiedText(result, snapshots.verify)
+    except (OSError, ValueError, EventSnapshotError):
         return None
 
 
@@ -2560,18 +2623,22 @@ def main(argv: list[str]) -> int:
         if args.files or args.query or args.session_start:
             print("llm-wiki-enrich: page unavailable", file=sys.stderr)
             return 3
-        page = read_page(root, args.read_page, access, args.project, offset=args.offset, length=args.length, revision=args.revision)
+        try:
+            page = read_page(root, args.read_page, access, args.project, offset=args.offset, length=args.length, revision=args.revision)
+        except (PageSnapshotError, EventSnapshotError):
+            page = None
         if page is None:
             print("llm-wiki-enrich: page unavailable", file=sys.stderr)
             return 3
         try:
+            output = str(page) + ("\n" if page and not page.endswith("\n") else "")
+            output.encode("utf-8")
+            page.verify()
             generation.verify()
-        except PageSnapshotError:
+        except (PageSnapshotError, EventSnapshotError):
             print("llm-wiki-enrich: page unavailable", file=sys.stderr)
             return 3
-        sys.stdout.write(page)
-        if page and not page.endswith("\n"):
-            sys.stdout.write("\n")
+        sys.stdout.write(output)
         return 0
     if args.offset is not None or args.length is not None or args.revision is not None:
         print("llm-wiki-enrich: page unavailable", file=sys.stderr)
@@ -2585,8 +2652,10 @@ def main(argv: list[str]) -> int:
                 access,
                 args.session_start_scope,
             )
+            output.encode("utf-8")
+            output.verify()
             generation.verify()
-        except PageSnapshotError as exc:
+        except (PageSnapshotError, EventSnapshotError) as exc:
             print(f"llm-wiki-enrich: page snapshot unavailable [{exc.code}]; no partial export", file=sys.stderr)
             return 4
         sys.stdout.write(output)
@@ -2611,7 +2680,7 @@ def main(argv: list[str]) -> int:
             candidates.extend(_legacy_wiki_candidates(root, legacy_tokenize([args.query, *touched_files]), access, args.project, args.page_fragments))
         else:
             candidates.extend(wiki_candidates(root, args.query, query_terms, query_groups, access, args.project, args.page_fragments))
-    except PageSnapshotError as exc:
+    except (PageSnapshotError, EventSnapshotError) as exc:
         print(f"llm-wiki-enrich: page snapshot unavailable [{exc.code}]; no partial search results", file=sys.stderr)
         return 4
     hint = graph_hint(root, query_tokens, query_groups, access)

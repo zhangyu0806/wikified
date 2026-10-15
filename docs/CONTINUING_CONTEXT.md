@@ -1,5 +1,28 @@
 # Continuing a topic with fixed source versions
 
+## Reviewed event sources (explicit schema 3)
+
+Clients preparing a Markdown conclusion from events can explicitly request
+`schemaVersion: 3` through `llm-wiki-context --request` or MCP `prepare_context`.
+The selection shapes and the limits of 20 items, 12,000 Unicode codepoints per
+item, and 40,000 total are unchanged. Schema 3 accepts page fragments too.
+
+In this version, a ready event must be a current, independently reviewed v4/v5
+event with an eligible, reusable source graph under the requesting assistant's
+own authority. It additionally returns `governance: {domain, sensitivity}` for
+conservative conclusion inheritance. Legacy/unreviewed events, including v4
+events with opaque legacy sources, return `unavailable`. Human catalog access
+is not a substitute for this check. Schema 1/2 keep their existing event behavior
+and wire shape; new clients must not downgrade a schema 3 source preparation.
+
+Persist a source as `kind: "event"`, its stable `record_id`, its exact event
+record revision, and `relation: "current-derived"`; do not persist its transient
+event ID as the source identity or invent a Markdown locator. New conclusions
+still need explicit review. The returned event body is evidence, not authority
+to approve another record. See [typed source freshness](SOURCE_FRESHNESS.md).
+
+## Existing whole-source requests
+
 prepare_context is a read-only MCP tool. Its selections narrow the authority of
 the server's startup profile; topic membership never grants permission. The
 same mechanism is exposed by llm-wiki-context --agent-profile codex --request
