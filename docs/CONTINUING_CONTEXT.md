@@ -7,7 +7,7 @@ Clients preparing a Markdown conclusion from events can explicitly request
 The selection shapes and the limits of 20 items, 12,000 Unicode codepoints per
 item, and 40,000 total are unchanged. Schema 3 accepts page fragments too.
 
-In this version, a ready event must be a current, independently reviewed v4/v5
+In this version, a ready event must be a current, independently reviewed v4/v5/v6
 event with an eligible, reusable source graph under the requesting assistant's
 own authority. It additionally returns `governance: {domain, sensitivity}` for
 conservative conclusion inheritance. Legacy/unreviewed events, including v4

@@ -115,7 +115,10 @@ def entry_for(event: dict[str, Any], schema_version: int = 1) -> tuple[dict[str,
     if modified is not None and (not isinstance(modified, str) or len(modified) > 64 or ENGINE["parse_time"](modified) is None):
         raise ValueError("invalid event time")
     governance = event["__governance"]
-    source_bound = event.get("schema_version") == CORE["SOURCE_SCHEMA"]
+    source_bound = event.get("schema_version") in CORE["SOURCE_SCHEMAS"]
+    typed_sources = event.get("schema_version") == CORE["TYPED_SOURCE_SCHEMA"]
+    if typed_sources and schema_version < 3:
+        raise ValueError("typed event sources require catalog v3")
     if source_bound and schema_version == 1:
         raise ValueError("source-bound events require catalog v2")
     versioned = event.get("schema_version") in CORE["SCHEMAS"]
@@ -123,12 +126,12 @@ def entry_for(event: dict[str, Any], schema_version: int = 1) -> tuple[dict[str,
         "kind": "event", "objectId": object_id, "eventId": event_id,
         "revision": CORE["record_revision"](event), "identity": "persistent",
         "title": summary[:120], "type": kind, "actor": None if unknown_legacy_actor else dict(actor),
-        "reviewStatus": governance["review_status"], "reviewBinding": "v5" if source_bound else "v4" if versioned else "legacy",
+        "reviewStatus": governance["review_status"], "reviewBinding": "v6" if typed_sources else "v5" if source_bound else "v4" if versioned else "legacy",
         "decision": event["review"]["decision"] if versioned else None,
         "domain": governance["domain"], "sensitivity": governance["sensitivity"],
         "targetProfiles": sorted(governance["target_profiles"]), "modifiedAt": modified,
     }
-    if schema_version == 2:
+    if schema_version >= 2:
         state = governance.get("source_freshness", "unassessed")
         entry["sourceFreshness"] = {"state": state, "reuseAllowed": state in {"current", "unassessed"}}
     assert_safe_metadata(entry)
@@ -159,7 +162,7 @@ class CatalogResult(dict):
 
 
 def catalog(root: Path, *, event_id: str | None = None, revision: str | None = None, query: str = "", schema_version: int = 1):
-    if type(schema_version) is not int or schema_version not in {1, 2}:
+    if type(schema_version) is not int or schema_version not in {1, 2, 3}:
         raise ValueError("invalid catalog version")
     root = root.absolute()
     if root.resolve(strict=True) != root or not stat.S_ISDIR(root.lstat().st_mode):
@@ -192,8 +195,8 @@ def catalog(root: Path, *, event_id: str | None = None, revision: str | None = N
     # Generation excludes hidden rows and their counts, but includes all
     # authorized record revisions rather than only this query's first page.
     material = ["wikified-event-catalog/v1", generation[2], [[entry["objectId"], entry["eventId"], entry["revision"]] for entry, _, _ in projected]]
-    if schema_version == 2:
-        material = ["wikified-event-catalog/v2", generation[2], [[entry["objectId"], entry["eventId"], entry["revision"],
+    if schema_version >= 2:
+        material = [f"wikified-event-catalog/v{schema_version}", generation[2], [[entry["objectId"], entry["eventId"], entry["revision"],
             entry["sourceFreshness"]] for entry, _, _ in projected]]
     aggregate = "sha256:" + hashlib.sha256(json.dumps(material, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
     entries = []
@@ -220,7 +223,7 @@ def main(argv):
     parser.add_argument("--event-id")
     parser.add_argument("--revision")
     parser.add_argument("--query", default="")
-    parser.add_argument("--schema-version", type=int, choices=[1, 2], default=1)
+    parser.add_argument("--schema-version", type=int, choices=[1, 2, 3], default=1)
     for flag in ("--root", "--profile", "--purpose", "--event-id", "--revision", "--query", "--schema-version"):
         if sum(arg == flag or arg.startswith(flag + "=") for arg in argv) > 1:
             raise ValueError("duplicate argument")

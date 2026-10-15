@@ -42,3 +42,8 @@ freshness state is scoped to this human view and never grants assistant access.
 Unusable-source events remain reviewable without disclosing their source IDs.
 See [v5 source freshness](EVENT_SOURCE_FRESHNESS.md) for the v1 fail-closed
 compatibility boundary and additional snapshot checks.
+
+Typed source-bound v6 records require explicit `--schema-version 3`, returning
+`reviewBinding: "v6"` with the same generic freshness shape. Catalog v1/v2 reject
+authorized visible v6 records rather than omitting their dependencies. See the
+[v6 compatibility and authority boundaries](EVENT_EVENT_DEPENDENCIES.md).

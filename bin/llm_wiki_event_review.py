@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pure opt-in JSONL v4/v5 review contract. No filesystem or authentication I/O."""
+"""Pure opt-in JSONL v4/v5/v6 review contract. No filesystem/authentication I/O."""
 from __future__ import annotations
 import copy
 import hashlib
@@ -12,7 +12,9 @@ from typing import Any
 
 SCHEMA = "llm-wiki-memory-event/v4"
 SOURCE_SCHEMA = "llm-wiki-memory-event/v5"
-SCHEMAS = {SCHEMA, SOURCE_SCHEMA}
+TYPED_SOURCE_SCHEMA = "llm-wiki-memory-event/v6"
+SOURCE_SCHEMAS = {SOURCE_SCHEMA, TYPED_SOURCE_SCHEMA}
+SCHEMAS = {SCHEMA, *SOURCE_SCHEMAS}
 ALGORITHM = "wikified-event-review/v1"
 ACTIONS = {"accept", "correct", "reject", "withdraw", "restore"}
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$")
@@ -20,26 +22,30 @@ EVENT_ID = re.compile(r"^[0-9a-f]{16}$")
 HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 INTERNAL = {"__memory_id", "__governance"}
 
-def source_bindings(value: Any) -> list[dict[str, str]]:
-    """Explicit, bounded document references; paths and labels are not authority."""
+def source_bindings(value: Any, *, typed: bool = False) -> list[dict[str, str]]:
+    """Explicit, bounded references. v5 remains strictly document-only."""
     if not isinstance(value, list) or not 1 <= len(value) <= 256:
         raise ValueError("invalid event source bindings")
     seen = set()
     for source in value:
         if (not isinstance(source, dict) or set(source) != {"kind", "id", "revision", "relation"}
-            or source["kind"] != "document" or not isinstance(source["id"], str)
+            or not isinstance(source["kind"], str)
+            or source["kind"] not in ({"document", "event"} if typed else {"document"})
+            or not isinstance(source["id"], str)
             or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", source["id"]) is None
             or source["id"] in seen or not isinstance(source["revision"], str)
             or HASH.fullmatch(source["revision"]) is None
             or source["relation"] not in {"current-derived", "historical-citation", "independent-judgment"}):
             raise ValueError("invalid event source binding")
+        if source["kind"] == "event" and re.fullmatch(r"event:[0-9a-f]{16}", source["id"]) is None:
+            raise ValueError("invalid event source identity")
         seen.add(source["id"])
     return copy.deepcopy(value)
 
 def patch_sources(target: dict[str, Any], patch: Any) -> list[dict[str, str]]:
-    additions = source_bindings(patch)
-    if target.get("schema_version") == SOURCE_SCHEMA:
-        sources = source_bindings(target.get("sources"))
+    additions = source_bindings(patch, typed=True)
+    if target.get("schema_version") in SOURCE_SCHEMAS:
+        sources = source_bindings(target.get("sources"), typed=target["schema_version"] == TYPED_SOURCE_SCHEMA)
     else:
         if "sources" in target:
             raise ValueError("legacy opaque sources cannot be adopted")
@@ -55,7 +61,7 @@ def patch_sources(target: dict[str, Any], patch: Any) -> list[dict[str, str]]:
         else:
             positions[source["id"]] = len(sources)
             sources.append(source)
-    return source_bindings(sources)
+    return source_bindings(sources, typed=True)
 
 def text(value: Any, limit: int = 1000, blank: bool = False) -> str:
     if not isinstance(value, str) or len(value) > limit or (not blank and not value.strip()):
@@ -122,9 +128,9 @@ def validate_binding(event: dict[str, Any]) -> bool:
             return False
         if event["schema_version"] not in SCHEMAS or b["algorithm"] != ALGORITHM or b["decision"] not in ACTIONS:
             return False
-        version = "v5" if event["schema_version"] == SOURCE_SCHEMA else "v4"
-        if version == "v5":
-            source_bindings(event.get("sources"))
+        version = event["schema_version"].rsplit("/", 1)[1]
+        if event["schema_version"] in SOURCE_SCHEMAS:
+            source_bindings(event.get("sources"), typed=event["schema_version"] == TYPED_SOURCE_SCHEMA)
         if event.get("source") != "human-review/" + version or event.get("lifecycle") != "active":
             return False
         if not EVENT_ID.fullmatch(event["id"]) or event["memory_id"] != "event:" + event["id"]:
@@ -178,18 +184,21 @@ def validate_links(events: list[dict[str, Any]]) -> None:
         # Accept/reject/withdraw/restore cannot silently rewrite the claim.
         if b["decision"] != "correct" and (e.get("summary") != target.get("summary") or e.get("details", "") != target.get("details", "")):
             raise ValueError("non-correction changed event content")
-        if target.get("schema_version") == SOURCE_SCHEMA:
-            if e.get("schema_version") != SOURCE_SCHEMA:
+        if target.get("schema_version") in SOURCE_SCHEMAS:
+            if (e.get("schema_version") not in SOURCE_SCHEMAS
+                or (target["schema_version"] == TYPED_SOURCE_SCHEMA and e["schema_version"] != TYPED_SOURCE_SCHEMA)):
                 raise ValueError("event sources cannot be downgraded")
-            previous = source_bindings(target.get("sources"))
-            current = {source["id"]: source for source in source_bindings(e.get("sources"))}
+            if e["schema_version"] != target["schema_version"] and b["decision"] != "correct":
+                raise ValueError("source upgrade requires explicit correction")
+            previous = source_bindings(target.get("sources"), typed=target["schema_version"] == TYPED_SOURCE_SCHEMA)
+            current = {source["id"]: source for source in source_bindings(e.get("sources"), typed=e["schema_version"] == TYPED_SOURCE_SCHEMA)}
             for source in previous:
                 updated = current.get(source["id"])
                 if updated is None or updated["kind"] != source["kind"] or updated["relation"] != source["relation"]:
                     raise ValueError("event source edge was removed or reclassified")
             if b["decision"] != "correct" and e["sources"] != target["sources"]:
                 raise ValueError("non-correction changed source bindings")
-        elif e.get("schema_version") == SOURCE_SCHEMA and (b["decision"] != "correct" or "sources" in target):
+        elif e.get("schema_version") in SOURCE_SCHEMAS and (b["decision"] != "correct" or "sources" in target):
             raise ValueError("source upgrade requires explicit correction")
 
 def transition(action: str, status: str, schema: str | None) -> bool:
@@ -235,10 +244,12 @@ def prepare(target: dict[str, Any], request: dict[str, Any], *, actor_id: str, c
     e.pop("review", None)
     if "source_bindings" in request:
         e["sources"] = patch_sources(target, request["source_bindings"])
-    schema = SOURCE_SCHEMA if "source_bindings" in request or target.get("schema_version") == SOURCE_SCHEMA else SCHEMA
+    schema = SOURCE_SCHEMA if "source_bindings" in request or target.get("schema_version") in SOURCE_SCHEMAS else SCHEMA
+    if target.get("schema_version") == TYPED_SOURCE_SCHEMA or (schema == SOURCE_SCHEMA and any(s["kind"] == "event" for s in e["sources"])):
+        schema = TYPED_SOURCE_SCHEMA
     e.update(schema_version=schema, id=event_id, memory_id="event:"+event_id,
         record_id=target.get("record_id", target["memory_id"]), actor={"type":"human","id":actor_id},
-        timestamp=now, lifecycle="active", source="human-review/v5" if schema == SOURCE_SCHEMA else "human-review/v4",
+        timestamp=now, lifecycle="active", source="human-review/" + schema.rsplit("/", 1)[1],
         supersedes=list(dict.fromkeys([target["id"]]+inherited)))
     if action == "correct":
         if "summary" in request:

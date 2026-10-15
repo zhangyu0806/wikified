@@ -96,6 +96,7 @@ SOURCE_FRESHNESS = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wi
 SOURCE_REVIEW = runpy.run_path(str(Path(__file__).resolve().with_name("llm_wiki_source_review.py")))
 REVIEW_EVENT_SCHEMA = EVENT_REVIEW["SCHEMA"]
 SOURCE_EVENT_SCHEMA = EVENT_REVIEW["SOURCE_SCHEMA"]
+SOURCE_EVENT_SCHEMAS = EVENT_REVIEW["SOURCE_SCHEMAS"]
 REVIEW_EVENT_SCHEMAS = EVENT_REVIEW["SCHEMAS"]
 LEGACY_GOVERNANCE: dict[str, Any] = {
     "domain": "work",
@@ -1789,7 +1790,7 @@ def event_source_eligible(event):
             and event["__governance"]["review_status"] == "approved"
             and isinstance(event.get("record_id"), str)
             and MEMORY_ID_RE.fullmatch(event["record_id"]) is not None
-            and (event.get("schema_version") == SOURCE_EVENT_SCHEMA or "sources" not in event))
+            and (event.get("schema_version") in SOURCE_EVENT_SCHEMAS or "sources" not in event))
 
 
 class EventGeneration:
@@ -1836,7 +1837,7 @@ def load_events(root: Path, access: AccessContext, *, pages: PageSnapshots | Non
     if pages is not None and (pages.generation.root != root or pages.generation.access != access):
         raise PolicyError("source snapshot scope mismatch")
     observed = pages.event_generation if pages is not None and pages.event_generation is not None else EventGeneration(root, access)
-    if pages is None and any(event.get("schema_version") == SOURCE_EVENT_SCHEMA for event in observed.active):
+    if pages is None and any(event.get("schema_version") in SOURCE_EVENT_SCHEMAS for event in observed.active):
         pages = page_snapshots(root, access, None, event_generation=observed)
     # Reuse the complete pre-freshness document nodes. Never reset graph bounds
     # or turn an already-assessed event into a source-free leaf at this join.
@@ -1844,7 +1845,7 @@ def load_events(root: Path, access: AccessContext, *, pages: PageSnapshots | Non
     nodes += observed.source_nodes()
     active: list[dict[str, Any]] = []
     for event in observed.active:
-        if event.get("schema_version") == SOURCE_EVENT_SCHEMA:
+        if event.get("schema_version") in SOURCE_EVENT_SCHEMAS:
             identity = event["record_id"]
             # The human catalog can inspect rejected/pending revisions without
             # granting them authority as dependencies of another node.
