@@ -18,7 +18,7 @@ MAX_SELECTIONS = 20
 MAX_TEXT = 40000
 MAX_ITEM_TEXT = 12000
 REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
-PROFILES = ("coding", "codex", "opencode", "claude", "cursor", "grok", "planning", "reflection")
+PROFILES = ("coding", "codex", "opencode", "claude", "cursor", "grok", "pi", "workbuddy", "planning", "reflection")
 
 
 class VerifiedResult(dict):

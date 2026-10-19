@@ -14,14 +14,18 @@ import dataclasses
 import datetime as dt
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+import threading
+import time
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable
 
 NAME = "llm-wiki"
@@ -30,6 +34,7 @@ MEMORY_DOMAIN = "work"
 MARKER_BEGIN = "<!-- BEGIN llm-wiki-recall -->"
 MARKER_END = "<!-- END llm-wiki-recall -->"
 VALID_STATES = ("absent", "installed-unconfigured", "configured", "stale/wrong-link", "unverifiable")
+PORTABLE_HARNESSES = ("pi", "workbuddy")
 
 
 class HarnessError(RuntimeError):
@@ -411,7 +416,10 @@ def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
-        os.fchmod(fd, mode)
+        # Windows has no fchmod. Its inherited directory ACL governs this file;
+        # do not claim POSIX mode bits establish a native Windows ACL.
+        if callable(getattr(os, "fchmod", None)):
+            os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
             handle.flush()
@@ -1763,21 +1771,438 @@ def configure(harnesses: list[str]) -> int:
     return 1 if failures else 0
 
 
+def portable_text(value: str | None, label: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 4096 or any(ord(char) < 32 for char in value):
+        raise HarnessError(f"{label} must be explicit nonempty text without control characters")
+    # Clients interpret dollar syntax differently (including Pi's $NAME, $$
+    # and $!). Reject it instead of emulating version-specific interpolation:
+    # doctor and the real client must receive the same literal launch target.
+    if "$" in value:
+        raise HarnessError(f"{label} must not contain dollar signs or client variable placeholders")
+    return value
+
+
+def linux_absolute(value: str | None, label: str) -> str:
+    text = portable_text(value, label)
+    if not PurePosixPath(text).is_absolute() or PureWindowsPath(text).drive or text.startswith("//"):
+        raise HarnessError(f"{label} must be an absolute POSIX path (a Linux path for WSL)")
+    return text
+
+
+def portable_mcp_entry(
+    harness: str, *, transport: str, engine: str | None, root: str | None,
+    node: str | None = None, distribution: str | None = None,
+    wsl_command: str = "wsl.exe", host_platform: str | None = None,
+) -> dict[str, Any]:
+    """Build literal argv, never a shell expression or an identity alias.
+
+    This renderer is also usable on a POSIX host to prepare a Windows client
+    file mounted under /mnt. It does not pretend the Linux paths exist locally.
+    """
+    if harness not in PORTABLE_HARNESSES:
+        raise HarnessError("portable MCP configuration requires pi or workbuddy")
+    if transport not in ("local", "wsl"):
+        raise HarnessError("unsupported MCP transport")
+    if transport == "local" and (host_platform or sys.platform) == "win32":
+        raise HarnessError("native Windows clients require explicit --transport wsl")
+    engine = linux_absolute(engine, "--engine")
+    root = linux_absolute(root, "--root")
+    if node is not None:
+        node = linux_absolute(node, "--node")
+    environment = {"LLM_WIKI_AGENT_PROFILE": harness, "LLM_WIKI_DOMAIN": MEMORY_DOMAIN,
+                   "LLM_WIKI_ROOT": root, "LLM_WIKI_TARGET_AGENTS": harness}
+    engine_argv = [node, engine] if node else [engine]
+    if transport == "wsl":
+        distribution = portable_text(distribution, "--wsl-distribution")
+        if distribution.startswith("-"):
+            raise HarnessError("--wsl-distribution cannot begin with an option prefix")
+        command = portable_text(wsl_command, "--wsl-command")
+        windows_path = PureWindowsPath(command)
+        if command != "wsl.exe" and not (windows_path.is_absolute() and windows_path.name.lower() == "wsl.exe"):
+            raise HarnessError("--wsl-command must be wsl.exe or its absolute Windows executable path")
+        entry: dict[str, Any] = {"command": command, "args": [
+            "--distribution", distribution, "--exec", ENV_COMMAND,
+            *(f"{key}={value}" for key, value in environment.items()), *engine_argv], "env": {}}
+    else:
+        if distribution is not None or wsl_command != "wsl.exe":
+            raise HarnessError("WSL options require --transport wsl")
+        entry = {"command": engine_argv[0], "args": engine_argv[1:], "env": environment}
+    if harness == "pi":
+        entry.update(enabled=True, exposure="direct")
+    return entry
+
+
+def portable_config_path(harness: str, explicit: str | None) -> Path:
+    if explicit:
+        portable_text(explicit, "--config")
+        if sys.platform != "win32" and PureWindowsPath(explicit).drive:
+            raise HarnessError("on POSIX use the mounted config path, not a Windows drive string")
+        path = Path(explicit).expanduser()
+        if not path.is_absolute():
+            raise HarnessError("--config must be an absolute path on the configuration host")
+        return path
+    if harness == "pi":
+        return Path.home() / ".pi" / "agent" / "mcp.json"
+    return Path.home() / ".workbuddy" / "mcp.json"
+
+
+def portable_entry_matches(actual: Any, required: dict[str, Any]) -> bool:
+    # Preserve additional client settings, but do not treat disabled/remote or
+    # extra process environment as the reviewed local launcher. Never overwrite
+    # such an entry automatically, including an old broader target/profile.
+    return (isinstance(actual, dict) and mapping_contains(actual, required)
+            and actual.get("env") == required["env"]
+            and actual.get("enabled", True) is True and actual.get("disabled", False) is False
+            and "url" not in actual and actual.get("transport", "stdio") == "stdio"
+            and actual.get("type", "stdio") in ("stdio", "local"))
+
+
+def strict_portable_json(text: str) -> JsonNode:
+    # These clients read JSON, unlike OpenCode's JSONC. Never call comments,
+    # trailing commas or non-JSON numeric constants a configured client file.
+    def invalid_constant(value: str) -> None:
+        raise ValueError("non-JSON constant")
+    json.loads(text, parse_constant=invalid_constant)
+    return parse_jsonc(text)  # Also rejects duplicate object keys.
+
+
+def portable_file_status(path: Path, required: dict[str, Any]) -> str:
+    if path.is_symlink():
+        return "unverifiable"
+    if not path.exists():
+        return "installed-unconfigured"
+    try:
+        root = strict_portable_json(path.read_text(encoding="utf-8"))
+        if root.kind != "object":
+            return "unverifiable"
+        servers = root.value.get("mcpServers", {})
+        if not isinstance(servers, dict):
+            return "unverifiable"
+        if NAME not in servers:
+            return "installed-unconfigured"
+        return "configured" if portable_entry_matches(servers[NAME], required) else "stale/wrong-link"
+    except (OSError, UnicodeError, ValueError):
+        return "unverifiable"
+
+
+def configure_portable_file(path: Path, entry: dict[str, Any]) -> bool:
+    original, root = load_jsonc_for_change(path)
+    try:
+        strict_portable_json(original)
+    except ValueError as exc:
+        backup = backup_file(path, "malformed") if path.exists() else None
+        raise HarnessError(f"client config must be strict JSON; unchanged; recovery snapshot: {backup}") from exc
+    servers = root.members.get("mcpServers")
+    if servers is not None and servers.kind != "object":
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"mcpServers is user-owned non-object; unchanged; recovery snapshot: {backup}")
+    existing = servers.members.get(NAME) if servers else None
+    if existing is not None:
+        if portable_entry_matches(existing.value, entry):
+            return False
+        backup = backup_file(path, "conflict")
+        raise HarnessError(f"existing mcpServers.{NAME} differs; unchanged; recovery snapshot: {backup}")
+    updated = (insert_object_member(original, servers, NAME, entry) if servers else
+               insert_object_member(original, root, "mcpServers", {NAME: entry}))
+    if path.is_symlink() or (path.exists() and path.read_text(encoding="utf-8") != original):
+        raise HarnessError("configuration changed during preparation; no merge performed")
+    return validate_and_write(path, original, updated)
+
+
+def inspect_portable(harness: str, path: Path, entry: dict[str, Any]) -> HarnessStatus:
+    state = portable_file_status(path, entry)
+    return HarnessStatus(harness, "not-checked", state, "manual", "not-required", state,
+                         "configuration only; real client not verified; automatic capture not configured")
+
+
+class WindowsProbeJob:
+    """Own the diagnostic process tree without relying on a still-live parent.
+
+    The bootstrap waits for one byte before spawning the configured command.
+    Assign it to a kill-on-close job before releasing that byte, so descendants
+    cannot escape cleanup by outliving an immediately exiting MCP parent.
+    """
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimit(ctypes.Structure):
+            _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                        ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
+                        ("max_working_set", ctypes.c_size_t), ("active_processes", wintypes.DWORD),
+                        ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                        ("scheduling", wintypes.DWORD)]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in
+                        ("read_ops", "write_ops", "other_ops", "read_bytes", "write_bytes", "other_bytes")]
+
+        class ExtendedLimit(ctypes.Structure):
+            _fields_ = [("basic", BasicLimit), ("io", IoCounters),
+                        ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                        ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t)]
+
+        api = ctypes.WinDLL("kernel32", use_last_error=True)
+        api.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        api.CreateJobObjectW.restype = wintypes.HANDLE
+        api.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        api.SetInformationJobObject.restype = wintypes.BOOL
+        api.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        api.AssignProcessToJobObject.restype = wintypes.BOOL
+        api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        api.OpenProcess.restype = wintypes.HANDLE
+        api.CloseHandle.argtypes = [wintypes.HANDLE]
+        api.CloseHandle.restype = wintypes.BOOL
+        self.api = api
+        self.handle = api.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError("cannot create diagnostic process job")
+        limits = ExtendedLimit()
+        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not api.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            self.close()
+            raise OSError("cannot bound diagnostic process job")
+
+    def assign(self, process: subprocess.Popen[bytes]) -> None:
+        handle = self.api.OpenProcess(0x0101, False, process.pid)  # SET_QUOTA | TERMINATE
+        if not handle:
+            raise OSError("cannot open diagnostic bootstrap")
+        try:
+            if not self.api.AssignProcessToJobObject(self.handle, handle):
+                raise OSError("cannot contain diagnostic process tree")
+        finally:
+            self.api.CloseHandle(handle)
+
+    def close(self) -> None:
+        if self.handle:
+            self.api.CloseHandle(self.handle)
+            self.handle = None
+
+
+def probe_stdio(entry: dict[str, Any], timeout: float = 8) -> dict[str, str]:
+    """Bounded initialize/tools/list only. Never query a vault, write or call a model.
+
+    Use the exact managed launcher with a minimal process environment; do not
+    inherit an operator's API keys or alternate LLM_WIKI_* configuration.
+    """
+    limit = 262144
+    messages: queue.Queue[Any] = queue.Queue(maxsize=64)
+    overflow = threading.Event()
+    deadline = time.monotonic() + timeout
+    process: subprocess.Popen[bytes] | None = None
+    thread: threading.Thread | None = None
+    job: WindowsProbeJob | None = None
+    env = {key: value for key, value in os.environ.items() if key in {
+        "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "HOME", "USERPROFILE",
+        "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL"}}
+    env.update(entry["env"])
+
+    def receive() -> None:
+        assert process is not None and process.stdout is not None
+        total = 0
+        try:
+            while True:
+                line = process.stdout.readline(limit + 1)
+                total += len(line)
+                if total > limit:
+                    overflow.set()
+                    return
+                if not line:
+                    messages.put_nowait(None)
+                    return
+                messages.put_nowait(line)
+        except (OSError, ValueError, queue.Full):
+            overflow.set()
+
+    def response(identity: int) -> dict[str, Any]:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HarnessError("timeout")
+            if overflow.is_set():
+                raise HarnessError("output-limit")
+            try:
+                raw = messages.get(timeout=min(remaining, 0.05))
+            except queue.Empty:
+                continue
+            if raw is None:
+                raise HarnessError("transport-closed")
+            try:
+                message = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeError):
+                raise HarnessError("invalid-response") from None
+            if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+                raise HarnessError("invalid-response")
+            if "id" not in message and isinstance(message.get("method"), str):
+                continue
+            if type(message.get("id")) is not int or message["id"] != identity or "error" in message:
+                raise HarnessError("unexpected-response")
+            if not isinstance(message.get("result"), dict):
+                raise HarnessError("invalid-response")
+            return message["result"]
+
+    def send(value: dict[str, Any]) -> None:
+        assert process is not None and process.stdin is not None
+        process.stdin.write((json.dumps(value) + "\n").encode("utf-8"))
+        process.stdin.flush()
+
+    try:
+        if not 0 < timeout <= 30:
+            raise HarnessError("invalid-timeout")
+        command = [entry["command"], *entry["args"]]
+        if os.name == "nt":
+            job = WindowsProbeJob()
+            bootstrap = ("import os,subprocess,sys; "
+                         "gate=os.read(0,1); "
+                         "sys.exit(subprocess.call(sys.argv[1:]) if gate==b'!' else 125)")
+            command = [sys.executable, "-I", "-c", bootstrap, *command]
+        process = subprocess.Popen(command, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+            start_new_session=os.name != "nt")
+        if job is not None:
+            job.assign(process)
+            assert process.stdin is not None
+            process.stdin.write(b"!")
+            process.stdin.flush()
+        thread = threading.Thread(target=receive, daemon=True)
+        thread.start()
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "wikified-harness-doctor", "version": "1"}}})
+        initialized = response(1)
+        if (initialized.get("serverInfo", {}).get("name") != "wikified"
+                or not isinstance(initialized.get("protocolVersion"), str)
+                or not isinstance(initialized.get("capabilities"), dict)
+                or not isinstance(initialized["capabilities"].get("tools"), dict)):
+            raise HarnessError("unexpected-server")
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        listed = response(2).get("tools")
+        if not isinstance(listed, list) or any(not isinstance(tool, dict) for tool in listed):
+            raise HarnessError("invalid-tools")
+        names = [tool.get("name") for tool in listed]
+        if (any(not isinstance(name, str) for name in names) or len(set(names)) != len(names)
+                or not {"prepare_context", "search_pages", "read_page", "record_event"}.issubset(names)
+                or any(not isinstance(tool.get("inputSchema"), dict) for tool in listed)):
+            raise HarnessError("unexpected-tools")
+        return {"state": "initialized", "scope": "initialize-and-tools-list"}
+    except HarnessError as exc:
+        return {"state": "failed", "reason": str(exc)}
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+        return {"state": "failed", "reason": "transport-error"}
+    finally:
+        if process is not None:
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+            # Kill the group even if its original process already exited: an
+            # inherited stdout handle can otherwise keep the reader blocked.
+            if job is not None:
+                job.close()
+            elif os.name != "nt":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    pass
+            if thread is not None:
+                thread.join(timeout=0.2)
+            # BufferedReader.close waits for readline's lock. Never call it
+            # from this thread while a descendant still owns the pipe.
+            if process.stdout is not None and (thread is None or not thread.is_alive()):
+                process.stdout.close()
+        if job is not None:
+            job.close()
+
+
+def portable_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", help="explicit native config path; defaults to the selected client's user MCP file")
+    parser.add_argument("--transport", choices=("local", "wsl"), default="local")
+    parser.add_argument("--engine", help="absolute llm-wiki-mcp file path; a Linux path for WSL")
+    parser.add_argument("--root", help="explicit absolute vault path; a Linux path for WSL")
+    parser.add_argument("--node", help="optional absolute Node executable; a Linux path for WSL")
+    parser.add_argument("--wsl-distribution", help="required explicit WSL distribution")
+    parser.add_argument("--wsl-command", default="wsl.exe", help="wsl.exe or its absolute Windows path")
+
+
+def portable_main(args: argparse.Namespace, harness: str) -> int:
+    entry = portable_mcp_entry(harness, transport=args.transport, engine=args.engine, root=args.root,
+        node=args.node, distribution=args.wsl_distribution, wsl_command=args.wsl_command)
+    path = portable_config_path(harness, args.config)
+    if args.command == "configure":
+        if args.transport == "local":
+            if not Path(args.engine).is_file() or (args.node is None and not os.access(args.engine, os.X_OK)):
+                raise HarnessError("--engine is not an accessible MCP file/executable")
+            if args.node is not None and (not Path(args.node).is_file() or not os.access(args.node, os.X_OK)):
+                raise HarnessError("--node is not an accessible executable")
+        changed = configure_portable_file(path, entry)
+        print(f"OK   {harness}: configuration changes={int(changed)}; real client not verified")
+        return 0
+    status = inspect_portable(harness, path, entry)
+    if args.command == "status":
+        print_status([status], args.json)
+        return int(args.strict and status.overall != "configured")
+    report: dict[str, Any] = {"schemaVersion": 1, "harness": harness,
+        "configuration": status.mcp, "transport": {"state": "not-run"},
+        "realClientAcceptance": "not-verified", "vaultAuthorization": "not-tested",
+        "automaticCapture": "not-configured"}
+    if args.probe and status.mcp == "configured":
+        report["transport"] = probe_stdio(entry, args.timeout)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False))
+    else:
+        print(f"{harness}: configuration={report['configuration']}; transport={report['transport']['state']}")
+        print("real client not verified; vault authorization not tested; automatic capture not configured")
+    return int(status.mcp != "configured" or (args.probe and report["transport"]["state"] != "initialized"))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     status_parser = sub.add_parser("status", help="print non-secret capability matrix")
     status_parser.add_argument("--json", action="store_true")
     status_parser.add_argument("--strict", action="store_true", help="fail if an installed harness is not configured")
+    status_parser.add_argument("--harness", choices=PORTABLE_HARNESSES,
+                               help="explicit portable client; without this option retain the original five-client matrix")
+    portable_arguments(status_parser)
     configure_parser = sub.add_parser("configure", help="explicitly configure installed harnesses")
     configure_parser.add_argument(
         "--harness",
         action="append",
-        choices=("claude", "opencode", "grok", "codex", "cursor", "all"),
+        choices=("claude", "opencode", "grok", "codex", "cursor", "all", *PORTABLE_HARNESSES),
         default=[],
-        help="repeat to select harnesses; default: claude, opencode, grok",
+        help="repeat for legacy harnesses; all retains the original five; pi/workbuddy require one explicit selection",
     )
+    portable_arguments(configure_parser)
+    doctor_parser = sub.add_parser("doctor", help="Pi/WorkBuddy configuration and optional read-only stdio initialization")
+    doctor_parser.add_argument("--harness", choices=PORTABLE_HARNESSES, required=True)
+    doctor_parser.add_argument("--probe", action="store_true", help="actively initialize the managed MCP process and list tools; no vault reads or model calls")
+    doctor_parser.add_argument("--timeout", type=float, default=8, help="total probe deadline in seconds, at most 30")
+    doctor_parser.add_argument("--json", action="store_true")
+    portable_arguments(doctor_parser)
     args = parser.parse_args()
+    selected = args.harness if isinstance(args.harness, list) else [args.harness]
+    portable = [name for name in selected if name in PORTABLE_HARNESSES]
+    try:
+        if portable:
+            if len(selected) != 1:
+                raise HarnessError("select exactly one pi/workbuddy harness per explicit configuration")
+            return portable_main(args, portable[0])
+        if (args.config or args.engine or args.root or args.node or args.wsl_distribution
+                or args.transport != "local" or args.wsl_command != "wsl.exe"):
+            raise HarnessError("portable launch options require explicit --harness pi or workbuddy")
+    except (HarnessError, OSError, UnicodeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if args.command == "status":
         statuses = inspect_all()
         print_status(statuses, args.json)
