@@ -27,7 +27,7 @@ async function worker(spec) {
     const loader = new DefaultResourceLoader({
       cwd: spec.cwd, agentDir: spec.agentDir, settingsManager: SettingsManager.inMemory({}, { projectTrusted: false }),
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      additionalExtensionPaths: [path.join(pluginRoot, 'pi-memory-capture.mjs')],
+      additionalExtensionPaths: [spec.pluginPath],
     });
     await loader.reload();
     const loaded = loader.getExtensions();
@@ -59,7 +59,7 @@ async function worker(spec) {
     const metadata = JSON.parse(fs.readFileSync(path.join(spec.packageRoot, 'package.json')));
     assert.equal(metadata.name, '@opencode-ai/sdk');
     const { createOpencodeClient } = await import(pathToFileURL(path.join(spec.packageRoot, 'dist/client.js')).href);
-    const { default: plugin } = await import(pathToFileURL(path.join(pluginRoot, 'llm-wiki-capture.js')).href);
+    const { default: plugin } = await import(pathToFileURL(spec.pluginPath).href);
     const info = { id: 'msg_installedsdk', sessionID: 'ses_installedsdk', role: 'assistant', finish: 'stop', time: { created: 10, completed: 20 } };
     let calls = 0;
     const client = createOpencodeClient({ baseUrl: 'http://synthetic.invalid', fetch: async request => {
@@ -83,13 +83,22 @@ if (process.argv[2] === '--worker') {
   console.log('INSTALLED_SDK_CAPTURE_PASS');
 } else {
   for (const [profile, variable] of [['pi', 'LLM_WIKI_TEST_PI_PACKAGE_ROOT'], ['opencode', 'LLM_WIKI_TEST_OPENCODE_SDK_ROOT']]) {
-    test(`${profile} installed SDK loads and dispatches capture using only synthetic data`, { skip: !process.env[variable] }, t => {
+    test(`${profile} installed SDK loads a user-directory symlink to a self-contained capture snapshot`, { skip: !process.env[variable] }, t => {
       const packageRoot = fs.realpathSync(process.env[variable]);
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capture-installed-sdk-'));
       t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-      const spec = { profile, packageRoot, cwd: path.join(root, 'empty-project'), agentDir: path.join(root, 'agent'), queue: path.join(root, 'queue') };
+      const spec = { profile, packageRoot, cwd: path.join(root, 'empty-project'), agentDir: path.join(root, '.pi', 'agent'), queue: path.join(root, 'queue') };
+      spec.pluginPath = profile === 'pi' ? path.join(spec.agentDir, 'extensions', 'memory-capture.ts')
+        : path.join(root, '.config', 'opencode', 'plugins', 'llm-wiki-capture.js');
       const config = path.join(root, 'capture.json'), specPath = path.join(root, 'spec.json'), emptyPath = path.join(root, 'empty-path');
-      for (const directory of [spec.cwd, spec.agentDir, emptyPath]) fs.mkdirSync(directory);
+      const snapshot = path.join(root, 'snapshot');
+      for (const directory of [spec.cwd, spec.agentDir, emptyPath, path.dirname(spec.pluginPath), path.join(snapshot, 'bin'), path.join(snapshot, 'plugins')]) fs.mkdirSync(directory, { recursive: true });
+      fs.copyFileSync(path.join(pluginRoot, '../bin/llm-wiki-capture-hook.mjs'), path.join(snapshot, 'bin/llm-wiki-capture-hook.mjs'));
+      for (const file of ['capture-runtime.mjs', 'pi-memory-capture.mjs', 'llm-wiki-capture.js'])
+        fs.copyFileSync(path.join(pluginRoot, file), path.join(snapshot, 'plugins', file));
+      const target = path.join(snapshot, 'plugins', profile === 'pi' ? 'pi-memory-capture.mjs' : 'llm-wiki-capture.js');
+      fs.symlinkSync(target, spec.pluginPath);
+      assert.equal(fs.realpathSync(spec.pluginPath), target);
       fs.writeFileSync(config, JSON.stringify({ enabled: true, profile, queue: spec.queue,
         workspaces: [{ path: spec.cwd, project: 'sdk-fixture' }] }), { mode: 0o600 });
       fs.writeFileSync(specPath, JSON.stringify(spec), { mode: 0o600 });

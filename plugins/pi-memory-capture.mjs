@@ -1,14 +1,19 @@
-import { captureSink, selectedText, validId } from './capture-runtime.mjs';
-
-function contextIdentity(ctx) {
-  const session = ctx?.sessionManager?.getSessionId();
-  return validId(session) && typeof ctx?.cwd === 'string' ? { session, cwd: ctx.cwd } : null;
-}
-const matches = (run, identity) => !!run && !!identity && run.session === identity.session && run.cwd === identity.cwd;
-const payloadFor = (identity, event = 'Stop') => ({ hook_event_name: event, cwd: identity?.cwd, session_id: identity?.session });
+import { realpathSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** Pi 1.2 extension: only the final settled boundary consumes this run's bounded output. */
-export default function PiMemoryCapture(pi) {
+export default async function PiMemoryCapture(pi) {
+  // Pi's TS loader resolves static imports from the .ts symlink, not its target.
+  // Resolve this installation first so a user-directory link keeps snapshot-relative imports.
+  const source = realpathSync(fileURLToPath(import.meta.url));
+  const { captureSink, selectedText, validId } = await import(pathToFileURL(join(dirname(source), 'capture-runtime.mjs')).href);
+  function contextIdentity(ctx) {
+    const session = ctx?.sessionManager?.getSessionId();
+    return validId(session) && typeof ctx?.cwd === 'string' ? { session, cwd: ctx.cwd } : null;
+  }
+  const matches = (run, identity) => !!run && !!identity && run.session === identity.session && run.cwd === identity.cwd;
+  const payloadFor = (identity, event = 'Stop') => ({ hook_event_name: event, cwd: identity?.cwd, session_id: identity?.session });
   const sink = captureSink('pi');
   let run = null;
   const guarded = callback => (event, ctx) => {

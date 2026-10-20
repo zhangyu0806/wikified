@@ -34,9 +34,9 @@ const textPart = (text = output, message = info(), fields = {}) => ({ type: 'tex
 async function openCode(f, read = async () => ({ data: { info: info(), parts: [textPart()] } })) {
   return await OpenCodeCapture({ directory: f.root, client: { session: { message: read } } });
 }
-function pi(f) {
+async function pi(f) {
   const handlers = new Map();
-  PiCapture({ on: (name, callback) => { assert(!handlers.has(name)); handlers.set(name, callback); } });
+  await PiCapture({ on: (name, callback) => { assert(!handlers.has(name)); handlers.set(name, callback); } });
   const ctx = (session = 'pi_session', cwd = f.root) => ({ cwd, sessionManager: { getSessionId: () => session } });
   const emit = (name, event = {}, context = ctx()) => handlers.get(name)?.(event, context);
   const final = (text = output, extra = {}) => ({ message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text }], ...extra } });
@@ -167,8 +167,8 @@ test('operator config is opt-in, bounded, profile-bound and rechecked after an a
   await hooks.event(update(info())); assert.equal(calls, 1); assert.deepEqual(f.jobs(), []);
 });
 
-test('Pi only captures a completed settled run, excludes nontext parts and consumes its bounded candidate once', t => {
-  const f = fixture(t, 'pi'), host = pi(f), secret = 'github_pat_' + 'X'.repeat(40);
+test('Pi only captures a completed settled run, excludes nontext parts and consumes its bounded candidate once', async t => {
+  const f = fixture(t, 'pi'), host = await pi(f), secret = 'github_pat_' + 'X'.repeat(40);
   host.emit('agent_start');
   host.emit('message_end', host.final(output + '\npassword=' + secret, { content: [
     { type: 'thinking', thinking: 'REASONING_MUST_NOT_SAVE' },
@@ -189,8 +189,8 @@ test('Pi only captures a completed settled run, excludes nontext parts and consu
   assert.equal(fs.readFileSync(path.join(f.queue, 'hook-status-pi.json'), 'utf8'), before);
 });
 
-test('Pi never reuses a previous run across retries, cancellation, compaction or session replacement', t => {
-  const f = fixture(t, 'pi'), host = pi(f);
+test('Pi never reuses a previous run across retries, cancellation, compaction or session replacement', async t => {
+  const f = fixture(t, 'pi'), host = await pi(f);
   const prepare = () => { host.emit('agent_start'); host.emit('message_end', host.final()); };
   prepare(); host.emit('agent_start'); host.emit('agent_settled', { aborted: false });
   assert.deepEqual(f.jobs(), []); assert.equal(f.status().state, 'no-selected-output');
@@ -208,8 +208,8 @@ test('Pi never reuses a previous run across retries, cancellation, compaction or
   host.emit('agent_settled', { aborted: false }); assert.deepEqual(f.jobs(), []);
 });
 
-test('Pi invalidates earlier finals on nonfinal messages and rejects unknown, tool and error output', t => {
-  const f = fixture(t, 'pi'), host = pi(f);
+test('Pi invalidates earlier finals on nonfinal messages and rejects unknown, tool and error output', async t => {
+  const f = fixture(t, 'pi'), host = await pi(f);
   for (const message of [
     { role: 'user', stopReason: 'stop', content: [{ type: 'text', text: 'USER_MUST_NOT_SAVE' }] },
     { role: 'toolResult', content: [{ type: 'text', text: 'TOOL_MUST_NOT_SAVE' }] },
@@ -226,8 +226,8 @@ test('Pi invalidates earlier finals on nonfinal messages and rejects unknown, to
   assert.deepEqual(f.jobs(), [], 'message without this run start must not be captured');
 });
 
-test('Pi handles disabled/missing config, invalid context and callback failures without interrupting the host', t => {
-  const f = fixture(t, 'pi'), host = pi(f);
+test('Pi handles disabled/missing config, invalid context and callback failures without interrupting the host', async t => {
+  const f = fixture(t, 'pi'), host = await pi(f);
   fs.unlinkSync(f.file);
   host.emit('agent_start'); host.emit('message_end', host.final()); host.emit('agent_settled', { aborted: false });
   assert(!fs.existsSync(f.queue));
@@ -247,7 +247,7 @@ test('Pi handles disabled/missing config, invalid context and callback failures 
 test('short concrete setting replies remain eligible in both hosts', async t => {
   const short = '已设置为每天08:00开启、15:00关闭。';
   assert(short.length < 80);
-  const oc = fixture(t, 'opencode'), p = fixture(t, 'pi'), host = pi(p);
+  const oc = fixture(t, 'opencode'), p = fixture(t, 'pi'), host = await pi(p);
   const hooks = await openCode(oc, async () => ({ data: { info: info(), parts: [textPart(short)] } }));
   await hooks.event(update(info()));
   host.emit('agent_start'); host.emit('message_end', host.final(short)); host.emit('agent_settled', { aborted: false });
@@ -256,7 +256,7 @@ test('short concrete setting replies remain eligible in both hosts', async t => 
 });
 
 test('code-only and credential-only replies create no synthetic facts after redaction', async t => {
-  const oc = fixture(t, 'opencode'), p = fixture(t, 'pi'), host = pi(p);
+  const oc = fixture(t, 'opencode'), p = fixture(t, 'pi'), host = await pi(p);
   let text = '';
   const hooks = await openCode(oc, async () => ({ data: { info: info(), parts: [textPart(text)] } }));
   for (const value of [
