@@ -18,13 +18,16 @@ Replace the example paths with absolute paths for the selected installation and 
 python3 /absolute/wikified/bin/llm-wiki-harness configure \
   --harness pi --transport local \
   --node /opt/homebrew/bin/node \
+  --python /opt/homebrew/bin/python3 \
   --engine /absolute/wikified/bin/llm-wiki-mcp \
   --root "/absolute/Shared Memory"
 ```
 
 Repeat with `--harness workbuddy`. The default destinations are `~/.pi/agent/mcp.json` and `~/.workbuddy/mcp.json`. Supply `--config /absolute/project/.pi/mcp.json` or `/absolute/project/.workbuddy/mcp.json` for an explicit project destination. Pi project configuration requires project trust.
 
-`--node` can be omitted if the MCP executable's shebang can find Node in the client environment. An absolute Node path is more reliable for GUI launches. Engine helpers also need their Python runtime available to that process; a successful transport handshake alone does not test helper availability.
+`--node` can be omitted if the MCP executable's shebang can find Node in the client environment. `--python` selects the interpreter for memory helpers and custom-profile registration. Absolute executable paths are more reliable for GUI launches, whose PATH may differ from the terminal. An explicit Python selection never silently falls back to another interpreter; omitting it retains the existing shebang/PATH behavior. Replace the examples with paths that exist on the selected installation.
+
+A Node-only connection can initialize and list tools while Python helper calls fail. A successful transport handshake alone does not test helper availability or memory authorization. Adding `--python` to an existing different managed entry is reported as a conflict; inspect the existing file and deliberately reconcile the entry rather than overwriting unrelated configuration.
 
 ## Windows clients with WSL
 
@@ -35,11 +38,12 @@ py -3 "C:\Tools\wikified\bin\llm-wiki-harness" configure `
   --harness pi --transport wsl `
   --wsl-distribution Ubuntu `
   --node /usr/bin/node `
+  --python /usr/bin/python3 `
   --engine /home/user/wikified/bin/llm-wiki-mcp `
   --root "/home/user/Shared Memory"
 ```
 
-Repeat with `--harness workbuddy`. The default file is under the Windows user's home. Select the actual distribution and Linux runtime paths; no default distribution or vault is inferred. `--wsl-command` optionally selects an absolute Windows `wsl.exe` path. Paths with spaces or Unicode are represented as separate arguments, not shell command strings.
+Repeat with `--harness workbuddy`. The default file is under the Windows user's home. Select the actual distribution and Linux Node/Python paths; `--python` is the interpreter inside WSL, not the Windows Python running the configuration utility. No default distribution or vault is inferred. `--wsl-command` optionally selects an absolute Windows `wsl.exe` path. Paths with spaces or Unicode are represented as separate arguments, not shell command strings.
 
 When running the configuration utility inside WSL, explicitly pass the mounted Windows config file, for example `--config /mnt/c/Users/YourName/.pi/agent/mcp.json`. A Windows `C:\...` string is rejected on POSIX rather than creating a misleading relative file. Keep both engine checkouts at the intended fixed revision.
 
@@ -51,11 +55,12 @@ Use the same launch arguments and config destination for `status` or `doctor`:
 python3 /absolute/wikified/bin/llm-wiki-harness doctor \
   --harness pi --transport local \
   --node /opt/homebrew/bin/node \
+  --python /opt/homebrew/bin/python3 \
   --engine /absolute/wikified/bin/llm-wiki-mcp \
   --root "/absolute/Shared Memory" --probe --json
 ```
 
-Without `--probe`, diagnostics only inspect configuration. The explicit probe sends bounded `initialize` and `tools/list` requests; it does not search, read, record memory or call a model. Its report separately states configuration, transport, vault authorization, actual-client acceptance and automatic capture. A correct configuration is not proof that the client reloaded it or that the selected vault has granted access.
+Without `--probe`, diagnostics only inspect configuration. The explicit probe sends bounded `initialize` and `tools/list` requests; it does not search, read, record memory or call a model. Its report separately states configuration, transport, untested helper execution, vault authorization, actual-client acceptance and automatic capture. A correct configuration is not proof that the client reloaded it or that the selected vault has granted access.
 
 In Pi, run `pi mcp list` and inspect `/mcp` in a new or reloaded session. In WorkBuddy, inspect the custom connector and enable it for the intended task. Then use an isolated synthetic vault to verify search, exact-version preparation, pending proposals, independent human approval, new-session reuse and withdrawal. Record the operating system and client version with the results.
 

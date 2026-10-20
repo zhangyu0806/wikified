@@ -16,6 +16,20 @@ const HOME = os.homedir();
 // install.sh 允许用 LLM_WIKI_BIN_TARGET 改安装位置，这里认同一个变量。
 const BIN = process.env.LLM_WIKI_BIN_TARGET || path.join(HOME, '.local', 'bin');
 const ROOT = process.env.LLM_WIKI_ROOT || path.join(HOME, 'llm-wiki');
+// GUI clients may launch Node without Python on PATH. An explicitly selected
+// interpreter is authoritative: invalid values must never fall back to PATH.
+// Without this option retain the installed helpers' original shebang behavior.
+const PYTHON = process.env.LLM_WIKI_PYTHON;
+if (PYTHON !== undefined) {
+  try {
+    if (!PYTHON || !path.isAbsolute(PYTHON) || /[\u0000-\u001f\u007f]/u.test(PYTHON)
+        || !fs.statSync(PYTHON).isFile()) throw new Error('invalid interpreter');
+    fs.accessSync(PYTHON, fs.constants.X_OK);
+  } catch {
+    console.error('LLM_WIKI_PYTHON must name an accessible absolute Python executable');
+    process.exit(1);
+  }
+}
 // 优先用与本文件同目录的兄弟 CLI：MCP server 自身通常就在 BIN 里，
 // 这样即使 env 没设、安装位置又非默认，也能自洽解析。
 const SELF_DIR = __dirname;
@@ -23,15 +37,32 @@ const SELF_DIR = __dirname;
 // （如工具链从数据仓拆到独立仓），启动时一次性算死的路径会让进程永久 ENOENT
 // 且无法自愈。故缓存命中也要确认文件仍在，失效即重走 SELF_DIR → BIN → PATH。
 const cliCache = new Map();
+const helperExists = (file) => {
+  try {
+    if (PYTHON === undefined) return fs.existsSync(file);
+    return path.isAbsolute(file) && fs.statSync(file).isFile();
+  } catch { return false; }
+};
 const resolveCli = (name) => {
   const cached = cliCache.get(name);
   if (cached) {
-    try { if (fs.existsSync(cached)) return cached; } catch { /* ignore */ }
+    if (helperExists(cached)) return cached;
     cliCache.delete(name);  // 路径已失效，重新解析
   }
   for (const dir of [SELF_DIR, BIN]) {
     const p = path.join(dir, name);
-    try { if (fs.existsSync(p)) { cliCache.set(name, p); return p; } } catch { /* ignore */ }
+    if (helperExists(p)) { cliCache.set(name, p); return p; }
+  }
+  if (PYTHON !== undefined) {
+    // Python opens its script argument directly; a bare helper name would
+    // search cwd, not PATH. Resolve only absolute PATH entries, never "." or an
+    // empty entry, before handing a script to the explicit interpreter.
+    for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+      if (!path.isAbsolute(dir)) continue;
+      const p = path.join(dir, name);
+      if (helperExists(p)) { cliCache.set(name, p); return p; }
+    }
+    throw new Error(`Python helper unavailable: ${name}`);
   }
   return name;  // 交给 PATH 兜底
 };
@@ -50,9 +81,11 @@ function registeredCustomProfile(profile) {
   if (!profile || profile === 'human' || profile !== profile.trim().toLowerCase()
       || /[\u0000-\u001f\u007f]/u.test(profile)) return false;
   try {
-    execFileSync('python3', ['-I', '-B', '-c',
+    execFileSync(PYTHON ?? 'python3', ['-I', '-B', '-c',
       'import runpy, shutil, sys\nfrom pathlib import Path\n'
-      + 'entry = shutil.which(sys.argv[1]) or sys.argv[1]\n'
+      + (PYTHON === undefined
+        ? 'entry = shutil.which(sys.argv[1]) or sys.argv[1]\n'
+        : 'entry = sys.argv[1]\n')
       + 'engine = runpy.run_path(entry, run_name="mcp_profile_registration")\n'
       + 'engine["access_context"](Path(sys.argv[2]), sys.argv[3])\n',
       ENRICH(), ROOT, profile], { timeout: 8000, maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -74,7 +107,9 @@ const TARGET_AGENTS = (process.env.LLM_WIKI_TARGET_AGENTS || AGENT_PROFILE)
 
 const run = (file, args, timeoutMs = 8000) =>
   new Promise((resolve) => {
-    execFile(file, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+    const executable = PYTHON ?? file;
+    const argv = PYTHON === undefined ? args : ['-I', '-B', file, ...args];
+    execFile(executable, argv, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) resolve({ ok: false, text: (stderr || stdout || err.message || 'command failed').trim() });
       else resolve({ ok: true, text: (stdout || '').trim() });
     });
