@@ -60,6 +60,33 @@ Cursor multiroot conversations use the common selected project when all roots ag
 
 Only Codex can use the transcript reader. Other hosts must supply direct completed text, so an absent or short message cannot reuse an old transcript. Reasoning blocks, tool output and subagent lifecycle events are not capture triggers. All adapters return passive hook output and do not ask the host to continue, block or approve work.
 
+## OpenCode and Pi plugin installation
+
+Keep the release's `plugins/` and `bin/` directories together. OpenCode loads
+`plugins/llm-wiki-capture.js`; Pi 1.2 loads `plugins/pi-memory-capture.mjs`.
+Install a link from the relevant user plugin/extension directory to the selected
+release, or use the client's explicit extension path. Do not copy only the entry
+file, because both use the adjacent `capture-runtime.mjs` and shared capture core.
+Existing recall plugins can remain installed.
+
+Configuration is disabled unless the operator provides an enabled, matching-profile
+JSON file. Defaults are `~/.config/llm-wiki/capture-opencode.json` and
+`~/.config/llm-wiki/capture-pi.json`. The operator may select an absolute path with
+`LLM_WIKI_OPENCODE_CAPTURE_CONFIG` or `LLM_WIKI_PI_CAPTURE_CONFIG`. The same queue,
+workspace and fallback schema applies. Configuration is reread at event boundaries,
+so disabling capture does not require another model turn or approval.
+
+OpenCode observes completed, successful, non-summary assistant messages and reads
+only the exact message ID through the host SDK. Pi retains only a bounded redacted
+candidate from the current run and writes it at `agent_settled`; `agent_end` alone
+is not final because retries and queued continuation can follow. Aborted runs,
+tools, reasoning, synthetic parts and stale candidates from another session are
+excluded. These extensions do not register model-callable capture tools.
+
+After installation, reload or restart the actual client. Synthetic callback tests
+and SDK loader tests prove the adapter contract, not that an already-open client
+has reloaded it. Check each profile's next receipt and the worker receipt separately.
+
 ## Worker and shared recall
 
 Run `python3 /pinned/engine/bin/llm-wiki-capture-worker --config /private/worker.json --watch` as the local user's supervised service. It retries every 15 seconds, handles at most 100 jobs per pass and keeps failed jobs. It writes only counters/timestamps to `queue/status.json`; receipts contain event IDs, not bodies. Keep this queue private to the operating-system user and outside the Git repository.
