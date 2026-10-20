@@ -17,6 +17,7 @@ import uuid
 BIN = Path(__file__).resolve().parent
 DOMAINS = runpy.run_path(str(BIN / 'llm-wiki-event'))['DOMAINS']
 PROJECT_ID = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._-]{0,100}')
+CAPTURE_PROFILES = {'codex', 'opencode', 'claude', 'cursor', 'grok', 'pi', 'workbuddy'}
 
 def atomic(path, value):
     temp = path.with_name('.' + uuid.uuid4().hex + '.tmp')
@@ -56,7 +57,7 @@ def consume(config):
                 job = json.loads(job_path.read_text(encoding='utf-8'))
                 if (set(job) != {'schema', 'key', 'profile', 'project', 'sessionRef', 'title', 'excerpt'}
                     or job['schema'] != 1 or job['key'] != job_path.stem
-                    or job['profile'] not in {'codex', 'opencode'} or job['project'] not in allowed
+                    or job['profile'] not in CAPTURE_PROFILES or job['project'] not in allowed
                     or not re.fullmatch(r'[a-f0-9]{64}', job['sessionRef'])
                     or not isinstance(job['title'], str) or not 1 <= len(job['title']) <= 72
                     or not isinstance(job['excerpt'], str) or not 1 <= len(job['excerpt']) <= 1800): raise ValueError()

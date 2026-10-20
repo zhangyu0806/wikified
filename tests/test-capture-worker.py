@@ -82,4 +82,25 @@ class CaptureTests(unittest.TestCase):
                     worker.consume({**config, 'projectDomains':mapping})
             self.assertFalse((vault/'memory').exists())
 
+    def test_supported_profiles_keep_ai_pending_identity_and_unknown_profile_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); vault = root / 'vault'; queue = root / 'queue'
+            (vault / 'policy').mkdir(parents=True); queue.mkdir()
+            shutil.copy(REPO / 'templates/access-policy.json', vault / 'policy/access.json')
+            profiles = ['codex', 'opencode', 'claude', 'cursor', 'grok', 'pi', 'workbuddy']
+            for number, profile in enumerate([*profiles, 'human'], 1):
+                job = {'schema':1,'key':f'{number:064x}','profile':profile,'project':'fixture','sessionRef':'b'*64,
+                       'title':'Synthetic host completion','excerpt':'Synthetic host result remains pending separate human review.'}
+                (queue/(job['key']+'.json')).write_text(json.dumps(job))
+            result = worker.consume({'root':str(vault),'queue':str(queue),'projects':['fixture']})
+            self.assertEqual(result['saved'],len(profiles))
+            self.assertEqual(result['failed'],1)
+            self.assertEqual(result['pending'],1)
+            rows = [json.loads(line) for p in (vault/'memory/events').glob('*.jsonl') for line in p.read_text().splitlines()]
+            self.assertEqual({row['actor']['id'] for row in rows}, set(profiles))
+            for row in rows:
+                self.assertEqual(row['actor']['type'],'ai')
+                self.assertEqual(row['review_status'],'pending')
+                self.assertEqual(row['target_agents'],['coding'])
+
 if __name__ == '__main__': unittest.main()

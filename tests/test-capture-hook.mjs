@@ -199,7 +199,7 @@ test('hook status is bounded metadata without transcript paths, bodies, raw IDs 
   writeHookStatus(f.config, { hook_event_name: 'SECRET_EVENT' }, { state: 'SECRET_STATE' });
   assert.equal(JSON.parse(fs.readFileSync(file)).state, 'error');
   assert.equal(JSON.parse(fs.readFileSync(file)).event, 'unknown');
-  assert.equal(fs.readdirSync(f.config.queue).length, 1);
+  assert.equal(fs.readdirSync(f.config.queue).length, 2);
 });
 
 test('CLI records quiet skip and parse error metadata while returning valid safe hook JSON', t => {
@@ -263,6 +263,14 @@ test('concise useful results are captured while acknowledgments, empty output an
   for (const value of ['OK', '好的', '', ' \n\t ', '```\nprivate code that must not be saved\n```']) {
     assert.equal(excerpt(value), null);
   }
+  const syntheticCredential = 'password' + '=' + 'synthetic-value';
+  const syntheticPrivateKey = '-----BEGIN ' + 'PRIVATE KEY-----\nsynthetic-value\n-----END ' + 'PRIVATE KEY-----';
+  for (const value of [syntheticCredential, '密钥：synthetic-value',
+    'Authorization: Bearer synthetic-value', 'Bearer synthetic-value',
+    '[REDACTED_KEY]', syntheticPrivateKey]) {
+    assert.equal(excerpt(value), null);
+  }
+  assert.equal(excerpt(concise + '\n' + syntheticCredential).text, concise);
 });
 
 test('fallback project is explicit opt-in and never matches a sibling path by prefix', t => {
@@ -312,4 +320,102 @@ test('fallback works without bindings and status describes coverage without proj
   assert.deepEqual(status.coverage, { workspaceCount: 0, fallbackEnabled: true });
   assert(!JSON.stringify(status).includes('PRIVATE_PROJECT'));
   assert(!JSON.stringify(status).includes(f.root));
+});
+
+test('Claude, WorkBuddy, OpenCode and Pi use fixed configuration identities and direct completed text', t => {
+  const f = fixture(t, [completed('Older transcript output that must never be reused by another host.')]);
+  for (const profile of ['claude', 'workbuddy', 'opencode', 'pi']) {
+    const config = { ...f.config, profile };
+    const payload = { ...f.payload, hook_event_name: 'Stop', profile: 'human', domain: 'work',
+      last_assistant_message: syntheticFinal };
+    const result = enqueue(payload, config);
+    assert.equal(result.state, 'queued');
+    const job = JSON.parse(fs.readFileSync(path.join(config.queue, result.key + '.json')));
+    assert.equal(job.profile, profile);
+    assert.equal(job.excerpt, syntheticFinal);
+    assert(!Object.hasOwn(job, 'domain'));
+    assert.equal(enqueue({ ...payload, last_assistant_message: undefined }, config).state, 'no-selected-output');
+    assert.equal(enqueue({ ...payload, hook_event_name: 'SubagentStop' }, config).state, 'ignored-event');
+  }
+});
+
+test('Cursor captures only completed assistant responses and isolates multiroot conversations', t => {
+  const f = fixture(t);
+  const second = path.join(f.root, 'second');
+  fs.mkdirSync(second);
+  const config = { ...f.config, profile: 'cursor', fallbackProject: 'cursor-general' };
+  config.workspaces.push({ path: second, project: 'second-project' });
+  const payload = { hook_event_name: 'afterAgentResponse', conversation_id: 'cursor-session',
+    generation_id: 'turn-1', workspace_roots: [f.root], text: syntheticFinal };
+  const project = result => JSON.parse(fs.readFileSync(path.join(config.queue, result.key + '.json'))).project;
+  assert.equal(project(enqueue(payload, config)), 'fixture');
+  assert.equal(project(enqueue({ ...payload, workspace_roots: [second] }, config)), 'second-project');
+  assert.equal(project(enqueue({ ...payload, workspace_roots: [f.root, second] }, config)), 'cursor-general');
+  assert.equal(project(enqueue({ ...payload, workspace_roots: [] }, config)), 'cursor-general');
+  assert.equal(enqueue({ ...payload, workspace_roots: [f.root, second] },
+    { ...config, fallbackProject: undefined }).state, 'out-of-scope');
+  assert.equal(enqueue({ ...payload, generation_id: '' }, config).state, 'invalid-context');
+  for (const hook_event_name of ['afterAgentThought', 'stop', 'postToolUse', 'subagentStop']) {
+    assert.equal(enqueue({ ...payload, hook_event_name }, config).state, 'ignored-event');
+  }
+  writeHookStatus(config, payload, enqueue(payload, config));
+  const status = JSON.parse(fs.readFileSync(path.join(config.queue, 'hook-status-cursor.json')));
+  assert.equal(status.event, 'Stop');
+  assert.equal(status.state, 'queued');
+  assert(!JSON.stringify(status).includes('cursor-session'));
+});
+
+test('Grok accepts only native end-turn completion and never captures error or session-end text', t => {
+  const f = fixture(t);
+  const config = { ...f.config, profile: 'grok' };
+  const payload = { hookEventName: 'stop', hook_event_name: 'Stop', reason: 'end_turn',
+    sessionId: 'grok-session', promptId: 'turn-1', cwd: f.root, workspaceRoot: f.root,
+    stopHookActive: false, lastAssistantMessage: syntheticFinal };
+  const result = enqueue(payload, config);
+  assert.equal(result.state, 'queued');
+  const job = JSON.parse(fs.readFileSync(path.join(config.queue, result.key + '.json')));
+  assert.equal(job.profile, 'grok');
+  assert.equal(job.excerpt, syntheticFinal);
+  assert.equal(enqueue({ ...payload, stopHookActive: true }, config).state, 'ignored-continuation');
+  for (const reason of ['shutdown', 'channel_closed', undefined]) {
+    assert.equal(enqueue({ ...payload, reason }, config).state, 'ignored-event');
+  }
+  for (const hookEventName of ['stop_failure', 'stop_cancelled', 'post_tool_use', 'subagent_stop']) {
+    assert.equal(enqueue({ ...payload, hookEventName }, config).state, 'ignored-event');
+  }
+});
+
+test('compatibility-scanned native hooks cannot attribute another host or overwrite its status', t => {
+  const f = fixture(t);
+  const foreign = [
+    { hookEventName: 'stop', hook_event_name: 'Stop', reason: 'end_turn', sessionId: 'foreign',
+      workspaceRoot: f.root, cwd: f.root, lastAssistantMessage: syntheticFinal },
+    { hook_event_name: 'afterAgentResponse', conversation_id: 'foreign', generation_id: 'turn',
+      workspace_roots: [f.root], text: syntheticFinal },
+  ];
+  for (const profile of ['claude', 'workbuddy', 'opencode', 'pi', 'codex']) {
+    const config = { ...f.config, profile };
+    for (const native of foreign) {
+      // Even supplied aliases must not trick a direct-text adapter.
+      const payload = { ...native, session_id: 'alias', last_assistant_message: syntheticFinal };
+      const result = enqueue(payload, config);
+      assert.equal(result.state, 'ignored-event');
+      writeHookStatus(config, payload, result);
+    }
+  }
+  assert(!fs.existsSync(f.config.queue));
+});
+
+test('per-profile receipts coexist and unrecognized profiles cannot name status files', t => {
+  const f = fixture(t);
+  writeHookStatus(f.config, f.payload, { state: 'queued' });
+  writeHookStatus({ ...f.config, profile: 'pi' }, f.payload, { state: 'no-selected-output' });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.queue, 'hook-status-codex.json'))).state, 'queued');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.queue, 'hook-status-pi.json'))).state, 'no-selected-output');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.queue, 'hook-status.json'))).state, 'no-selected-output');
+  const invalid = { ...f.config, profile: '../outside' };
+  assert.equal(enqueue(f.payload, invalid).state, 'disabled');
+  writeHookStatus(invalid, f.payload, { state: 'disabled' });
+  assert.deepEqual(fs.readdirSync(f.config.queue).sort(),
+    ['hook-status-codex.json', 'hook-status-pi.json', 'hook-status.json'].sort());
 });

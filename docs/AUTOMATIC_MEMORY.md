@@ -27,9 +27,38 @@ General capture is disabled by default. To explicitly include sessions in all ot
 
 Use `Stop` as the normal trigger, with `PreCompact`, `Interrupt` and `SessionEnd` as bounded fallback. SessionEnd/Interrupt have a maximum three-second execution window; enqueue natively and do not launch WSL, Git, a model or a network request there. The script returns success JSON without blocking/restarting the assistant. If `Stop` has no directly supplied assistant text, it may use the same bounded fallback when a current `turn_id` is present. Fallback checks the transcript root and session identity, reads at most a 64 KiB header plus a 2 MiB tail, and selects a final output from the expected turn. It supports `final` and `final_answer`, text content blocks, completed AgentMessage items and task completion messages. Commentary, mismatched sessions/threads/turns and unknown formats are skipped. A short direct reply does not cause an older reply to be reused. No full transcript is persisted. Concise results can be selected without an 80-character minimum; useful lines must still contain at least eight characters, and empty output, short acknowledgments and fenced code are skipped. Identical selected output within one session/project deduplicates.
 
-Each hook invocation also updates private `queue/hook-status.json` with a fixed outcome, event, timestamp and optional opaque session/job hashes and selection-source enum. The `coverage` object contains only `workspaceCount` (configured binding count, including unavailable paths) and `fallbackEnabled` (whether a valid fallback project is configured). It never stores a path, project name, title, message or raw exception. Coverage describes the hook configuration, not worker authorization or successful storage. Compare this hook timestamp with `queue/status.json` from the worker: a fresh worker timestamp proves polling, not that Codex has invoked the hook. A manual script invocation or synthetic test does not prove that the live client has loaded and trusted the hook. New or changed definitions still require the normal Codex hook review.
+Each hook invocation also updates private `queue/hook-status.json` and `queue/hook-status-<profile>.json` with a fixed outcome, event, timestamp and optional opaque session/job hashes and selection-source enum. The shared file remains compatible with existing consumers; the per-profile files retain each host's latest result when profiles share a queue. Only the fixed supported profile names can form a filename. The `coverage` object contains only `workspaceCount` (configured binding count, including unavailable paths) and `fallbackEnabled` (whether a valid fallback project is configured). It never stores a path, project name, title, message or raw exception. Coverage describes the hook configuration, not worker authorization or successful storage. Compare this hook timestamp with `queue/status.json` from the worker: a fresh worker timestamp proves polling, not that a client has invoked the hook. A manual script invocation or synthetic test does not prove that the live client has loaded and trusted the hook. New or changed definitions still require the host's normal hook review.
 
-The OpenCode integration may explicitly call the same enqueue format, but installing a Codex hook **does not install an OpenCode event plugin**. Until such an integration is enabled, OpenCode can explicitly store proposals through `record_event` on the shared MCP server.
+## Host adapters and identity
+
+Each host has a separate operator-owned configuration with a fixed `profile`: `codex`, `opencode`, `claude`, `cursor`, `grok`, `pi` or `workbuddy`. The hook and worker reject unknown profiles. Payload fields cannot select the stored profile or domain. A supported adapter is not evidence that its hook or plugin has been installed or loaded.
+
+| Host | Capture trigger and fields | Scope |
+| --- | --- | --- |
+| Codex | `Stop`, bounded `PreCompact`/`SessionEnd`/`Interrupt` fallback | Validated Codex rollout formats only |
+| Claude Code | Native command `Stop`; `session_id`, `cwd`, `last_assistant_message`, `stop_hook_active` | Direct completed assistant text |
+| WorkBuddy | Native command `Stop`, same direct fields as Claude | Local command hooks, not SDK callback conversion |
+| Cursor | `afterAgentResponse`; `conversation_id`, `generation_id`, `workspace_roots`, `text` | Completed assistant message; thoughts and tool hooks are ignored |
+| Grok | Native `hookEventName: "stop"`, `reason: "end_turn"`; `sessionId`, `promptId`, `cwd`, `lastAssistantMessage`, `stopHookActive` | Completed main-agent turn; error, cancellation and session-end Stop are ignored |
+| OpenCode / Pi | Host plugin supplies the canonical `Stop` payload after a validated completion | Separate plugin installation is required |
+
+Claude's fields follow the [official hooks reference](https://code.claude.com/docs/en/hooks#stop); Cursor's fields follow its [official hooks reference](https://cursor.com/docs/agent/hooks#afteragentresponse) and installed runtime contract. WorkBuddy's local command dispatcher and Grok 1.0.49's bundled hooks guide provide their native contracts. Grok's SDK converts fields to snake case; this adapter consumes the native command payload and deliberately does not guess an SDK shape.
+
+For Claude and WorkBuddy, add a command to the existing settings `hooks.Stop` array, preserving other hooks and settings. For Grok, place the same nested definition in a separate `~/.grok/hooks/mind2one-capture.json`:
+
+```json
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node /absolute/llm-wiki-capture-hook.mjs /private/capture-<profile>.json","timeout":3}]}]}}
+```
+
+Cursor uses its own user `~/.cursor/hooks.json` shape:
+
+```json
+{"version":1,"hooks":{"afterAgentResponse":[{"command":"node /absolute/llm-wiki-capture-hook.mjs /private/capture-cursor.json"}]}}
+```
+
+Cursor multiroot conversations use the common selected project when all roots agree; otherwise they require the explicit fallback project. A no-folder conversation also requires that fallback. Native Cursor and Grok events are normalized to `Stop` for status reporting. Their distinctive payload namespaces are rejected by other profile configurations without writing that other profile's status, because compatibility discovery can run a Claude or Cursor hook from Grok. The adapter never switches identity based on an incoming payload.
+
+Only Codex can use the transcript reader. Other hosts must supply direct completed text, so an absent or short message cannot reuse an old transcript. Reasoning blocks, tool output and subagent lifecycle events are not capture triggers. All adapters return passive hook output and do not ask the host to continue, block or approve work.
 
 ## Worker and shared recall
 

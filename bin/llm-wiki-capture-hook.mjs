@@ -21,8 +21,15 @@ export function redact(text) {
 export function excerpt(message) {
   if (typeof message !== 'string' || message.length > 1_000_000) return null;
   const clean = redact(message).replace(/\u0000/g, '');
-  const lines = clean.split(/\r?\n/).map(line => line.trim()).filter(line =>
-    line.length >= 8 && !/^\[代码块/.test(line) && !/^\|[- :|]+\|$/.test(line));
+  const lines = clean.split(/\r?\n/).map(line => line.trim()).filter(line => {
+    // Redaction markers and credential labels alone are not a handoff fact.
+    const meaningful = line
+      .replace(/["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|密码|密钥|验证码)["']?\s*[:=：]\s*["']?\[REDACTED\]["']?/gi, '')
+      .replace(/\bBearer\s+\[REDACTED\]/gi, '')
+      .replace(/\[(?:REDACTED(?:_[A-Z]+)*|凭据行未保存|长不透明值未保存|代码块未自动保存)\]/gi, '')
+      .trim();
+    return meaningful.length >= 8 && /[\p{L}\p{N}]/u.test(meaningful) && !/^\|[- :|]+\|$/.test(line);
+  });
   if (!lines.length) return null;
   // Selected output only: bounded first useful lines; explicitly not semantic facts.
   const selected = lines.slice(0, 8).map(line => [...line].slice(0, 360).join('')).join('\n');
@@ -40,6 +47,7 @@ const SELECTION_SOURCES = new Set(['direct', 'transcript-response', 'transcript-
   'transcript-item-completed', 'transcript-task-complete']);
 const MAX_TRANSCRIPT_TAIL = 2 * 1024 * 1024;
 const MAX_TRANSCRIPT_HEADER = 64 * 1024;
+export const CAPTURE_PROFILES = new Set(['codex', 'opencode', 'claude', 'cursor', 'grok', 'pi', 'workbuddy']);
 const PROJECT_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,100}$/;
 const validProject = project => typeof project === 'string' && PROJECT_ID.test(project);
 
@@ -55,6 +63,34 @@ function captureProject(cwd, config) {
   // A specific binding wins, even if malformed: do not reroute it to the fallback.
   const project = selected ? selected.item.project : config.fallbackProject;
   return validProject(project) ? project : null;
+}
+
+// Only the trusted configuration chooses the host protocol and stored identity.
+function foreignHostPayload(payload, config) {
+  const grok = typeof payload?.hookEventName === 'string' && typeof payload?.sessionId === 'string' &&
+    typeof payload?.workspaceRoot === 'string';
+  const cursor = typeof payload?.conversation_id === 'string' && typeof payload?.generation_id === 'string' &&
+    Array.isArray(payload?.workspace_roots);
+  return (grok && config.profile !== 'grok') || (cursor && config.profile !== 'cursor');
+}
+
+function normalizedPayload(payload, config) {
+  if (config.profile === 'grok') return {
+    hook_event_name: payload?.hookEventName === 'stop' && payload?.reason === 'end_turn' ? 'Stop' : undefined,
+    session_id: payload?.sessionId,
+    turn_id: payload?.promptId,
+    cwd: payload?.cwd,
+    stop_hook_active: payload?.stopHookActive,
+    last_assistant_message: payload?.lastAssistantMessage,
+  };
+  if (config.profile !== 'cursor') return payload;
+  return {
+    hook_event_name: payload?.hook_event_name === 'afterAgentResponse' ? 'Stop' : undefined,
+    session_id: payload?.conversation_id,
+    turn_id: payload?.generation_id,
+    workspace_roots: payload?.workspace_roots,
+    last_assistant_message: payload?.text,
+  };
 }
 
 function contentText(content) {
@@ -87,6 +123,9 @@ function latestFinal(payload, config) {
   if (typeof payload.last_assistant_message === 'string' && payload.last_assistant_message.length) {
     return { message: payload.last_assistant_message, source: 'direct' };
   }
+  // Other hosts provide completed text directly. Their transcript formats have
+  // not been validated as Codex rollouts and must never reuse Codex fallback.
+  if (config.profile !== 'codex') return null;
   if (!HOOK_EVENTS.has(payload.hook_event_name) || typeof payload.transcript_path !== 'string') return null;
   // Stop must name the current turn rather than silently reusing an earlier final.
   if (payload.hook_event_name === 'Stop' && (typeof payload.turn_id !== 'string' || !payload.turn_id)) return null;
@@ -137,6 +176,10 @@ function latestFinal(payload, config) {
 // Metadata only: no transcript path, title, excerpt, message, or raw error.
 export function writeHookStatus(config, payload, result) {
   if (!config || typeof config.queue !== 'string') return;
+  // Compatibility scanners can execute another host's hook command. Do not
+  // attribute that invocation to the command's configured host, even as a skip.
+  if (foreignHostPayload(payload, config)) return;
+  payload = normalizedPayload(payload, config);
   const status = {
     schema: 1, checkedAt: new Date().toISOString(),
     state: OUTCOME_STATES.has(result?.state) ? result.state : 'error',
@@ -152,22 +195,39 @@ export function writeHookStatus(config, payload, result) {
   const directory = path.resolve(config.queue);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (fs.lstatSync(directory).isSymbolicLink()) throw new Error('unsafe queue');
-  const temp = path.join(directory, '.' + crypto.randomUUID() + '.tmp');
-  const fd = fs.openSync(temp, 'wx', 0o600);
-  try { fs.writeFileSync(fd, JSON.stringify(status) + '\n'); fs.fsyncSync(fd); }
-  finally { fs.closeSync(fd); }
-  try { fs.renameSync(temp, path.join(directory, 'hook-status.json')); }
-  finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
+  const names = ['hook-status.json'];
+  if (CAPTURE_PROFILES.has(config.profile)) names.push(`hook-status-${config.profile}.json`);
+  for (const name of names) {
+    const temp = path.join(directory, '.' + crypto.randomUUID() + '.tmp');
+    const fd = fs.openSync(temp, 'wx', 0o600);
+    try { fs.writeFileSync(fd, JSON.stringify(status) + '\n'); fs.fsyncSync(fd); }
+    finally { fs.closeSync(fd); }
+    try { fs.renameSync(temp, path.join(directory, name)); }
+    finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
+  }
   if (process.platform !== 'win32') { const dir = fs.openSync(directory, 'r'); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); } }
 }
 
 export function enqueue(payload, config) {
-  if (config.enabled !== true || !['codex', 'opencode'].includes(config.profile)) return { state: 'disabled' };
+  if (config.enabled !== true || !CAPTURE_PROFILES.has(config.profile)) return { state: 'disabled' };
+  if (foreignHostPayload(payload, config)) return { state: 'ignored-event' };
+  payload = normalizedPayload(payload, config);
   if (!['Stop', 'PreCompact', 'SessionEnd', 'Interrupt'].includes(payload.hook_event_name)) return { state: 'ignored-event' };
   if (payload.stop_hook_active === true) return { state: 'ignored-continuation' };
-  if (typeof payload.cwd !== 'string' || typeof payload.session_id !== 'string' || payload.session_id.length > 200) return { state: 'invalid-context' };
-  const cwd = fs.realpathSync(payload.cwd);
-  const project = captureProject(cwd, config);
+  if (typeof payload.session_id !== 'string' || !payload.session_id || payload.session_id.length > 200) return { state: 'invalid-context' };
+  let project;
+  if (config.profile === 'cursor') {
+    const roots = payload.workspace_roots;
+    if (!Array.isArray(roots) || roots.length > 100 || !roots.every(root => typeof root === 'string') ||
+        typeof payload.turn_id !== 'string' || !payload.turn_id) return { state: 'invalid-context' };
+    const projects = new Set(roots.map(root => captureProject(fs.realpathSync(root), config)));
+    // Multiroot/no-folder chats use their common project, otherwise the opt-in
+    // fallback. Do not label a cross-project conversation after its first root.
+    project = projects.size === 1 ? [...projects][0] : (validProject(config.fallbackProject) ? config.fallbackProject : null);
+  } else {
+    if (typeof payload.cwd !== 'string') return { state: 'invalid-context' };
+    project = captureProject(fs.realpathSync(payload.cwd), config);
+  }
   if (!project) return { state: 'out-of-scope' };
   const candidate = latestFinal(payload, config);
   const selected = excerpt(candidate?.message);
