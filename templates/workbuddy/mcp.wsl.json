@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "llm-wiki": {
+      "command": "wsl.exe",
+      "args": [
+        "--distribution", "REPLACE_WITH_YOUR_DISTRIBUTION", "--exec", "/usr/bin/env",
+        "LLM_WIKI_AGENT_PROFILE=workbuddy", "LLM_WIKI_DOMAIN=work",
+        "LLM_WIKI_ROOT=/absolute/linux/path/to/vault", "LLM_WIKI_TARGET_AGENTS=workbuddy",
+        "/absolute/linux/path/to/node", "/absolute/linux/path/to/wikified/bin/llm-wiki-mcp"
+      ],
+      "env": {}
+    }
+  }
+}

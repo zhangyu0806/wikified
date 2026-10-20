@@ -131,6 +131,8 @@ llm-wiki-harness configure --harness codex
 llm-wiki-harness configure --harness cursor
 ```
 
+Pi 与 WorkBuddy 使用显式配置入口，支持 macOS 本地 stdio，以及 Windows 原生客户端通过指定 WSL 发行版启动引擎。身份、资料库、配置路径和诊断层次见 [Pi / WorkBuddy 跨平台接入](docs/PI_WORKBUDDY.md)。新身份不会继承旧 Codex/OpenCode 专属记录的授权；`all` 和默认状态矩阵保留原五种客户端。
+
 配置器会在非交互 PATH 缺少私有 bin 时继续检查：
 
 - Claude/Grok：`~/.local/bin/`
