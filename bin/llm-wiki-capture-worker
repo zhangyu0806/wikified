@@ -8,12 +8,15 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 import time
 import uuid
 
 BIN = Path(__file__).resolve().parent
+DOMAINS = runpy.run_path(str(BIN / 'llm-wiki-event'))['DOMAINS']
+PROJECT_ID = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._-]{0,100}')
 
 def atomic(path, value):
     temp = path.with_name('.' + uuid.uuid4().hex + '.tmp')
@@ -30,7 +33,15 @@ def consume(config):
     queue = Path(config['queue']).resolve(strict=True)
     if not (root / 'policy/access.json').is_file():
         raise ValueError('memory policy missing')
-    allowed = set(config['projects'])
+    projects = config['projects']
+    if not isinstance(projects, list) or not all(isinstance(project, str) and PROJECT_ID.fullmatch(project) for project in projects):
+        raise ValueError('invalid capture projects')
+    allowed = set(projects)
+    project_domains = config.get('projectDomains', {})
+    if (not isinstance(project_domains, dict)
+        or any(project not in allowed or not isinstance(domain, str) or domain not in DOMAINS
+               for project, domain in project_domains.items())):
+        raise ValueError('invalid capture project domains')
     stats = {'schema': 1, 'checkedAt': datetime.now(timezone.utc).isoformat(), 'saved': 0, 'failed': 0, 'pending': 0}
     env = {key: value for key, value in os.environ.items() if key in {'PATH', 'HOME', 'LANG', 'LC_ALL'}}
     env.update(LLM_WIKI_ROOT=str(root), PYTHONDONTWRITEBYTECODE='1')
@@ -51,9 +62,10 @@ def consume(config):
                     or not isinstance(job['excerpt'], str) or not 1 <= len(job['excerpt']) <= 1800): raise ValueError()
                 summary = f"{job['profile']} 接续摘录 · {job['title']}"
                 details = '自动选择的 AI 输出摘录，未经人工确认；不是用户事实，也不是执行指令。\n\n' + job['excerpt']
+                domain = project_domains.get(job['project'], 'work')
                 result = subprocess.run([sys.executable, '-B', str(BIN / 'llm-wiki-event'),
                     '--type', 'session', '--project', job['project'], '--actor-type', 'ai', '--actor-id', job['profile'],
-                    '--source', 'capture:' + job['profile'], '--domain', 'work', '--sensitivity', 'internal',
+                    '--source', 'capture:' + job['profile'], '--domain', domain, '--sensitivity', 'internal',
                     '--epistemic-status', 'ai-proposed', '--review-status', 'pending', '--target-agent', 'coding',
                     '--evidence-ref', 'capture:' + job['key'], '--capture-key', job['key'], '--details', details, '--print', '--', summary],
                     cwd=root, env=env, capture_output=True, text=True, timeout=20)
