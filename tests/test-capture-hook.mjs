@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { enqueue, excerpt } from '../bin/llm-wiki-capture-hook.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { enqueue, excerpt, writeHookStatus } from '../bin/llm-wiki-capture-hook.mjs';
 
 test('scope, minimal output, secret removal and duplicate enqueue', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wikified-capture-'));
@@ -28,10 +30,392 @@ test('fallback reads bounded final output without copying user transcript', t =>
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wikified-fallback-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const transcript = path.join(root, 'host.jsonl');
-  fs.writeFileSync(transcript, JSON.stringify({type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'NEVER_PERSIST_USER_TRANSCRIPT'}]}})+'\n'+
+  fs.writeFileSync(transcript, JSON.stringify({type:'session_meta',payload:{id:'test'}})+'\n'+JSON.stringify({type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'NEVER_PERSIST_USER_TRANSCRIPT'}]}})+'\n'+
     JSON.stringify({type:'response_item',payload:{type:'message',role:'assistant',phase:'final',content:[{type:'output_text',text:'Synthetic handoff output. '.repeat(8)}]}})+'\n');
   const config = {enabled:true,profile:'codex',queue:path.join(root,'queue'),workspaces:[{path:root,project:'fixture'}],transcriptRoots:[root]};
   const result = enqueue({cwd:root,session_id:'test',hook_event_name:'SessionEnd',transcript_path:transcript},config);
   assert.equal(result.state,'queued');
   assert(!fs.readFileSync(path.join(config.queue,result.key+'.json'),'utf8').includes('NEVER_PERSIST'));
+});
+
+
+function fixture(t, rows = []) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wikified-current-capture-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const transcript = path.join(root, 'host.jsonl');
+  const config = { enabled: true, profile: 'codex', queue: path.join(root, 'queue'),
+    workspaces: [{ path: root, project: 'fixture' }], transcriptRoots: [root] };
+  const payload = { cwd: root, session_id: 'fixture-session', turn_id: 'current-turn',
+    hook_event_name: 'PreCompact', transcript_path: transcript };
+  function write(extra, session = 'fixture-session') {
+    fs.writeFileSync(transcript, [
+      { type: 'session_meta', payload: { id: session } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'current-turn' } },
+      ...extra,
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+  }
+  write(rows);
+  return { root, transcript, config, payload, write };
+}
+const syntheticFinal = 'Synthetic final handoff. The implementation has completed and remains an AI proposal awaiting a separate human review.';
+
+function response(text = syntheticFinal, phase = 'final_answer') {
+  return { type: 'response_item', payload: { type: 'message', role: 'assistant', phase,
+    content: [{ type: 'output_text', text }] } };
+}
+function completed(text = syntheticFinal, turn = 'current-turn', thread = 'fixture-session') {
+  return { type: 'event_msg', payload: { type: 'item_completed', turn_id: turn, thread_id: thread,
+    item: { type: 'AgentMessage', phase: 'final_answer', content: [{ type: 'Text', text }] } } };
+}
+
+test('current observed final_answer formats and legacy final all select bounded output', t => {
+  const cases = [
+    [response(), 'transcript-response'],
+    [response(syntheticFinal, 'final'), 'transcript-response'],
+    [completed(), 'transcript-item-completed'],
+    [{ type: 'event_msg', payload: { type: 'task_complete', turn_id: 'current-turn',
+      last_agent_message: syntheticFinal } }, 'transcript-task-complete'],
+    [{ type: 'event_msg', payload: { type: 'agent_message', phase: 'final',
+      message: syntheticFinal } }, 'transcript-agent-message'],
+  ];
+  for (const [row, source] of cases) {
+    const f = fixture(t, [row]);
+    const result = enqueue(f.payload, f.config);
+    assert.equal(result.state, 'queued');
+    assert.equal(result.selectionSource, source);
+    const job = JSON.parse(fs.readFileSync(path.join(f.config.queue, result.key + '.json')));
+    assert.equal(job.excerpt, syntheticFinal);
+    assert.equal(job.sessionRef.length, 64);
+    assert.deepEqual(Object.keys(job).sort(), ['schema', 'key', 'profile', 'project', 'sessionRef', 'title', 'excerpt'].sort());
+  }
+});
+
+test('Stop with absent direct text uses only the requested current turn and deduplicates', t => {
+  const f = fixture(t, [completed()]);
+  const payload = { ...f.payload, hook_event_name: 'Stop', last_assistant_message: null };
+  const first = enqueue(payload, f.config);
+  assert.equal(first.state, 'queued');
+  assert.equal(enqueue({ ...payload, last_assistant_message: '' }, f.config).key, first.key);
+  fs.renameSync(path.join(f.config.queue, first.key + '.json'), path.join(f.config.queue, first.key + '.done'));
+  assert.equal(enqueue(payload, f.config).state, 'already-saved');
+  assert.equal(enqueue({ ...payload, turn_id: 'different-turn' }, f.config).state, 'no-selected-output');
+  assert.equal(enqueue({ ...payload, turn_id: undefined }, f.config).state, 'no-selected-output');
+});
+
+test('new incomplete or interrupted turn never falls back to the previous final', t => {
+  const f = fixture(t, [
+    completed(),
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'new-turn' } },
+    response('NEVER_PERSIST_COMMENTARY'.repeat(8), 'commentary'),
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'new-turn', last_agent_message: null } },
+  ]);
+  for (const event of ['Stop', 'Interrupt', 'PreCompact', 'SessionEnd']) {
+    assert.equal(enqueue({ ...f.payload, hook_event_name: event, turn_id: 'new-turn' }, f.config).state, 'no-selected-output');
+  }
+  assert.equal(enqueue({ ...f.payload, hook_event_name: 'SessionEnd', turn_id: undefined }, f.config).state, 'no-selected-output');
+  assert(!fs.existsSync(f.config.queue));
+});
+
+test('turn_context associates response messages with their actual turn', t => {
+  const f = fixture(t, [
+    { type: 'turn_context', payload: { turn_id: 'different-turn' } },
+    response('NEVER_PERSIST_OTHER_TURN'.repeat(8)),
+    { type: 'turn_context', payload: { turn_id: 'current-turn' } },
+    response(),
+  ]);
+  const result = enqueue(f.payload, f.config);
+  assert.equal(result.state, 'queued');
+  const job = fs.readFileSync(path.join(f.config.queue, result.key + '.json'), 'utf8');
+  assert(!job.includes('NEVER_PERSIST_OTHER_TURN'));
+});
+
+test('wrong session, wrong wrapper thread, user messages and commentary never become final memory', t => {
+  const f = fixture(t, [completed()]);
+  f.write([completed()], 'another-session');
+  assert.equal(enqueue(f.payload, f.config).state, 'no-selected-output');
+  f.write([
+    completed('NEVER_PERSIST_OTHER_THREAD'.repeat(8), 'current-turn', 'another-session'),
+    { type: 'response_item', payload: { type: 'message', role: 'user', phase: 'final_answer',
+      content: [{ type: 'output_text', text: 'NEVER_PERSIST_USER'.repeat(10) }] } },
+    response('NEVER_PERSIST_COMMENTARY'.repeat(8), 'commentary'),
+    { type: 'event_msg', payload: { type: 'agent_message', phase: 'analysis', message: 'NEVER_PERSIST_ANALYSIS'.repeat(8) } },
+    { type: 'event_msg', payload: { type: 'item_completed', thread_id: 'fixture-session', turn_id: 'current-turn',
+      item: { type: 'Reasoning', phase: 'final_answer', content: [{ type: 'Text', text: 'NEVER_PERSIST_REASONING'.repeat(8) }] } } },
+  ]);
+  assert.equal(enqueue(f.payload, f.config).state, 'no-selected-output');
+  assert(!fs.existsSync(f.config.queue));
+});
+
+test('direct nonempty output retains precedence and a short current message cannot reuse old transcript text', t => {
+  const f = fixture(t, [completed()]);
+  assert.equal(enqueue({ ...f.payload, last_assistant_message: 'OK' }, f.config).state, 'no-selected-output');
+  const result = enqueue({ ...f.payload, last_assistant_message: syntheticFinal + ' Direct.' }, f.config);
+  assert.equal(result.selectionSource, 'direct');
+});
+
+test('fallback only reads allowlisted real transcript roots and requires a bounded matching header', t => {
+  const f = fixture(t, [completed()]);
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'wikified-outside-transcript-'));
+  t.after(() => fs.rmSync(other, { recursive: true, force: true }));
+  const outside = path.join(other, 'outside.jsonl');
+  fs.copyFileSync(f.transcript, outside);
+  assert.equal(enqueue({ ...f.payload, transcript_path: outside }, f.config).state, 'no-selected-output');
+  const link = path.join(f.root, 'outside-link.jsonl');
+  try {
+    fs.symlinkSync(outside, link);
+    assert.equal(enqueue({ ...f.payload, transcript_path: link }, f.config).state, 'no-selected-output');
+  } catch (error) {
+    if (error.code !== 'EPERM') throw error; // Windows may not permit a synthetic symlink.
+  }
+  fs.writeFileSync(f.transcript, JSON.stringify(completed()) + '\n');
+  assert.equal(enqueue(f.payload, f.config).state, 'no-selected-output');
+  fs.writeFileSync(f.transcript, JSON.stringify({ type: 'session_meta', payload: { id: 'fixture-session', padding: 'x'.repeat(65536) } }) + '\n' + JSON.stringify(completed()) + '\n');
+  assert.equal(enqueue(f.payload, f.config).state, 'no-selected-output');
+});
+
+test('bounded tail cannot recover a final outside 2 MiB and ignores incomplete trailing JSON', t => {
+  const f = fixture(t, [completed(), { type: 'unrecognized', payload: 'x'.repeat(2 * 1024 * 1024) }]);
+  assert.equal(enqueue(f.payload, f.config).state, 'no-selected-output');
+  f.write([completed()]);
+  fs.appendFileSync(f.transcript, '{"incomplete":');
+  assert.equal(enqueue(f.payload, f.config).state, 'queued');
+});
+
+test('hook status is bounded metadata without transcript paths, bodies, raw IDs or injected error fields', t => {
+  const f = fixture(t);
+  writeHookStatus(f.config, { ...f.payload, session_id: 'PRIVATE_SESSION_ID' }, {
+    state: 'no-selected-output', message: 'PRIVATE_MESSAGE', error: 'PRIVATE_ERROR',
+    selectionSource: 'private-unrecognized-source', key: 'PRIVATE_KEY',
+  });
+  const file = path.join(f.config.queue, 'hook-status.json');
+  const first = JSON.parse(fs.readFileSync(file));
+  assert.equal(first.state, 'no-selected-output');
+  assert.equal(first.event, 'PreCompact');
+  assert.equal(first.sessionRef.length, 64);
+  assert.deepEqual(Object.keys(first).sort(), ['schema', 'checkedAt', 'state', 'event', 'sessionRef', 'coverage'].sort());
+  assert.deepEqual(first.coverage, { workspaceCount: 1, fallbackEnabled: false });
+  const text = JSON.stringify(first);
+  assert(!text.includes('PRIVATE_')); assert(!text.includes(f.root)); assert(!text.includes('transcript'));
+  writeHookStatus(f.config, { hook_event_name: 'SECRET_EVENT' }, { state: 'SECRET_STATE' });
+  assert.equal(JSON.parse(fs.readFileSync(file)).state, 'error');
+  assert.equal(JSON.parse(fs.readFileSync(file)).event, 'unknown');
+  assert.equal(fs.readdirSync(f.config.queue).length, 2);
+});
+
+test('CLI records quiet skip and parse error metadata while returning valid safe hook JSON', t => {
+  const f = fixture(t, [completed()]);
+  const configPath = path.join(f.root, 'config.json');
+  fs.writeFileSync(configPath, JSON.stringify(f.config));
+  const script = fileURLToPath(new URL('../bin/llm-wiki-capture-hook.mjs', import.meta.url));
+  const run = input => spawnSync(process.execPath, [script, configPath], { input, encoding: 'utf8' });
+  const skipped = run(JSON.stringify({ ...f.payload, last_assistant_message: 'OK' }));
+  assert.equal(skipped.status, 0);
+  assert.deepEqual(JSON.parse(skipped.stdout), {});
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.queue, 'hook-status.json'))).state, 'no-selected-output');
+  const failed = run('{PRIVATE_MALFORMED');
+  assert.equal(failed.status, 0);
+  assert.equal(typeof JSON.parse(failed.stdout).systemMessage, 'string');
+  assert(!failed.stdout.includes('PRIVATE_MALFORMED'));
+  assert(!failed.stderr.includes('PRIVATE_MALFORMED'));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.queue, 'hook-status.json'))).state, 'error');
+});
+
+
+test('stale earlier workspace bindings do not hide a valid scoped workspace', t => {
+  const f = fixture(t, [completed()]);
+  f.config.workspaces.unshift({ path: path.join(f.root, 'not-present'), project: 'stale' });
+  assert.equal(enqueue(f.payload, f.config).state, 'queued');
+});
+
+test('fallback rejects hardlinked transcript and a canonical path replaced while open', t => {
+  const f = fixture(t, [completed()]);
+  const link = path.join(f.root, 'linked.jsonl');
+  fs.linkSync(f.transcript, link);
+  assert.equal(enqueue(f.payload, f.config).state, 'no-selected-output');
+  fs.unlinkSync(link);
+  const original = fs.openSync;
+  let replaced = false;
+  fs.openSync = function(file, ...args) {
+    const fd = original.call(this, file, ...args);
+    if (file === f.transcript && !replaced) {
+      replaced = true;
+      fs.renameSync(f.transcript, path.join(f.root, 'original-open.jsonl'));
+      fs.writeFileSync(f.transcript, 'replacement');
+    }
+    return fd;
+  };
+  try {
+    assert.equal(enqueue(f.payload, f.config).state, 'no-selected-output');
+  } finally {
+    fs.openSync = original;
+  }
+  assert(!fs.existsSync(f.config.queue));
+});
+
+test('concise useful results are captured while acknowledgments, empty output and fenced code are skipped', t => {
+  const f = fixture(t);
+  const concise = '第 1 个插口已设置为每天 08:00 开启，15:00 关闭（UTC+8）。';
+  assert(concise.length < 80);
+  assert.equal(excerpt(concise).text, concise);
+  const result = enqueue({ ...f.payload, last_assistant_message: concise }, f.config);
+  assert.equal(result.state, 'queued');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.queue, result.key + '.json'))).excerpt, concise);
+  for (const value of ['OK', '好的', '', ' \n\t ', '```\nprivate code that must not be saved\n```']) {
+    assert.equal(excerpt(value), null);
+  }
+  const syntheticCredential = 'password' + '=' + 'synthetic-value';
+  const syntheticPrivateKey = '-----BEGIN ' + 'PRIVATE KEY-----\nsynthetic-value\n-----END ' + 'PRIVATE KEY-----';
+  for (const value of [syntheticCredential, '密钥：synthetic-value',
+    'Authorization: Bearer synthetic-value', 'Bearer synthetic-value',
+    '[REDACTED_KEY]', syntheticPrivateKey]) {
+    assert.equal(excerpt(value), null);
+  }
+  assert.equal(excerpt(concise + '\n' + syntheticCredential).text, concise);
+});
+
+test('fallback project is explicit opt-in and never matches a sibling path by prefix', t => {
+  const f = fixture(t);
+  const workspace = path.join(f.root, 'work');
+  const sibling = path.join(f.root, 'work-other');
+  fs.mkdirSync(workspace); fs.mkdirSync(sibling);
+  f.config.workspaces = [{ path: workspace, project: 'bound' }];
+  const payload = { ...f.payload, cwd: sibling, last_assistant_message: syntheticFinal };
+  assert.equal(enqueue(payload, f.config).state, 'out-of-scope');
+  f.config.fallbackProject = 'codex-general';
+  const result = enqueue(payload, f.config);
+  assert.equal(result.state, 'queued');
+  const job = JSON.parse(fs.readFileSync(path.join(f.config.queue, result.key + '.json')));
+  assert.equal(job.project, 'codex-general');
+  assert(!JSON.stringify(job).includes(sibling));
+  for (const value of [null, '', '../outside', 'with space', 123, {}]) {
+    f.config.fallbackProject = value;
+    assert.equal(enqueue(payload, f.config).state, 'out-of-scope');
+  }
+});
+
+test('most specific valid path binding wins over a parent and the general fallback', t => {
+  const f = fixture(t);
+  const nested = path.join(f.root, 'nested');
+  const child = path.join(nested, 'child');
+  fs.mkdirSync(child, { recursive: true });
+  f.config.fallbackProject = 'codex-general';
+  f.config.workspaces.push({ path: nested, project: 'nested-project' });
+  const payload = { ...f.payload, cwd: child, last_assistant_message: syntheticFinal };
+  const readProject = result => JSON.parse(fs.readFileSync(path.join(f.config.queue, result.key + '.json'))).project;
+  assert.equal(readProject(enqueue(payload, f.config)), 'nested-project');
+  f.config.workspaces.reverse();
+  assert.equal(readProject(enqueue(payload, f.config)), 'nested-project');
+  f.config.workspaces[0].project = '../invalid';
+  assert.equal(enqueue(payload, f.config).state, 'out-of-scope');
+});
+
+test('fallback works without bindings and status describes coverage without project names or paths', t => {
+  const f = fixture(t);
+  f.config.workspaces = [];
+  f.config.fallbackProject = 'PRIVATE_PROJECT';
+  const result = enqueue({ ...f.payload, last_assistant_message: syntheticFinal }, f.config);
+  assert.equal(result.state, 'queued');
+  writeHookStatus(f.config, f.payload, result);
+  const status = JSON.parse(fs.readFileSync(path.join(f.config.queue, 'hook-status.json')));
+  assert.deepEqual(status.coverage, { workspaceCount: 0, fallbackEnabled: true });
+  assert(!JSON.stringify(status).includes('PRIVATE_PROJECT'));
+  assert(!JSON.stringify(status).includes(f.root));
+});
+
+test('Claude, WorkBuddy, OpenCode and Pi use fixed configuration identities and direct completed text', t => {
+  const f = fixture(t, [completed('Older transcript output that must never be reused by another host.')]);
+  for (const profile of ['claude', 'workbuddy', 'opencode', 'pi']) {
+    const config = { ...f.config, profile };
+    const payload = { ...f.payload, hook_event_name: 'Stop', profile: 'human', domain: 'work',
+      last_assistant_message: syntheticFinal };
+    const result = enqueue(payload, config);
+    assert.equal(result.state, 'queued');
+    const job = JSON.parse(fs.readFileSync(path.join(config.queue, result.key + '.json')));
+    assert.equal(job.profile, profile);
+    assert.equal(job.excerpt, syntheticFinal);
+    assert(!Object.hasOwn(job, 'domain'));
+    assert.equal(enqueue({ ...payload, last_assistant_message: undefined }, config).state, 'no-selected-output');
+    assert.equal(enqueue({ ...payload, hook_event_name: 'SubagentStop' }, config).state, 'ignored-event');
+  }
+});
+
+test('Cursor captures only completed assistant responses and isolates multiroot conversations', t => {
+  const f = fixture(t);
+  const second = path.join(f.root, 'second');
+  fs.mkdirSync(second);
+  const config = { ...f.config, profile: 'cursor', fallbackProject: 'cursor-general' };
+  config.workspaces.push({ path: second, project: 'second-project' });
+  const payload = { hook_event_name: 'afterAgentResponse', conversation_id: 'cursor-session',
+    generation_id: 'turn-1', workspace_roots: [f.root], text: syntheticFinal };
+  const project = result => JSON.parse(fs.readFileSync(path.join(config.queue, result.key + '.json'))).project;
+  assert.equal(project(enqueue(payload, config)), 'fixture');
+  assert.equal(project(enqueue({ ...payload, workspace_roots: [second] }, config)), 'second-project');
+  assert.equal(project(enqueue({ ...payload, workspace_roots: [f.root, second] }, config)), 'cursor-general');
+  assert.equal(project(enqueue({ ...payload, workspace_roots: [] }, config)), 'cursor-general');
+  assert.equal(enqueue({ ...payload, workspace_roots: [f.root, second] },
+    { ...config, fallbackProject: undefined }).state, 'out-of-scope');
+  assert.equal(enqueue({ ...payload, generation_id: '' }, config).state, 'invalid-context');
+  for (const hook_event_name of ['afterAgentThought', 'stop', 'postToolUse', 'subagentStop']) {
+    assert.equal(enqueue({ ...payload, hook_event_name }, config).state, 'ignored-event');
+  }
+  writeHookStatus(config, payload, enqueue(payload, config));
+  const status = JSON.parse(fs.readFileSync(path.join(config.queue, 'hook-status-cursor.json')));
+  assert.equal(status.event, 'Stop');
+  assert.equal(status.state, 'queued');
+  assert(!JSON.stringify(status).includes('cursor-session'));
+});
+
+test('Grok accepts only native end-turn completion and never captures error or session-end text', t => {
+  const f = fixture(t);
+  const config = { ...f.config, profile: 'grok' };
+  const payload = { hookEventName: 'stop', hook_event_name: 'Stop', reason: 'end_turn',
+    sessionId: 'grok-session', promptId: 'turn-1', cwd: f.root, workspaceRoot: f.root,
+    stopHookActive: false, lastAssistantMessage: syntheticFinal };
+  const result = enqueue(payload, config);
+  assert.equal(result.state, 'queued');
+  const job = JSON.parse(fs.readFileSync(path.join(config.queue, result.key + '.json')));
+  assert.equal(job.profile, 'grok');
+  assert.equal(job.excerpt, syntheticFinal);
+  assert.equal(enqueue({ ...payload, stopHookActive: true }, config).state, 'ignored-continuation');
+  for (const reason of ['shutdown', 'channel_closed', undefined]) {
+    assert.equal(enqueue({ ...payload, reason }, config).state, 'ignored-event');
+  }
+  for (const hookEventName of ['stop_failure', 'stop_cancelled', 'post_tool_use', 'subagent_stop']) {
+    assert.equal(enqueue({ ...payload, hookEventName }, config).state, 'ignored-event');
+  }
+});
+
+test('compatibility-scanned native hooks cannot attribute another host or overwrite its status', t => {
+  const f = fixture(t);
+  const foreign = [
+    { hookEventName: 'stop', hook_event_name: 'Stop', reason: 'end_turn', sessionId: 'foreign',
+      workspaceRoot: f.root, cwd: f.root, lastAssistantMessage: syntheticFinal },
+    { hook_event_name: 'afterAgentResponse', conversation_id: 'foreign', generation_id: 'turn',
+      workspace_roots: [f.root], text: syntheticFinal },
+  ];
+  for (const profile of ['claude', 'workbuddy', 'opencode', 'pi', 'codex']) {
+    const config = { ...f.config, profile };
+    for (const native of foreign) {
+      // Even supplied aliases must not trick a direct-text adapter.
+      const payload = { ...native, session_id: 'alias', last_assistant_message: syntheticFinal };
+      const result = enqueue(payload, config);
+      assert.equal(result.state, 'ignored-event');
+      writeHookStatus(config, payload, result);
+    }
+  }
+  assert(!fs.existsSync(f.config.queue));
+});
+
+test('per-profile receipts coexist and unrecognized profiles cannot name status files', t => {
+  const f = fixture(t);
+  writeHookStatus(f.config, f.payload, { state: 'queued' });
+  writeHookStatus({ ...f.config, profile: 'pi' }, f.payload, { state: 'no-selected-output' });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.queue, 'hook-status-codex.json'))).state, 'queued');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.queue, 'hook-status-pi.json'))).state, 'no-selected-output');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.queue, 'hook-status.json'))).state, 'no-selected-output');
+  const invalid = { ...f.config, profile: '../outside' };
+  assert.equal(enqueue(f.payload, invalid).state, 'disabled');
+  writeHookStatus(invalid, f.payload, { state: 'disabled' });
+  assert.deepEqual(fs.readdirSync(f.config.queue).sort(),
+    ['hook-status-codex.json', 'hook-status-pi.json', 'hook-status.json'].sort());
 });
