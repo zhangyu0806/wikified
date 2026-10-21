@@ -160,7 +160,12 @@ class VersionedEvents(unittest.TestCase):
             result=subprocess.run([sys.executable,str(ROOT/"bin/llm-wiki-enrich"),"--agent-profile",profile,"--query","vfourmarker","--max-chars","8000"],env=self.env,text=True,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr);return result.stdout
         for p in ["codex","opencode"]:
-            out=recall(p);self.assertIn(b["id"],out);self.assertNotIn(a["id"],out);self.assertIn("replacement",out)
+            out=recall(p);self.assertIn(b["id"],out);self.assertIn("replacement",out)
+            self.assertNotIn("memory-event: fact " + a["id"],out)
+            self.assertNotIn("memory_id=" + a["memory_id"],out)
+            self.assertNotIn(a["summary"],out)
+            self.assertIn("record_id=" + b["record_id"],out)
+            self.assertIn("revision=" + C["record_revision"](b),out)
         self.cli(request(b,"withdraw"))
         for p in ["codex","opencode"]: self.assertNotIn("replacement",recall(p))
     def test_real_mcp_profiles_have_no_review_authority_and_observe_changes(self):

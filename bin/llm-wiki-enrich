@@ -1902,6 +1902,21 @@ def event_candidates(
             body = f"{body}\n{event['details']}"
         if files:
             body = f"{body}\nFiles: {', '.join(files)}"
+        # Keep the legacy physical memory_id, but expose context's stable
+        # identity and full record hash from this same authorized snapshot.
+        # Unaddressable legacy events retain recall without a fabricated pair.
+        identity = event.get("record_id", event.get("memory_id", event.get("__memory_id")))
+        context_version = {}
+        if (isinstance(event.get("id"), str) and re.fullmatch(r"[0-9a-f]{16}", event["id"])
+                and isinstance(identity, str) and MEMORY_ID_RE.fullmatch(identity)
+                and redact(identity) == identity):
+            try:
+                context_version = {"record_id": identity, "revision": EVENT_REVIEW["record_revision"](event)}
+            except (ValueError, OverflowError):
+                # Old schemas permit opaque values that cannot be represented by
+                # the stricter context hash. Preserve recall without inventing it.
+                if event.get("schema_version") in REVIEW_EVENT_SCHEMAS:
+                    raise
         candidates.append(
             Candidate(
                 score=score,
@@ -1913,6 +1928,7 @@ def event_candidates(
                     "token_overlap": overlap,
                     "decayed_confidence": round(decayed_confidence(event), 6),
                     "lexical_evidence": evidence,
+                    **context_version,
                 },
                 memory_id=str(event["__memory_id"]),
                 governance=dict(event["__governance"]),
@@ -2429,11 +2445,17 @@ def render_markdown(candidates: list[Candidate], max_chars: int, ambient: bool =
         )
         if "path" in candidate.signals:
             chunks.append(f"> page: path={candidate.signals['path']} · revision={candidate.signals['revision']}")
+        elif candidate.source == "memory-event" and "record_id" in candidate.signals:
+            chunks.append(f"> event: record_id={candidate.signals['record_id']} · revision={candidate.signals['revision']}")
         chunks.append(redact(text))
         chunks.append("")
     output = "\n".join(chunks).strip() + "\n"
     if len(output) > max_chars:
-        output = output[: max_chars - 40].rstrip() + "\n\n[truncated by llm-wiki-enrich]\n"
+        prefix = output[: max_chars - 40].rstrip()
+        head, _, last = prefix.rpartition("\n")
+        if last.startswith("> event: ") and not re.fullmatch(r"> event: record_id=\S+ · revision=sha256:[0-9a-f]{64}", last):
+            prefix = head.rstrip()  # Never advertise a partially clipped event/version pair.
+        output = prefix + "\n\n[truncated by llm-wiki-enrich]\n"
     return output
 
 
@@ -2455,6 +2477,8 @@ def _json_payload(candidates: list[Candidate], max_chars: int, *, empty_fragment
         }
         if "path" in candidate.signals:
             base.update({"path": candidate.signals["path"], "revision": candidate.signals["revision"]})
+        elif candidate.source == "memory-event" and "record_id" in candidate.signals:
+            base.update({"record_id": candidate.signals["record_id"], "revision": candidate.signals["revision"]})
         if candidate.fragment is not None:
             base.update({"fragment": candidate.fragment, "truncated": len(base["text"]) < candidate.fragment["length"]})
         trial = payload + [base]

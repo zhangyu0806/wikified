@@ -145,7 +145,7 @@ const tools = [
   },
   {
     name: 'search_pages',
-    description: 'Search authorized wiki pages, explicitly governed notes and memory events. Optional pageFragments returns pages-only JSON with continuous long-page ranges for schemaVersion 2 prepare_context; the default remains mixed Markdown recall. Page results include a root-relative path and full-page revision. Bounded catalog failures never return a silent partial corpus.',
+    description: 'Search authorized wiki pages, explicitly governed notes and memory events. Optional pageFragments returns pages-only JSON with continuous long-page ranges for schemaVersion 2 prepare_context; the default remains mixed Markdown recall. Page results include a root-relative path and full-page revision. Addressable event results include an event record_id and full record revision: copy these as memoryId and revision into an event prepare_context selection, not the legacy physical memory_id. Never guess a missing or truncated revision. Bounded catalog failures never return a silent partial corpus.',
     inputSchema: {
       type: 'object',
       properties: {

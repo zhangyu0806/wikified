@@ -77,6 +77,43 @@ withdrawal, fixed versions, explicit reselect, redaction, budgets, stale
 dependencies, denied sources and generation failures. These are synthetic
 protocol sessions, not validation of live Codex/OpenCode model conversations.
 
+## Event discovery to exact context
+
+Mixed recall (`llm-wiki-enrich --query` and MCP `search_pages`) includes a
+metadata line for each authorized event with a context-addressable identity:
+
+```text
+> event: record_id=event:<stable identity> · revision=sha256:<full record hash>
+```
+
+CLI `--json` exposes the same `record_id` and `revision` fields, also included
+in `signals`. Copy this pair to an event selection's `memoryId` and `revision`.
+The existing `memory_id` and title retain the current physical event identity
+for compatibility; after human review that identity differs from `record_id`.
+The revision hashes the complete current record, including review and
+classification fields, rather than the excerpt or claim text alone.
+
+Search still applies its existing profile, review, source-freshness and final
+snapshot checks. The pair does not grant access or guarantee that a subsequent
+read is unchanged: `prepare_context` checks the current authority and version
+again. Schema 3 requires an independently reviewed v4/v5/v6 event. Addressable
+legacy events can supply a pair for the existing schema 1/2 handoff without
+becoming eligible schema 3 sources. Older events without a valid physical ID
+or whose opaque legacy fields cannot form a portable record hash keep their
+existing recall output but do not receive a fabricated pair.
+
+Metadata counts toward the same search output budget. JSON retains a complete
+pair or omits the candidate under its existing prefix-fit rules; Markdown
+removes an event metadata line if the budget cuts through it and retains the
+truncation notice. Never infer a missing hash or construct a selection from a
+partial line. Ranking, candidate limits and context's 20 / 12,000 / 40,000
+selection/text limits are unchanged.
+
+`python3 -B tests/test-event-recall-revisions.py` tests a real MCP pending
+proposal, separate local human correction, MCP search-derived schema 3 context,
+correction/withdrawal/restore, source revocation, denied metadata, output budgets
+and a final snapshot race using disposable synthetic vaults. No model is called.
+
 ## Authorized page fragments
 
 Opt in to long-page discovery with:
