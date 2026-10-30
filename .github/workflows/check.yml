@@ -54,3 +54,6 @@ jobs:
           node-version: '22'
       - name: Isolated client configuration and MCP transport contracts
         run: python -B tests/test-harness-portability.py
+      - name: Explicit Python helpers with a GUI-like empty PATH
+        if: runner.os == 'macOS'
+        run: python -B tests/test-mcp-python-runtime.py

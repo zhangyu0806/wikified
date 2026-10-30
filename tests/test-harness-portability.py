@@ -55,6 +55,18 @@ class HarnessPortability(unittest.TestCase):
             "/synthetic node/bin/node", "/synthetic engine/llm-wiki-mcp"])
         self.assertNotIn("sh", row["args"])
 
+    def test_explicit_python_is_literal_local_env_or_linux_wsl_argument(self):
+        interpreter = "/synthetic Python 中文/bin/python3"
+        for harness in ("pi", "workbuddy"):
+            local = self.entry(harness, python=interpreter)
+            self.assertEqual(local["env"]["LLM_WIKI_PYTHON"], interpreter)
+            remote = self.entry(harness, python=interpreter, transport="wsl", distribution="Ubuntu")
+            self.assertIn("LLM_WIKI_PYTHON=" + interpreter, remote["args"])
+            self.assertEqual(remote["env"], {})
+        for invalid in ("python3", "", r"C:\Python\python.exe", "/runtime/$PYTHON", "/runtime/python\n"):
+            with self.subTest(invalid=invalid), self.assertRaises(H["HarnessError"]):
+                self.entry(python=invalid)
+
     def test_shell_characters_remain_literal_arguments(self):
         path = "/synthetic 中文/space ' quote ; (literal) & engine"
         row = self.entry(transport="wsl", distribution="Ubuntu", engine=path, root=path)
@@ -172,11 +184,14 @@ class HarnessPortability(unittest.TestCase):
     def test_cli_wsl_configuration_and_static_doctor_are_cross_platform(self):
         common = ["--harness", "pi", "--config", str(self.config), "--transport", "wsl",
                   "--engine", "/synthetic/bin/llm-wiki-mcp", "--root", "/synthetic/vault",
-                  "--wsl-distribution", "Ubuntu", "--node", "/synthetic/node"]
+                  "--wsl-distribution", "Ubuntu", "--node", "/synthetic/node",
+                  "--python", "/synthetic Python 中文/python3"]
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "LLM_WIKI_DISABLE_PATH_DETECTION": "1"}
         cli = [sys.executable, "-B", str(ROOT / "bin/llm-wiki-harness")]
         made = subprocess.run([*cli, "configure", *common], env=env, capture_output=True, text=True)
         self.assertEqual(made.returncode, 0, made.stderr)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertIn("LLM_WIKI_PYTHON=/synthetic Python 中文/python3", config["mcpServers"]["llm-wiki"]["args"])
         checked = subprocess.run([*cli, "doctor", *common, "--json"], env=env, capture_output=True, text=True)
         self.assertEqual(checked.returncode, 0, checked.stderr)
         report = json.loads(checked.stdout)
@@ -184,6 +199,7 @@ class HarnessPortability(unittest.TestCase):
         self.assertEqual(report["transport"]["state"], "not-run")
         self.assertEqual(report["realClientAcceptance"], "not-verified")
         self.assertEqual(report["vaultAuthorization"], "not-tested")
+        self.assertEqual(report["helperRuntime"], "not-tested")
         # A stale entry makes doctor fail before any executable can be launched.
         config = json.loads(self.config.read_text(encoding="utf-8"))
         config["mcpServers"]["llm-wiki"]["command"] = "untrusted-no-execution"
@@ -198,6 +214,7 @@ class HarnessPortability(unittest.TestCase):
         for args in (["configure", "--harness", "pi"],
                      ["configure", "--harness", "pi", "--harness", "workbuddy"],
                      ["configure", "--harness", "human"],
+                     ["status", "--python", "/synthetic/python3"],
                      ["status", "--engine", "/synthetic/bin/llm-wiki-mcp"]):
             with self.subTest(args=args):
                 result = subprocess.run([*cli, *args], capture_output=True, text=True)

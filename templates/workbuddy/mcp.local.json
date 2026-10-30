@@ -7,7 +7,8 @@
         "LLM_WIKI_AGENT_PROFILE": "workbuddy",
         "LLM_WIKI_DOMAIN": "work",
         "LLM_WIKI_ROOT": "/absolute/path/to/vault",
-        "LLM_WIKI_TARGET_AGENTS": "workbuddy"
+        "LLM_WIKI_TARGET_AGENTS": "workbuddy",
+        "LLM_WIKI_PYTHON": "/absolute/path/to/python3"
       }
     }
   }
