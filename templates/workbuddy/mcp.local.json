@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "llm-wiki": {
+      "command": "/absolute/path/to/node",
+      "args": ["/absolute/path/to/wikified/bin/llm-wiki-mcp"],
+      "env": {
+        "LLM_WIKI_AGENT_PROFILE": "workbuddy",
+        "LLM_WIKI_DOMAIN": "work",
+        "LLM_WIKI_ROOT": "/absolute/path/to/vault",
+        "LLM_WIKI_TARGET_AGENTS": "workbuddy"
+      }
+    }
+  }
+}

@@ -2,12 +2,14 @@
 """Prepare bounded, version-pinned context from existing assistant authority only."""
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import re
 import runpy
+import stat
 import sys
 
 sys.dont_write_bytecode = True
@@ -16,23 +18,147 @@ MAX_SELECTIONS = 20
 MAX_TEXT = 40000
 MAX_ITEM_TEXT = 12000
 REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
-PROFILES = ("coding", "codex", "opencode", "claude", "cursor", "grok", "planning", "reflection")
+PROFILES = ("coding", "codex", "opencode", "claude", "cursor", "grok", "pi", "workbuddy", "planning", "reflection")
+
+
+class VerifiedResult(dict):
+    """Keep the captured authority alive through final output serialization."""
+    def __init__(self, value, verify):
+        super().__init__(value)
+        self.verify = verify
+
+
+def emit(result, *, ensure_ascii=True):
+    # Finish all fallible rendering before the last observation check. Retain
+    # the complete pack until then; no item or digest prefix is published.
+    output = (json.dumps(result, ensure_ascii=ensure_ascii, allow_nan=False) + "\n").encode("utf-8")
+    result.verify()
+    sys.stdout.buffer.write(output)
+
+
+def _directory_signature(path, *, optional=False):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if optional:
+            return None
+        raise
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise ValueError("unsafe generation directory")
+    return ENGINE["_event_stat_signature"](info)
+
+
+def _generation_directories(root, source_review_enabled):
+    # Parent identities bind the canonical route to the vault, without watching
+    # unrelated writes in shared ancestors such as a system temporary directory.
+    ancestors = [(str(path), _directory_signature(path)[:2]) for path in reversed(root.parents)]
+    result = {"ancestors": ancestors, "root": _directory_signature(root),
+              "policy": _directory_signature(root / "policy"),
+              "memory": _directory_signature(root / "memory", optional=True),
+              "sourceReview": (_directory_signature(root / "memory/source-review")
+                               if source_review_enabled else None), "pageTrees": []}
+    # The ordinary page manifest records present Markdown files. Directory
+    # ctime/mtime also detect a file/tree created and removed between batches.
+    # Do not follow links or read page bodies to construct this observation.
+    visited_entries = 0
+    for collection in ("wiki", "notes"):
+        directory = root / collection
+        initial = _directory_signature(directory, optional=True)
+        result["pageTrees"].append((collection, initial))
+        if initial is None:
+            continue
+        pending = [directory]
+        while pending:
+            current = pending.pop()
+            before = _directory_signature(current)
+            children = []
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    visited_entries += 1
+                    if visited_entries > ENGINE["MAX_PAGE_DIRECTORY_ENTRIES"]:
+                        raise ValueError("generation directory limit")
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode):
+                        children.append(current / entry.name)
+                    elif stat.S_ISLNK(info.st_mode):
+                        result["pageTrees"].append((str((current / entry.name).relative_to(root)),
+                                                   ENGINE["_event_stat_signature"](info)))
+            if _directory_signature(current) != before:
+                raise ValueError("generation directory changed")
+            if current != directory:
+                result["pageTrees"].append((str(current.relative_to(root)), before))
+            pending.extend(sorted(children, reverse=True))
+    result["pageTrees"].sort(key=lambda item: item[0])
+    return result
+
+
+def _generation_value(value):
+    # Raw policy/ledger bytes stay inside this process. Hash each byte string
+    # before canonicalizing the outer observation; emit only the final digest.
+    if isinstance(value, bytes):
+        return {"sha256": hashlib.sha256(value).hexdigest()}
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _generation_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_generation_value(item) for item in value]
+    if value is None or type(value) in (str, int, bool):
+        return value
+    raise ValueError("invalid generation component")
+
+
+def observe_generation(root, profile):
+    """Opaque filesystem observation for one complete, caller-bracketed search."""
+    if profile not in PROFILES:
+        raise ValueError("assistant profile required")
+    root = root.absolute()
+    if root.resolve(strict=True) != root:
+        raise ValueError("unsafe root")
+    access = ENGINE["access_context"](root, profile)
+    directories = _generation_directories(root, "source_review" in access.policy_document)
+    pages = ENGINE["PageGeneration"](root, access)
+    events = ENGINE["_event_manifest"](root / "memory/events")
+    value = {"protocol": "wikified-search-generation/v1", "profile": access.profile_name,
+             "root": access.root_identity, "policy": access.policy_generation,
+             "pages": [(relative, signature) for _, _, relative, signature in pages.manifest],
+             "directories": directories, "events": events,
+             "sourceReview": pages.source_review._generation if pages.source_review is not None else None}
+    def verify():
+        pages.verify()
+        if (_generation_directories(root, "source_review" in access.policy_document) != directories
+                or ENGINE["_event_manifest"](root / "memory/events") != events):
+            raise ValueError("generation changed")
+        pages.verify()
+    digest = hashlib.sha256(json.dumps(_generation_value(value), sort_keys=True,
+        ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+    verify()
+    return VerifiedResult({"schemaVersion": 1, "profile": profile, "generation": "sha256:" + digest}, verify)
 
 
 def request(value):
-    if not isinstance(value, dict) or set(value) != {"schemaVersion", "selections"} or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1:
+    if not isinstance(value, dict) or set(value) != {"schemaVersion", "selections"} or type(value["schemaVersion"]) is not int or value["schemaVersion"] not in (1, 2, 3):
         raise ValueError("invalid context request")
     rows = value["selections"]
     if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_SELECTIONS:
         raise ValueError("invalid context selection")
     seen = set()
     for row in rows:
-        if (not isinstance(row, dict) or set(row) != {"kind", "memoryId", "revision"}
-                or row["kind"] not in ("page", "event")
+        fragment = isinstance(row, dict) and row.get("kind") == "page-fragment" and value["schemaVersion"] in (2, 3)
+        keys = {"kind", "memoryId", "revision"}
+        if fragment:
+            keys |= {"projectionRevision", "offset", "length"}
+        if (not isinstance(row, dict) or set(row) != keys
+                or row["kind"] not in (("page-fragment",) if fragment else ("page", "event"))
                 or not isinstance(row["memoryId"], str) or not ENGINE["MEMORY_ID_RE"].fullmatch(row["memoryId"])
                 or ENGINE["redact"](row["memoryId"]) != row["memoryId"]
                 or not isinstance(row["revision"], str) or not REVISION.fullmatch(row["revision"])
                 or row["memoryId"] in seen):
+            raise ValueError("invalid context selection")
+        if fragment and (not isinstance(row["projectionRevision"], str) or not REVISION.fullmatch(row["projectionRevision"])
+                         or type(row["offset"]) is not int or not 0 <= row["offset"] <= 2**53 - 1
+                         or type(row["length"]) is not int or not 1 <= row["length"] <= MAX_ITEM_TEXT
+                         or row["offset"] + row["length"] > 2**53 - 1):
             raise ValueError("invalid context selection")
         seen.add(row["memoryId"])
     return rows
@@ -51,7 +177,7 @@ def prepare(root, profile, value):
     pages = ENGINE["page_snapshots"](root, access, None)
     before_events = ENGINE["_event_manifest"](root / "memory/events")
     with contextlib.redirect_stderr(io.StringIO()):
-        events = ENGINE["load_events"](root, access)
+        events = ENGINE["load_events"](root, access, pages=pages)
     available = {}
     def add(identity, entry):
         if identity in available:
@@ -66,10 +192,15 @@ def prepare(root, profile, value):
         if not isinstance(identity, str):
             continue
         add(identity, ("page", ENGINE["page_revision"](snapshot), entry.relative,
-                       ENGINE["redact"](ENGINE["projected_page_text"](snapshot))))
+                       ENGINE["redact"](ENGINE["projected_page_text"](snapshot)),
+                       {key: snapshot.metadata.governance[key] for key in ("domain", "sensitivity")}))
     for event in events:
         if event["__governance"]["review_status"] != "approved":
             continue
+        if value["schemaVersion"] == 3:
+            if not ENGINE["event_source_eligible"](event) or not ENGINE["SOURCE_FRESHNESS"]["assess"](
+                    event["record_id"], events.source_nodes)["reuseAllowed"]:
+                continue
         identity = event.get("record_id", event.get("memory_id", event.get("__memory_id")))
         if not isinstance(identity, str) or not ENGINE["MEMORY_ID_RE"].fullmatch(identity):
             raise ValueError("invalid identity")
@@ -77,30 +208,45 @@ def prepare(root, profile, value):
         if not isinstance(event_id, str) or not re.fullmatch(r"[0-9a-f]{16}", event_id):
             continue
         add(identity, ("event", ENGINE["EVENT_REVIEW"]["record_revision"](event), event_id,
-                       ENGINE["redact"](str(event.get("summary", "")) + "\n" + str(event.get("details", "")))))
+                       ENGINE["redact"](str(event.get("summary", "")) + "\n" + str(event.get("details", ""))),
+                       {key: event["__governance"][key] for key in ("domain", "sensitivity")}))
     items, used = [], 0
     for selection in selections:
         item = {"selection": dict(selection), "status": "unavailable"}
         current = available.get(selection["memoryId"])
-        if current is not None and current[0] == selection["kind"]:
-            kind, revision, locator, text = current
+        fragment = selection["kind"] == "page-fragment"
+        if current is not None and current[0] == ("page" if fragment else selection["kind"]):
+            kind, revision, locator, text, governance = current
             if ENGINE["redact"](locator) != locator:
                 raise ValueError("unsafe metadata")
             if revision != selection["revision"]:
                 # Only already-authorized records can reveal a newer revision.
                 item = {**item, "status": "changed", "currentRevision": revision}
-            elif len(text) > MAX_ITEM_TEXT or used + len(text) > MAX_TEXT:
-                item = {**item, "status": "too-large"}
             else:
-                item = {**item, "status": "ready", "locator": locator, "text": text}
-                used += len(text)
+                if fragment:
+                    projection = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+                    start, end = selection["offset"], selection["offset"] + selection["length"]
+                    if projection != selection["projectionRevision"] or end > len(text):
+                        items.append(item)
+                        continue
+                    text = text[start:end]
+                if len(text) > MAX_ITEM_TEXT or used + len(text) > MAX_TEXT:
+                    item = {**item, "status": "too-large"}
+                else:
+                    item = {**item, "status": "ready", "locator": locator, "text": text}
+                    if fragment or (value["schemaVersion"] == 3 and kind == "event"):
+                        item["governance"] = governance
+                    used += len(text)
         items.append(item)
     # Fence the entire result, not just each individual read. Never return a
     # partial pack after a policy, file, source-review or event generation race.
-    if before_events != ENGINE["_event_manifest"](root / "memory/events"):
-        raise ValueError("events changed")
-    pages.verify()
-    return {"schemaVersion": 1, "profile": profile, "items": items}
+    def verify():
+        if before_events != ENGINE["_event_manifest"](root / "memory/events"):
+            raise ValueError("events changed")
+        events.verify()
+        pages.verify()
+    verify()
+    return VerifiedResult({"schemaVersion": value["schemaVersion"], "profile": profile, "items": items}, verify)
 
 
 class Parser(argparse.ArgumentParser):
@@ -112,17 +258,23 @@ def main():
     parser = Parser(allow_abbrev=False)
     parser.add_argument("--root", default=os.environ.get("LLM_WIKI_ROOT", str(Path.home() / "llm-wiki")))
     parser.add_argument("--agent-profile", required=True, choices=PROFILES)
-    parser.add_argument("--request", required=True)
-    for flag in ("--root", "--agent-profile", "--request"):
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--request")
+    mode.add_argument("--observe-generation", action="store_true",
+                      help="Return an opaque read-only filesystem generation for bracketing a complete search.")
+    for flag in ("--root", "--agent-profile", "--request", "--observe-generation"):
         if sum(arg == flag or arg.startswith(flag + "=") for arg in sys.argv[1:]) > 1:
             raise ValueError("duplicate argument")
     args = parser.parse_args()
+    if args.observe_generation:
+        emit(observe_generation(Path(args.root), args.agent_profile))
+        return
     if len(args.request.encode("utf-8")) > 16384:
         raise ValueError("request too large")
     value = json.loads(args.request, object_pairs_hook=ENGINE["_event_json_object"],
                        parse_constant=ENGINE["_event_json_constant"])
     result = prepare(Path(args.root), args.agent_profile, value)
-    print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+    emit(result, ensure_ascii=False)
 
 
 if __name__ == "__main__":

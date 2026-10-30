@@ -11,7 +11,7 @@ from typing import Any
 LIMITS = {"depth": 32, "visited": 256, "references": 256, "snapshotNodes": 10000}
 IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 REVISION = re.compile(r"sha256:[0-9a-f]{64}")
-KINDS = {"document", "conversation", "task", "external"}
+KINDS = {"document", "event", "conversation", "task", "external"}
 RELATIONS = {"current-derived", "historical-citation", "independent-judgment"}
 RANK = {"current": 0, "unassessed": 1, "stale": 2, "incomplete": 3, "unavailable": 4}
 
@@ -51,6 +51,7 @@ def assess(root_id: Any, nodes: Any) -> dict[str, Any]:
     for node in nodes:
         if (not isinstance(node, dict) or not _identity(node.get("id"))
             or not _revision(node.get("revision")) or node["id"] in index
+            or not isinstance(node.get("kind", "document"), str) or node.get("kind", "document") not in {"document", "event"}
             or ("opaqueSources" in node and not isinstance(node["opaqueSources"], bool))):
             return _assessment("unavailable")
         index[node["id"]] = node
@@ -100,11 +101,13 @@ def assess(root_id: Any, nodes: Any) -> dict[str, Any]:
             if relation != "current-derived":
                 merge("unassessed")
                 continue
-            if source["kind"] != "document" or not _revision(source.get("revision")) or not _locator(source.get("locator")):
+            if (source["kind"] not in {"document", "event"} or not _revision(source.get("revision"))
+                or (not _locator(source.get("locator")) if source["kind"] == "document"
+                    else source.get("locator") not in (None, ""))):
                 merge("unavailable")
                 continue
             target = index.get(source["id"])
-            if target is None:
+            if target is None or target.get("kind", "document") != source["kind"]:
                 merge("unavailable")
                 continue
             if target["revision"] != source["revision"]:

@@ -131,6 +131,8 @@ llm-wiki-harness configure --harness codex
 llm-wiki-harness configure --harness cursor
 ```
 
+Pi 与 WorkBuddy 使用显式配置入口，支持 macOS 本地 stdio，以及 Windows 原生客户端通过指定 WSL 发行版启动引擎。身份、资料库、配置路径和诊断层次见 [Pi / WorkBuddy 跨平台接入](docs/PI_WORKBUDDY.md)。新身份不会继承旧 Codex/OpenCode 专属记录的授权；`all` 和默认状态矩阵保留原五种客户端。
+
 配置器会在非交互 PATH 缺少私有 bin 时继续检查：
 
 - Claude/Grok：`~/.local/bin/`
@@ -350,6 +352,15 @@ Codex 原生 Memories 与 Wikified 是两套系统。本安装器不启用、清
 
 ## 事件生命周期与召回评测
 
+需要让 AI 结论随来源笔记失效时，可通过独立人工审核显式绑定来源，追加
+[v5 来源事件](docs/EVENT_SOURCE_FRESHNESS.md)。来源改版、撤回、失权或被 hold 后，
+助手读取会重新核对并拒绝复用；恢复需要显式重绑适用版本。默认 MCP 提案仍为 v3，
+旧事件不自动迁移，人审目录需显式使用 v2。
+
+以另一条已审事件作为来源时，使用同一独立审核流程追加
+[v6 事件依赖](docs/EVENT_EVENT_DEPENDENCIES.md)，人审目录需显式使用 v3。
+它保留混合笔记／事件依赖的精确版本、权限核对与原输出预算，不自动批准新结论。
+
 事件 schema v3 继续保持 append-only，并在既有 v1/v2 数据模型上加入
 稳定 `memory_id`、actor、领域、敏感度、认知状态、人审状态、目标 Agent 与证据引用。
 旧 v1/v2 行不迁移也不改写；兼容读取时缺失的访问字段按
@@ -391,6 +402,18 @@ llm-wiki-eval --json
 报告同时给出 hybrid 与保留的 `legacy` 基线 Recall@5 / MRR，并检查项目隔离、时间
 衰减、替代与有效期、无关查询零上下文、凭据脱敏和有界合法 JSON。`legacy` 仅供
 回归比较，不建议作为日常检索模式。
+
+查询或文件检索可加 `--source-scope pages`，仅返回已通过现有治理检查的 wiki/note
+页面，并在 `--limit` 和 `--max-chars` 生效前排除事件、图谱提示，避免这些结果占满
+页面候选。默认 `--source-scope all` 保持混合召回；页面排序、权限、审核、来源与
+完整快照检查不变，事件快照损坏时仍整体失败。`pages` 不可与 `--read-page` 或
+`--session-start` 混用。
+
+长页可显式加 `--page-fragments --source-scope pages --query "主题" --json`：
+超过 12,000 Unicode 码点的安全投影会附上原文版本、投影版本和连续片段范围，
+供 [context schema 2](docs/CONTINUING_CONTEXT.md#authorized-page-fragments) 重新授权读取。
+搜索文本仅是该范围的预览，最终交接仍限制每项 12,000、总计 40,000 码点和 20 个
+唯一来源；默认搜索和 schema 1 整页读取不变。
 
 `llm-wiki-health` 现在也报告 `graph_status` / `graph_issues`：Graphify manifest 缺失、
 损坏，或 wiki 输入比 manifest 更新时会明确标成 missing / invalid / stale。默认仍是

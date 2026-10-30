@@ -122,8 +122,8 @@ class Context(unittest.TestCase):
         row = self.page()
         original = E["load_events"]
         for target in ("notes/one.md", "policy/access.json", "memory/events/new.jsonl"):
-            def mutate(root, access):
-                result = original(root, access)
+            def mutate(root, access, **kwargs):
+                result = original(root, access, **kwargs)
                 with (self.root / target).open("a") as handle: handle.write("\n")
                 return result
             with patch.dict(E, load_events=mutate):

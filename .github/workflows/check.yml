@@ -33,3 +33,24 @@ jobs:
           node-version: '22'
       - name: Syntax, all isolated suites and public secret scan
         run: python3 -B scripts/check.py
+
+  harness-portability:
+    name: Client configuration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Isolated client configuration and MCP transport contracts
+        run: python -B tests/test-harness-portability.py

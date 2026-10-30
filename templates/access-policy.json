@@ -34,6 +34,24 @@
       "allow_raw": false,
       "allow_direct_graph": false
     },
+    "pi": {
+      "domains": ["work"],
+      "max_sensitivity": "internal",
+      "review_states": ["approved"],
+      "target_mode": "self",
+      "accepted_targets": ["pi", "coding"],
+      "allow_raw": false,
+      "allow_direct_graph": false
+    },
+    "workbuddy": {
+      "domains": ["work"],
+      "max_sensitivity": "internal",
+      "review_states": ["approved"],
+      "target_mode": "self",
+      "accepted_targets": ["workbuddy", "coding"],
+      "allow_raw": false,
+      "allow_direct_graph": false
+    },
     "claude": {
       "domains": ["work"],
       "max_sensitivity": "internal",
