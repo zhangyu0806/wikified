@@ -212,6 +212,21 @@ fi
 DEDUPE=$(resolve_tool llm-wiki-dedupe-events || true)
 ALLOW_DEDUPE=1
 
+# ---------- 阶段：自动提交本地改动 ----------
+# 以前脏工作区一律跳过 merge/push，而会话自动写入的 memory/events、raw/imports
+# 几乎每次都让仓库变脏，结果同步长期卡死（真实踩过的坑：office 多日未同步）。
+# 现在先把全部未提交改动（.gitignore 已排除派生物/运行态/敏感暂存）提交，再 merge。
+# 提交走 pre-commit 门禁（secret-scan + JSONL 去重校验）；门禁拒绝即 fatal，不写戳。
+phase_start autocommit
+if [[ -n "$(run_git status --porcelain)" ]]; then
+  run_git add -A >>"$LOG" 2>&1 || fatal "自动提交：git add 失败"
+  if ! run_git commit -m "chore: auto-commit local changes before sync [$PROFILE]" >>"$LOG" 2>&1; then
+    fatal "自动提交被拒绝（多半是 pre-commit 发现疑似凭据），改动已 staged 保留，请处理后重跑"
+  fi
+  log_line "已自动提交本地改动"
+fi
+phase_success
+
 # ---------- 阶段：拉取 ----------
 if [[ "$MODE" == sync || "$MODE" == pull ]]; then
   phase_start fetch
